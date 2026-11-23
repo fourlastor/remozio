@@ -7,11 +7,13 @@ import dev.sebastiano.remozio.android.RemozioApplication
 import dev.sebastiano.remozio.android.biometrics.AndroidPairingBiometrics
 import dev.sebastiano.remozio.android.biometrics.PairingBiometricResult
 import dev.remozio.protocol.PairingTranscript
+import dev.remozio.protocol.RePairInvitation
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-internal enum class PairingPhase { CLOSED, INPUT, CONNECTING, COMPARING, PREPARING, BIOMETRIC, SUBMITTING, COMPLETE, FAILED, EXPIRED, CLOSING }
+internal enum class RePairAvailability { ELIGIBLE, PENDING, UNAVAILABLE }
+internal enum class PairingPhase { CLOSED, INPUT, CONNECTING, COMPARING, PREPARING, BIOMETRIC, SUBMITTING, COMPLETE, RECOVERY_PENDING, FAILED, EXPIRED, CLOSING }
 internal data class PairingScreenState(
     val phase: PairingPhase = PairingPhase.CLOSED,
     val phoneSuffix: String = "",
@@ -40,11 +42,30 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
         foreground = value
         if (!value) foregroundRevision++
     }
+    suspend fun inspectRePair(input: String): RePairAvailability {
+        return try {
+            app.pairing.inspectRePair(RePairInvitation.importText(input.trim()))
+            RePairAvailability.ELIGIBLE
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: RePairAlreadyPending) {
+            RePairAvailability.PENDING
+        } catch (_: Exception) {
+            RePairAvailability.UNAVAILABLE
+        }
+    }
+
     fun connect(text: String) {
         if (mutable.value.phase != PairingPhase.INPUT || operation?.isActive == true) return
         val owner = AndroidPairingAttempt(app, scope, app.pairing)
         attempt = owner
-        mutable.value = PairingScreenState(PairingPhase.CONNECTING, owner.phoneSuffix)
+        val rePair = text.trim().startsWith("remozio-repair:")
+        val suffix = if (rePair) runCatching {
+            RePairInvitation.importText(text.trim()).predecessor.phoneID.copyBytes().takeLast(4).joinToString("") {
+                "%02X".format(it.toInt() and 255)
+            }
+        }.getOrDefault("") else owner.phoneSuffix
+        mutable.value = PairingScreenState(PairingPhase.CONNECTING, suffix)
         operation = scope.launch {
             try {
                 val transcript = owner.connect(text)
@@ -56,7 +77,14 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
                         expiresElapsedMillis = SystemClock.elapsedRealtime() + remaining.toLong())
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { if (attempt === owner) mutable.value = mutable.value.copy(phase = PairingPhase.FAILED) }
+            catch (failure: Exception) {
+                val result = app.retirePairing(owner).await()
+                if (attempt === owner) {
+                    if (result.isSuccess) attempt = null
+                    mutable.value = mutable.value.copy(phase = if (failure is RePairAlreadyPending)
+                        PairingPhase.RECOVERY_PENDING else PairingPhase.FAILED, mayHaveSavedSetup = result.isFailure)
+                }
+            }
         }
     }
     fun confirmComparison() {

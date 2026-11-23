@@ -57,6 +57,25 @@ class PairingSetupChannelCommonTest {
         assertEquals(1, stream.closes)
     }
 
+    @Test fun rePairDoesNotWriteAProposalWhenTheDurableCheckpointFails() = runBlocking {
+        val stream = Stream(listOf(wire(frame("hello"))))
+        val parent = SupervisorJob()
+        val phone = proposal.phone.scope.value.values[2] as CborValue.Bytes
+        val epoch = proposal.phone.scope.value.values[3] as CborValue.Bytes
+        val predecessor = epoch.copyBytes().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val rePair = PairingPhoneProposal(proposal.phone, proposal.transportKey, proposal.decisionKey, proposal.biometricKey,
+            PairingReplacement(phone.copyBytes(), predecessor))
+        val channel = PairingSetupChannel.authenticate(CoroutineScope(parent), stream, invitation, rePair)
+        try {
+            assertFailsWith<IllegalStateException> { channel.awaitTranscript { error("Archive write failed") } }
+            assertTrue(stream.sent.isEmpty())
+            assertFails { channel.awaitTranscript() }
+        } finally {
+            channel.closeAndJoin()
+            parent.cancelAndJoin()
+        }
+    }
+
     @Test fun wrongFirstFrameClosesTheStreamBeforeAnythingIsSent() = runBlocking {
         val stream = Stream(listOf(wire(frame("proposal"))))
         val parent = SupervisorJob()

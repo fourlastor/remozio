@@ -36,6 +36,7 @@ class StoredMacInventoryTest {
         assertEquals(listOf(first.recordID, second.recordID), result.macs.map { it.recordID })
         assertEquals(listOf("Same display name", "Same display name"), result.macs.map { it.label })
         assertEquals(listOf(false, true), result.macs.map { it.setupIncomplete })
+        assertTrue(result.macs.all { it.revision == 5uL && !it.rePair })
         assertEquals(before, storage.writes)
         assertEquals(1, storage.closes)
         assertFailsWith<EnrollmentStoreUnavailable> { store.snapshot() }

@@ -1,6 +1,7 @@
 package dev.remozio.phone.crypto
 
 import dev.remozio.pairing.PairingSetupChannel
+import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.transport.*
 import dev.remozio.protocol.*
 import java.net.InetAddress
@@ -16,8 +17,10 @@ import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import javax.crypto.KeyGenerator
 import javax.net.ssl.KeyManager
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.serialization.json.*
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
@@ -36,13 +39,14 @@ class PairingSetupInteropTest {
         val failure = assertFails { withTimeout(timeoutMillis) { operation() } }
         assertFalse(failure is TimeoutCancellationException, "A timeout does not prove rejection")
     }
-    private inner class Fixture(private val holdPairingStage: Boolean = false, rePair: Boolean = false) : AutoCloseable {
+    private inner class Fixture(private val holdPairingStage: Boolean = false, rePair: Boolean = false, dropRePairReceipt: Boolean = false) : AutoCloseable {
         val phone = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-phone").build()
         val mac = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-mac").build()
         val biometric = key(); val decision = key()
         val directory = Files.createTempDirectory("remozio-pairing-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         private val process: Process
         val port: Int
+        val receiptPort: Int?
         val invitation: PairingInvitation
         val rePairInvitation: RePairInvitation?
         val keys: Array<KeyManager> = arrayOf(HandshakeCertificates.Builder().heldCertificate(phone).build().keyManager)
@@ -59,12 +63,27 @@ class PairingSetupInteropTest {
                 started = ProcessBuilder(System.getProperty("remozio.test.tlsPeer"), identity.toString())
                     .redirectError(directory.resolve("stderr.log").toFile()).start()
                 process = started
-                process.outputStream.write(("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) +
-                    "\",\"pairing\":true,\"holdPairingStage\":" + holdPairingStage + ",\"rePair\":" + rePair + "}\n").toByteArray()); process.outputStream.flush()
+                val arguments = buildJsonObject {
+                    put("peerPublicKey", Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded))
+                    put("pairing", true)
+                    put("holdPairingStage", holdPairingStage)
+                    put("rePair", rePair)
+                    put("dropRePairReceipt", dropRePairReceipt)
+                }
+                process.outputStream.write((arguments.toString() + "\n").encodeToByteArray())
+                process.outputStream.flush()
                 val executor = Executors.newSingleThreadExecutor()
-                val line = try { executor.submit<String> { process.inputStream.bufferedReader().readLine() }.get(10, TimeUnit.SECONDS) }
-                finally { executor.shutdownNow() }
-                val output = Json.parseToJsonElement(line).jsonObject
+                val output = try {
+                    executor.submit<Map<String, JsonElement>> {
+                        val reader = process.inputStream.bufferedReader()
+                        buildMap {
+                            repeat(if (dropRePairReceipt) 2 else 1) {
+                                putAll(Json.parseToJsonElement(reader.readLine()).jsonObject)
+                            }
+                        }
+                    }.get(10, TimeUnit.SECONDS)
+                } finally { executor.shutdownNow() }
+                receiptPort = output["receiptPort"]?.jsonPrimitive?.int
                 port = output.getValue("port").jsonPrimitive.int
                 val text = output.getValue("invitation").jsonPrimitive.content
                 rePairInvitation = if (rePair) RePairInvitation.importText(text) else null
@@ -82,8 +101,8 @@ class PairingSetupInteropTest {
             return PairingPhoneProposal(offer, PairingKey(ByteArray(16) { 5 }, point(transport)),
                 PairingKey(ByteArray(16) { 6 }, point(decision)), PairingKey(ByteArray(16) { 7 }, point(biometric)), replacement)
         }
-        suspend fun open(parent: CoroutineScope): EncryptedRecordTransport = DirectTCPConnector().connect(parent,
-            InetSocketAddress(InetAddress.getByAddress(byteArrayOf(127,0,0,1)), port))
+        suspend fun open(parent: CoroutineScope, destination: Int = port): EncryptedRecordTransport = DirectTCPConnector().connect(parent,
+            InetSocketAddress(InetAddress.getByAddress(byteArrayOf(127,0,0,1)), destination))
         fun proof(transcript: PairingTranscript): ByteArray = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
             initSign(biometric.private); update(transcript.signingInput(PairingProofPurpose.PHONE_BIOMETRIC)); sign()
         })
@@ -131,6 +150,77 @@ class PairingSetupInteropTest {
                 val receipt = withTimeout(5000) { channel.submitProof(transcript.digest(), f.proof(transcript)) }
                 assertTrue(transcript.verify(receipt, f.invitation.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
             } finally { channel?.closeAndJoin(); owner.cancelAndJoin() }
+        }
+    }
+
+    @Test fun rePairRecoversTheLostReceiptOverTheNewKeyAfterArchiveReopen(): Unit = runBlocking {
+        Fixture(rePair = true, dropRePairReceipt = true).use { f ->
+            fun id(value: Int) = ByteArray(16) { value.toByte() }
+            val invitation = checkNotNull(f.rePairInvitation)
+            val proposal = f.proposal(replacement = invitation.predecessor)
+            val cipher = EnrollmentCipher(KeyGenerator.getInstance("AES").apply { init(256) }.generateKey(), 65_536)
+            val storage = object : EnrollmentStorage {
+                var contents: ByteArray? = null
+                override fun read(maximumBytes: Int) = contents?.copyOf()
+                override fun replace(ciphertext: ByteArray) { contents = ciphertext.copyOf() }
+                override fun close() = Unit
+            }
+            fun oldKey(role: EnrollmentKeyRole): EnrollmentKeyReference {
+                val pair = key()
+                return EnrollmentKeyReference(role, id(30 + role.ordinal),
+                    "remozio.${role.aliasPart}.v1.${"%032x".format(30 + role.ordinal)}",
+                    if (role == EnrollmentKeyRole.TRANSPORT) pair.public.encoded else point(pair))
+            }
+            val predecessor = PhoneEnrollment(id(40), f.invitation.macID.copyBytes(), f.invitation.accountID.copyBytes(),
+                invitation.predecessor.phoneID.copyBytes(), invitation.predecessor.epoch.copyBytes(), f.invitation.label,
+                f.invitation.authorityPublicKey.copyBytes(), f.mac.certificate.publicKey.encoded,
+                oldKey(EnrollmentKeyRole.TRANSPORT), oldKey(EnrollmentKeyRole.DECISION), oldKey(EnrollmentKeyRole.BIOMETRIC),
+                ByteArray(32) { 41 }, null)
+            val reservation = RePairReservation(id(42), predecessor.recordID.copyBytes(), id(4), invitation,
+                listOf(proposal.transportKey.keyID, proposal.decisionKey.keyID, proposal.biometricKey.keyID))
+            val material = RePairProposalMaterial(proposal, listOf(f.phone.keyPair, f.decision, f.biometric).mapIndexed { i, key ->
+                val role = EnrollmentKeyRole.entries[i]
+                EnrollmentKeyReference(role, reservation.keyIDs[i].copyBytes(), reservation.alias(role),
+                    if (role == EnrollmentKeyRole.TRANSPORT) key.public.encoded else point(key))
+            })
+            val owner = SupervisorJob()
+            val scope = CoroutineScope(owner)
+            try {
+                EncryptedEnrollmentStore.create(storage, cipher, 10).use { archive ->
+                    archive.prepare(predecessor, 0u)
+                    archive.remove(predecessor.recordID.copyBytes(), 1u)
+                    archive.reserveRePair(reservation, 2u)
+                    val channel = withTimeout(15_000) {
+                        PairingSetupChannel.authenticate(scope, f.open(scope), f.keys, f.invitation, proposal)
+                    }
+                    try {
+                        val transcript = channel.awaitTranscript {
+                            archive.prepareRePairProposal(reservation.recordID, material, 3u)
+                        }
+                        archive.checkpointRePair(reservation.recordID, transcript, 4u)
+                        rejectedWithin(5_000) {
+                            channel.submitProof(transcript.digest(), f.proof(transcript)) {
+                                archive.markRePairProof(reservation.recordID, 5u)
+                            }
+                        }
+                    } finally { channel.closeAndJoin() }
+                }
+                EncryptedEnrollmentStore.open(storage, cipher, 10).use { archive ->
+                    val row = archive.snapshot().entries.single { it.enrollment.recordID == reservation.recordID }
+                    assertTrue(checkNotNull(row.rePair).proofMayHaveBeenSent)
+                    val exchange = checkNotNull(row.pairing).transcript
+                    val connector = ApprovalChannelConnector(f.keys, row.enrollment.transportPublicKey.copyBytes(),
+                        exchange.phone.scope, emptyList(), emptySet(), PairingReceiptFrame.MAXIMUM_BYTES,
+                        purpose = EnrolledChannelPurpose.PAIRING_RECEIPT)
+                    val channel = connector.connect(scope, flowOf(ApprovalCarrierRoute { f.open(it, checkNotNull(f.receiptPort)) }), null)
+                    val receipt = PairingReceiptChannel.bind(row, channel)
+                    val proof = try { checkNotNull(receipt.recover()) } finally { receipt.closeAndJoin() }
+                    val activated = archive.recoverPairing(reservation.recordID.copyBytes()).activate(archive, proof)
+                    assertEquals(reservation.recordID, activated.entries.first().successorRecordID)
+                    assertEquals(listOf(EnrollmentPhase.REMOVED, EnrollmentPhase.ACTIVE), activated.entries.map { it.phase })
+                    assertEquals(activated.revision, archive.recoverPairing(reservation.recordID.copyBytes()).activate(archive, proof).revision)
+                }
+            } finally { owner.cancelAndJoin() }
         }
     }
 

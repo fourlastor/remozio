@@ -102,7 +102,8 @@ class RemozioApplication : Application() {
         pushRegistrationWork.start(scope)
     }
     internal val macs by lazy {
-        StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) }, enrollmentAccess = enrollmentAccess)
+        StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
+            enrollmentAccess = enrollmentAccess, reconcile = { pairing.reconcileRePair() })
     }
     private val commandMemory = CommandMemoryBudget(8_388_608, 262_144)
     internal val commands by lazy {

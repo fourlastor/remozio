@@ -18,12 +18,16 @@ import java.security.spec.ECGenParameterSpec
 /** Fresh local keys only. The authorized enrollment flow must persist and register the returned reference. */
 object AndroidDecisionKeyCreation {
     @WorkerThread
-    fun create(context: Context): EnrollmentKeyReference {
+    fun create(context: Context): EnrollmentKeyReference =
+        createForEnrollment(context, ByteArray(16).also(SecureRandom()::nextBytes))
+
+    @WorkerThread
+    internal fun createForEnrollment(context: Context, id: ByteArray): EnrollmentKeyReference {
+        require(id.size == 16)
         try {
             val directory = File(context.noBackupFilesDir, "decisions")
             check(directory.isDirectory || directory.mkdirs())
             ExclusiveFileOwner.acquire(File(directory, "creation.lock")).use {
-                val id = ByteArray(16).also(SecureRandom()::nextBytes)
                 val alias = "remozio.decision.v1." + id.joinToString("") { "%02x".format(it) }
                 val point = createDecisionKey(PlatformDecisionKeys, alias)
                 val reference = EnrollmentKeyReference(EnrollmentKeyRole.DECISION, id, alias, point)

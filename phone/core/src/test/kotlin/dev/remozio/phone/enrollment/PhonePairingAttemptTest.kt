@@ -24,14 +24,14 @@ class PhonePairingAttemptTest {
             local(EnrollmentKeyRole.TRANSPORT), local(EnrollmentKeyRole.DECISION), local(EnrollmentKeyRole.BIOMETRIC),
             ByteArray(32) { n.toByte() }, null)
     }
-    private fun transcript(e: PhoneEnrollment, old: PhoneEnrollment? = null): PairingTranscript {
+    private fun transcript(e: PhoneEnrollment, old: PhoneEnrollment? = null, setup: Int = 70, revision: Int = 74): PairingTranscript {
         val scope = ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes())
         fun offer(role: ChannelRole, nonce: Int) = ChannelOffer(role, scope, ByteArray(32) { nonce.toByte() }, setOf(1uL), emptyList(), emptySet())
         fun claim(k: EnrollmentKeyReference) = PairingKey(k.keyID.copyBytes(), k.pointBytes())
-        return PairingTranscript(id(70), ByteArray(32) { 71 }, offer(ChannelRole.PHONE, 72), offer(ChannelRole.MAC, 73),
+        return PairingTranscript(id(setup), ByteArray(32) { 71 }, offer(ChannelRole.PHONE, 72), offer(ChannelRole.MAC, 73),
             1u, 1u, e.authorityPublicKey.copyBytes(), e.transportPublicKey.copyBytes().takeLast(65).toByteArray(),
             claim(e.transportKey), claim(e.decisionKey), claim(e.biometricKey), e.enrollmentTag.copyBytes(),
-            old?.let { PairingReplacement(it.phoneID.copyBytes(), it.epoch.copyBytes()) }, id(74), 1000u, 2000u)
+            old?.let { PairingReplacement(it.phoneID.copyBytes(), it.epoch.copyBytes()) }, id(revision), 1000u, 2000u)
     }
     private fun sign(t: PairingTranscript, purpose: PairingProofPurpose = PairingProofPurpose.MAC_COMMIT) =
         Signature.getInstance("SHA256withECDSAinP1363Format").run {
@@ -92,6 +92,48 @@ class PhonePairingAttemptTest {
         reopened.remove(e.recordID.copyBytes(), 2u); reopened.close()
         val removed = disk.open()
         assertFailsWith<IllegalArgumentException> { removed.recoverPairing(e.recordID.copyBytes()) }
+    }
+
+    @Test fun rePairReceiptTerminalizesOnlySiblingsExcludedByItsRootRevision() {
+        val old = record(1)
+        val predecessor = PairingReplacement(old.phoneID.copyBytes(), old.epoch.copyBytes())
+        val invitation = RePairInvitation(PairingInvitation(old.macID.copyBytes(), old.accountID.copyBytes(),
+            old.label, old.authorityPublicKey.copyBytes(), old.transportPublicKey.copyBytes().takeLast(65).toByteArray(), 1u),
+            predecessor)
+        fun pending(n: Int, proofMayHaveBeenSent: Boolean, revision: Int): StoredPhoneEnrollment {
+            val keys = record(n)
+            val enrollment = PhoneEnrollment(keys.recordID.copyBytes(), old.macID.copyBytes(), old.accountID.copyBytes(),
+                old.phoneID.copyBytes(), keys.epoch.copyBytes(), old.label, old.authorityPublicKey.copyBytes(),
+                old.transportPublicKey.copyBytes(), keys.transportKey, keys.decisionKey, keys.biometricKey, keys.enrollmentTag.copyBytes(), null)
+            val t = transcript(enrollment, old, setup = 70 + n, revision = revision)
+            val proposal = PairingPhoneProposal(t.phone, t.transportKey, t.decisionKey, t.biometricKey, predecessor)
+            return StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED, PreparedPairing(t, old.recordID.copyBytes(), 1u),
+                PreparedRePair(invitation, proposal, proofMayHaveBeenSent))
+        }
+        val winner = pending(2, true, 74)
+        val unsubmitted = pending(3, false, 75)
+        val sameRevision = pending(4, true, 74)
+        val differentRevision = pending(5, true, 75)
+        val rows = listOf(StoredPhoneEnrollment(old, EnrollmentPhase.REMOVED), winner, unsubmitted, sameRevision, differentRevision)
+        // Write a test-only archive with siblings that the current owner would never admit.
+        val disk = Disk()
+        val bytes = DeterministicCbor.encode(CborValue.Fields(mapOf(
+            0uL to CborValue.Unsigned(3u), 1uL to CborValue.Unsigned(9u),
+            2uL to CborValue.ArrayValue(rows.map { EnrollmentEncoding.encode(it, 3u) }),
+            3uL to CborValue.ArrayValue(emptyList()),
+        )), CborLimits(65_536, 8, 1_016))
+        disk.storage.replace(disk.cipher.encrypt(bytes))
+        disk.open().use { store ->
+            val attempt = store.recoverPairing(winner.enrollment.recordID.copyBytes())
+            val outcome = attempt.activate(store, sign(attempt.transcript))
+            assertEquals(10uL, outcome.revision)
+            assertEquals(listOf(EnrollmentPhase.REMOVED, EnrollmentPhase.ACTIVE, EnrollmentPhase.REMOVED,
+                EnrollmentPhase.REMOVED, EnrollmentPhase.PREPARED), outcome.entries.map { it.phase })
+            assertEquals(winner.enrollment.recordID, outcome.entries.first().successorRecordID)
+            assertEquals(differentRevision.enrollment.biometricKey.alias, outcome.entries.last().enrollment.biometricKey.alias)
+            val repeat = store.recoverPairing(winner.enrollment.recordID.copyBytes())
+            assertEquals(outcome.revision, repeat.activate(store, sign(repeat.transcript)).revision)
+        }
     }
 
     @Test fun replacementRequiresTheExactActiveLocalSelection() {

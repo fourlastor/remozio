@@ -47,47 +47,80 @@ internal class AndroidPairingAttempt(
     private var preparedAccess: PreparedPairingAccess? = null
     private var biometric: AndroidPairingBiometrics? = null
     private var proofSubmitted = false
-    private val phoneID = randomID()
+    private var rePairRecordID: CborValue.Bytes? = null
+    private var phoneID = randomID()
     private val epoch = randomID()
-    val phoneSuffix: String = phoneID.takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
+    val phoneSuffix: String get() = phoneID.takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
     val transcript: PairingTranscript get() = checkNotNull(channel).transcript
 
     suspend fun connect(text: String): PairingTranscript = operation {
         check(invitation == null)
-        val selected = PairingInvitation.importText(text.trim())
-        val snapshot = store.setupSnapshot()
-        require(snapshot.entries.size < 1024)
-        require(snapshot.entries.none { it.phase != EnrollmentPhase.REMOVED &&
-            it.enrollment.macID == selected.macID && it.enrollment.accountID == selected.accountID })
-        invitation = selected; expectedRevision = snapshot.revision
-        // Provider calls cannot be interrupted safely. Retain each successful reference before cancellation can resume.
+        val imported = text.trim()
+        val rePair = if (imported.startsWith("remozio-repair:")) RePairInvitation.importText(imported) else null
+        val selected = rePair?.invitation ?: PairingInvitation.importText(imported)
+        val keyIDs = EnrollmentKeyRole.entries.map { CborValue.Bytes(randomID()) }
+        if (rePair == null) {
+            val snapshot = store.setupSnapshot()
+            require(snapshot.entries.size + snapshot.rePairReservations.size < 1024)
+            require(snapshot.rePairReservations.none { it.macID == selected.macID })
+            require(snapshot.entries.none {
+                it.phase != EnrollmentPhase.REMOVED && it.enrollment.macID == selected.macID &&
+                    it.enrollment.accountID == selected.accountID &&
+                    (it.phase == EnrollmentPhase.ACTIVE || it.rePair?.proofMayHaveBeenSent != true)
+            })
+            expectedRevision = snapshot.revision
+        } else {
+            phoneID = rePair.predecessor.phoneID.copyBytes()
+            val recordID = randomID()
+            withContext(NonCancellable) {
+                val reserved = store.reserveRePair(rePair, recordID, epoch, keyIDs)
+                rePairRecordID = reserved.recordID
+            }
+        }
+        invitation = selected
+        // Provider calls cannot be interrupted safely. Each returned key belongs to the chosen attempt.
         withContext(NonCancellable + Dispatchers.IO) {
             active()
             val now = Instant.now()
-            val made = AndroidTransportKeyCreation.create(app, now.minusSeconds(300), now.plusSeconds(31_536_000))
+            val transportID = keyIDs[EnrollmentKeyRole.TRANSPORT.ordinal].copyBytes()
+            val made = AndroidTransportKeyCreation.createForEnrollment(app, now.minusSeconds(300), now.plusSeconds(31_536_000), transportID)
             identity = made
-            val transport = EnrollmentKeyReference(EnrollmentKeyRole.TRANSPORT, randomID(), made.alias, made.publicKey())
-            transportKey = transport; ownedKeys.add(transport)
+            val transport = EnrollmentKeyReference(EnrollmentKeyRole.TRANSPORT, transportID, made.alias, made.publicKey())
+            transportKey = transport
+            ownedKeys.add(transport)
             active()
-            val decision = AndroidDecisionKeyCreation.create(app)
-            decisionKey = decision; ownedKeys.add(decision)
+            val decision = AndroidDecisionKeyCreation.createForEnrollment(app, keyIDs[EnrollmentKeyRole.DECISION.ordinal].copyBytes())
+            decisionKey = decision
+            ownedKeys.add(decision)
             active()
-            val bio = AndroidBiometricKeyCreation.create(app)
-            biometricKey = bio; ownedKeys.add(bio)
+            val bio = AndroidBiometricKeyCreation.createForEnrollment(app, keyIDs[EnrollmentKeyRole.BIOMETRIC.ordinal].copyBytes())
+            biometricKey = bio
+            ownedKeys.add(bio)
         }
         active()
         val offer = ChannelOffer(ChannelRole.PHONE,
             ChannelScope(selected.macID.copyBytes(), selected.accountID.copyBytes(), phoneID, epoch), randomBytes(32),
             setOf(1uL), commandInspectionCapabilities(), emptySet())
         fun claim(ref: EnrollmentKeyReference) = PairingKey(ref.keyID.copyBytes(), ref.publicKey.copyBytes().takeLast(65).toByteArray())
-        val proposal = PairingPhoneProposal(offer, claim(checkNotNull(transportKey)), claim(checkNotNull(decisionKey)), claim(checkNotNull(biometricKey)))
+        val proposal = PairingPhoneProposal(offer, claim(checkNotNull(transportKey)), claim(checkNotNull(decisionKey)),
+            claim(checkNotNull(biometricKey)), rePair?.predecessor)
+        active()
         val opened = authenticatePairingRoutes(scope,
             androidPairingRoutes(app, selected.macID.copyBytes(), selected.accountID.copyBytes()),
             arrayOf(checkNotNull(identity).identity.keyManager), selected, proposal,
             LocalNetworkSettings(app).timeoutSeconds() * 1000L)
         channel = opened; active()
-        val transcript = opened.awaitTranscript()
-        active(); selected.validateMacClaims(transcript); proposal.validate(transcript)
+        val transcript = opened.awaitTranscript {
+            rePairRecordID?.let { store.prepareRePairProposal(it, RePairProposalMaterial(proposal, ownedKeys)) }
+        }
+        active()
+        selected.validateMacClaims(transcript)
+        proposal.validate(transcript)
+        rePairRecordID?.let {
+            val checkpoint = store.checkpointRePair(it, transcript)
+            preparedRecord = checkpoint
+            enrollment = checkpoint.enrollment
+        }
         transcript
     }
 
@@ -96,6 +129,11 @@ internal class AndroidPairingAttempt(
         check(!proofSubmitted)
         if (prepared) return@operation loadPreparedSigner()
         val transcript = transcript
+        rePairRecordID?.let {
+            preparedAccess = store.prepared(it, transcript)
+            prepared = true
+            return@operation loadPreparedSigner()
+        }
         val selected = checkNotNull(invitation)
         val row = PhoneEnrollment(randomID(), selected.macID.copyBytes(), selected.accountID.copyBytes(), phoneID, epoch,
             selected.label, transcript.macAuthorityKey.copyBytes(), p256SPKI(transcript.macTransportKey.copyBytes()),
@@ -127,10 +165,14 @@ internal class AndroidPairingAttempt(
         check(prepared && !proofSubmitted && checkNotNull(preparedAccess).lease.isCurrent())
         val current = transcript
         require(current.verify(proof, current.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
-        proofSubmitted = true
-        val receipt = checkNotNull(channel).submitProof(current.digest(), proof)
+        val receipt = checkNotNull(channel).submitProof(current.digest(), proof) {
+            if (rePairRecordID != null) preparedAccess = store.markRePairProof(checkNotNull(preparedAccess))
+            active()
+            proofSubmitted = true
+        }
         active()
-        store.activate(checkNotNull(enrollment).recordID, CborValue.Bytes(receipt))
+        store.activate(checkNotNull(enrollment).recordID, CborValue.Bytes(receipt),
+            expected = if (rePairRecordID != null) preparedAccess else null)
     }
 
     override fun close() {
@@ -146,7 +188,9 @@ internal class AndroidPairingAttempt(
             operations.withLock {
                 biometric?.close(); identity?.close()
                 preparedAccess?.let { access -> enrollment?.let { store.release(it.recordID, access.lease) } }
-                if (!prepared) retireOwnedKeys()
+                val rePairID = rePairRecordID
+                if (rePairID != null) store.finishRePair(rePairID)
+                else if (!prepared) retireOwnedKeys()
                 else if (!proofSubmitted) store.abandonUnsubmitted(checkNotNull(preparedRecord), ::retireOwnedKeys)
                 ownedKeys.clear()
             }

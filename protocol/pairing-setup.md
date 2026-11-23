@@ -118,7 +118,9 @@ Root retains the old row and commits only the new enrollment, with a fresh epoch
 Root refuses a key already present in any retained enrollment.
 An exact recovered revocation remains evidence for that epoch. A phone-wide restriction for unknown gateway history requires separate administrator recovery.
 The receipt format stays the same and confirms the full transcript.
-The Android owner must persist PREPARED before submitting its hardware proof. It activates only after the authority receipt passes verification.
+For re-pair, Android matches the invitation and both pins to one retained predecessor. The encrypted archive reserves one attempt per Mac before allocating keys. Android saves the proposal before its first write, then saves the exact transcript before comparison. It records that proof may have been sent before sending any proof bytes. A restart can clean up the attempt and its new keys when the archive proves proof was never sent. A possibly submitted proof leaves one recoverable attempt and does not replay setup traffic.
+
+Android activates only after it verifies the authority receipt. Activation retires the pinned local predecessor and records the successor in the same archive write. **Remove from this phone** only removes the selected local pairing. Revocation is in **Paired phones** on the Mac. The user can start ordinary pairing with a new phone ID while an ambiguous re-pair remains recoverable. Issue [#901](https://github.com/rock3r/remozio/issues/901) tracks a signed terminal no-commit response. iOS still uses ordinary pairing preview only.
 
 A failed receipt delivery leaves the result ambiguous. Preserve PREPARED and use the existing recovery contract.
 Never resubmit the commit automatically. Closing the listener stops admission, aborts I/O, cancels handlers, and awaits their actual completion.

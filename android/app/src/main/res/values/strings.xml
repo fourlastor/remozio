@@ -445,6 +445,12 @@
     <string name="pairing_setup_lan_denied">Allow local network access to find your Mac. You can also change this permission in Android settings.</string>
     <string name="pairing_setup_connect">Connect to Mac</string>
     <string name="pairing_setup_waiting">Choose this phone on your Mac and approve its setup prompt.</string>
+    <string name="pairing_repair_connect">Re-pair</string>
+    <string name="pairing_repair_pending">Check the pending setup in Your Macs. To use a new phone ID, start a new pairing on the Mac. The pending setup stays available for recovery.</string>
+    <string name="pairing_repair_unavailable">This invitation does not match an eligible pairing on this phone.</string>
+    <string name="macs_remove_local">Remove from this phone</string>
+    <string name="macs_remove_local_description">Remove %1$s from this phone? To revoke the pairing, open Paired phones on the Mac.</string>
+    <string name="macs_remove_local_failed">Could not remove the selected pairing. Check the current list and try again.</string>
     <string name="pairing_setup_phone">Phone ID: %1$s</string>
     <string name="pairing_setup_compare">Compare all four groups with the code on your Mac. Continue only if every character matches.</string>
     <plurals name="pairing_setup_remaining">

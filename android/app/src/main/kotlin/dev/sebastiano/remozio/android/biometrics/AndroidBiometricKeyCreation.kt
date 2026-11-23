@@ -19,12 +19,16 @@ import java.security.spec.ECGenParameterSpec
 /** Fresh local keys only. The authorized enrollment flow must persist and register the returned reference. */
 object AndroidBiometricKeyCreation {
     @WorkerThread
-    fun create(context: Context): EnrollmentKeyReference {
+    fun create(context: Context): EnrollmentKeyReference =
+        createForEnrollment(context, ByteArray(16).also(SecureRandom()::nextBytes))
+
+    @WorkerThread
+    internal fun createForEnrollment(context: Context, id: ByteArray): EnrollmentKeyReference {
+        require(id.size == 16)
         try {
             val directory = File(context.noBackupFilesDir, "biometrics")
             check(directory.isDirectory || directory.mkdirs())
             ExclusiveFileOwner.acquire(File(directory, "creation.lock")).use {
-                val id = ByteArray(16).also(SecureRandom()::nextBytes)
                 val alias = "remozio.biometric.v1." + id.joinToString("") { "%02x".format(it) }
                 return createValidatedBiometricKey(PlatformBiometricKeys, alias) { point ->
                     val reference = EnrollmentKeyReference(EnrollmentKeyRole.BIOMETRIC, id, alias, point)

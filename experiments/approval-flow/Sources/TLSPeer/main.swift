@@ -8,7 +8,21 @@ import RemozioProtocol
 
 // Synthetic loopback fixtures only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let dropRePairReceipt: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
+
+private actor SyntheticPairingReceipt {
+    private var committed: (setupID: Data, signature: Data)?
+
+    func commit(setupID: Data, signature: Data) throws {
+        guard committed == nil else { throw ProbeError.invalidInput }
+        committed = (setupID, signature)
+    }
+
+    func recover(setupID: Data) -> Data? {
+        guard let committed, committed.setupID == setupID else { return nil }
+        return committed.signature
+    }
+}
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -146,6 +160,31 @@ if setup.pairing == true {
     let rePair = try setup.rePair == true ? RePairInvitation(invitation: invitation,
         predecessor: PairingReplacement(phoneID: Data(repeating: 3, count: 16), epoch: Data(repeating: 10, count: 16))) : nil
     let invitationText = try rePair?.exportText() ?? invitation.exportText()
+    let recovery = SyntheticPairingReceipt()
+    let receiptListener: DirectApprovalListener?
+    if setup.dropRePairReceipt == true {
+        guard let rePair else { throw ProbeError.invalidInput }
+        let scope = try ChannelScope(macID: invitation.macID, accountID: invitation.accountID,
+            phoneID: rePair.predecessor.phoneID, enrollmentEpoch: Data(repeating: 4, count: 16))
+        let enrolled = try DirectApprovalPeer(scope: scope, transportPublicKey: peer,
+            requests: [], auditVersions: [], maximumPayloadBytes: PairingReceiptFrame.maximumBytes)
+        receiptListener = try DirectApprovalListener(identity: identity, peers: [enrolled], binding: .loopback,
+            maximumConnections: 2, timeoutMilliseconds: 4000, event: { event in
+                switch event {
+                case .ready(let port): emit(["receiptPort": Int(port)])
+                case .failed: exit(1)
+                case .stopped: break
+                }
+            }, handler: { _, channel in
+                guard channel.purpose == .pairingReceipt,
+                      let payload = try await channel.receive(maximumBytes: PairingReceiptFrame.maximumBytes),
+                      case .query(let setupID) = try PairingReceiptFrame.decode(payload) else { throw ProbeError.invalidInput }
+                let signature = await recovery.recover(setupID: setupID)
+                try await channel.send(PairingReceiptFrame.response(setupID: setupID, signature: signature).encode())
+            })
+    } else {
+        receiptListener = nil
+    }
     let pairing = try PairingSetupListener(identity: identity, invitation: invitation, binding: .loopback,
         maximumConnections: setup.maximumConnections ?? 2, handshakeTimeoutMilliseconds: 4000,
         setupTimeoutMilliseconds: 10000, event: { event in
@@ -174,10 +213,22 @@ if setup.pairing == true {
             try await channel.stage(transcript)
             _ = try await channel.receiveProof()
             let receipt = try authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation
+            if setup.dropRePairReceipt == true {
+                try await recovery.commit(setupID: transcript.setupID, signature: receipt)
+                return
+            }
             try await channel.sendReceipt(receipt)
         })
+    try receiptListener?.start()
     try pairing.start()
-    DispatchQueue.global().async { _ = getchar(); Task { await pairing.closeAndWait(); exit(0) } }
+    DispatchQueue.global().async {
+        _ = getchar()
+        Task {
+            await pairing.closeAndWait()
+            await receiptListener?.closeAndWait()
+            exit(0)
+        }
+    }
     dispatchMain()
 }
 if setup.routing == true || setup.audit == true {
