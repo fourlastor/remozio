@@ -206,10 +206,13 @@ public actor AuthorityPairingChannel {
         return status
     }
 
-    /// Adapt phone-only network claims to the existing local version-1 staging contract.
+    /// Forward re-pair claims or adapt ordinary phone claims to the legacy local staging format.
     /// The placeholder fields never leave local XPC. Only Root's returned transcript can be confirmed or signed.
     public func stage(_ proposal: PairingPhoneProposal, authorization: Data) async throws -> PairingTranscript {
         guard state == .open, let context else { throw AuthorityPairingChannelError.closed }
+        if proposal.replacement != nil {
+            return try await stage(proposal, bytes: proposal.encode(), authorization: authorization)
+        }
         var nonce = proposal.phone.nonce; nonce[0] ^= 1
         let mac = try ChannelOffer(role: .mac, scope: proposal.phone.scope, nonce: nonce, envelopeVersions: [1],
             requests: [], auditVersions: [])
@@ -224,18 +227,22 @@ public actor AuthorityPairingChannel {
     }
     /// Retain and show the returned transcript. The proposal's Mac-generated fields are replaced by Root.
     public func stage(_ proposal: PairingTranscript, authorization: Data) async throws -> PairingTranscript {
+        guard proposal.replacement == nil else { throw AuthorityPairingChannelError.invalidMessage }
+        let claims = try PairingPhoneProposal(phone: proposal.phone, transportKey: proposal.transportKey,
+            decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey)
+        return try await stage(claims, bytes: proposal.encode(), authorization: authorization)
+    }
+
+    private func stage(_ proposal: PairingPhoneProposal, bytes proposalBytes: Data, authorization: Data) async throws -> PairingTranscript {
         guard state == .open, let context, staged == nil else { throw AuthorityPairingChannelError.closed }
-        guard proposal.replacement == nil, proposal.phone.scope.macID == macID, proposal.phone.scope.accountID == accountID,
+        guard proposal.phone.scope.macID == macID, proposal.phone.scope.accountID == accountID,
               authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingChannelError.invalidMessage }
         do {
-            let transcript = try PairingTranscript.decode(bytes(await perform(.stage(proposal.encode(), authorization))))
-            guard try transcript.phone.encode() == proposal.phone.encode(), transcript.replacement == nil,
-                  transcript.macAuthorityKey == context.authorityPublicKey, transcript.macTransportKey == context.transportPublicKey,
+            let transcript = try PairingTranscript.decode(bytes(await perform(.stage(proposalBytes, authorization))))
+            do { try proposal.validate(transcript) } catch { throw AuthorityPairingChannelError.invalidMessage }
+            guard transcript.macAuthorityKey == context.authorityPublicKey, transcript.macTransportKey == context.transportPublicKey,
                   transcript.minimumEnvelopeVersion == context.minimumEnvelopeVersion,
-                  transcript.expiresAtUnixMillis - transcript.issuedAtUnixMillis == context.lifetimeMilliseconds,
-                  transcript.transportKey.keyID == proposal.transportKey.keyID, transcript.transportKey.publicKey == proposal.transportKey.publicKey,
-                  transcript.decisionKey.keyID == proposal.decisionKey.keyID, transcript.decisionKey.publicKey == proposal.decisionKey.publicKey,
-                  transcript.biometricKey.keyID == proposal.biometricKey.keyID, transcript.biometricKey.publicKey == proposal.biometricKey.publicKey else {
+                  transcript.expiresAtUnixMillis - transcript.issuedAtUnixMillis == context.lifetimeMilliseconds else {
                 throw AuthorityPairingChannelError.invalidMessage
             }
             staged = transcript; return transcript

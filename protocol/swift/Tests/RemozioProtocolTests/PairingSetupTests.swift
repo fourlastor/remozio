@@ -4,7 +4,20 @@ import XCTest
 
 final class PairingSetupTests: XCTestCase {
     private struct Row: Decodable { let name: String; let hex: String }
-    private struct Vectors: Decodable { let proposal: String; let transcript: String; let frames: [Row]; let invalidProposals: [Row]; let invalidFrames: [Row] }
+    private struct RePair: Decodable {
+        let proposal: String
+        let transcript: String
+        let frame: String
+        let digest: String
+    }
+    private struct Vectors: Decodable {
+        let proposal: String
+        let transcript: String
+        let rePair: RePair
+        let frames: [Row]
+        let invalidProposals: [Row]
+        let invalidFrames: [Row]
+    }
     private func vectors() throws -> Vectors {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -26,6 +39,36 @@ final class PairingSetupTests: XCTestCase {
         }
         XCTAssertEqual(proposal.description, "PairingPhoneProposal(redacted)")
     }
+    func testRePairProposalBindsTheExactPredecessor() throws {
+        let vectors = try vectors()
+        let v1 = try PairingPhoneProposal.decode(hex(vectors.proposal))
+        let transcript = try PairingTranscript.decode(hex(vectors.rePair.transcript))
+        let replacement = try XCTUnwrap(transcript.replacement)
+        let proposal = try PairingPhoneProposal(phone: v1.phone, transportKey: v1.transportKey,
+            decisionKey: v1.decisionKey, biometricKey: v1.biometricKey, replacement: replacement)
+        XCTAssertEqual(try proposal.encode(), hex(vectors.rePair.proposal))
+        try PairingPhoneProposal.decode(hex(vectors.rePair.proposal)).validate(transcript)
+        XCTAssertEqual(try PairingSetupFrame.proposal(proposal).encode(), hex(vectors.rePair.frame))
+        XCTAssertEqual(try PairingSetupFrame.decode(hex(vectors.rePair.frame)).encode(), hex(vectors.rePair.frame))
+        XCTAssertEqual(try transcript.digest(), hex(vectors.rePair.digest))
+        XCTAssertThrowsError(try v1.validate(transcript))
+        XCTAssertThrowsError(try proposal.validate(PairingTranscript.decode(hex(vectors.transcript))))
+
+        let wrongEpoch = try PairingReplacement(phoneID: replacement.phoneID, epoch: Data(repeating: 91, count: 16))
+        let other = try PairingPhoneProposal(phone: v1.phone, transportKey: v1.transportKey,
+            decisionKey: v1.decisionKey, biometricKey: v1.biometricKey, replacement: wrongEpoch)
+        XCTAssertThrowsError(try other.validate(transcript))
+
+        let invalidTargets = [
+            try PairingReplacement(phoneID: Data(repeating: 92, count: 16), epoch: replacement.epoch),
+            try PairingReplacement(phoneID: replacement.phoneID, epoch: v1.phone.scope.enrollmentEpoch),
+        ]
+        for target in invalidTargets {
+            XCTAssertThrowsError(try PairingPhoneProposal(phone: v1.phone, transportKey: v1.transportKey,
+                decisionKey: v1.decisionKey, biometricKey: v1.biometricKey, replacement: target))
+        }
+    }
+
     func testUnknownVersionsFieldsKindsAndAuthorityConfusionFail() throws {
         let v = try vectors()
         for row in v.invalidProposals { XCTAssertThrowsError(try PairingPhoneProposal.decode(hex(row.hex)), row.name) }

@@ -108,9 +108,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 if environment.denied.value { throw Failure.denied }
             }, invalidate: { environment.invalidated.value += 1 })
         }
-        func proposal() throws -> PairingTranscript {
+        func proposal(phone: UInt8 = 8, epoch: UInt8 = 9, keyBase: UInt8 = 32,
+                      biometric: P256.Signing.PrivateKey? = nil) throws -> PairingTranscript {
             let trust = try journal.read { try $0.approvalTrustSnapshot() }, scope = try ChannelScope(macID: mac,
-                accountID: account, phoneID: Data(repeating: 8, count: 16), enrollmentEpoch: Data(repeating: 9, count: 16))
+                accountID: account, phoneID: Data(repeating: phone, count: 16), enrollmentEpoch: Data(repeating: epoch, count: 16))
             let offers = try [ChannelRole.phone, .mac].enumerated().map { index, role in
                 try ChannelOffer(role: role, scope: scope, nonce: Data(repeating: UInt8(20 + index), count: 32), envelopeVersions: [1],
                     requests: [.init(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [1])
@@ -119,9 +120,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             return try .init(setupID: Data(repeating: 30, count: 16), challenge: Data(repeating: 31, count: 32), phone: offers[0], mac: offers[1],
                 minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: authority.publicKey.x963Representation,
                 macTransportKey: transport.publicKey.x963Representation,
-                transportKey: .init(keyID: Data(repeating: 32, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
-                decisionKey: .init(keyID: Data(repeating: 33, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
-                biometricKey: .init(keyID: Data(repeating: 34, count: 16), publicKey: biometric.publicKey.x963Representation),
+                transportKey: .init(keyID: Data(repeating: keyBase, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                decisionKey: .init(keyID: Data(repeating: keyBase + 1, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                biometricKey: .init(keyID: Data(repeating: keyBase + 2, count: 16), publicKey: (biometric ?? self.biometric).publicKey.x963Representation),
                 enrollmentTag: Data(repeating: 35, count: 32), replacement: nil,
                 expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1, expiresAtUnixMillis: 2)
         }
@@ -354,6 +355,127 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         _ = try await channel.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, fixture),
             authorization: authorization)
         return (channel, driver)
+    }
+
+    private func rePairProposal(_ fixture: Fixture, predecessor: PairingReplacement,
+                                biometric: P256.Signing.PrivateKey, transportPoint: Data? = nil) throws -> PairingPhoneProposal {
+        let scope = try ChannelScope(macID: fixture.mac, accountID: fixture.account,
+            phoneID: predecessor.phoneID, enrollmentEpoch: Data(repeating: 50, count: 16))
+        let offer = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 51, count: 32),
+            envelopeVersions: [1], requests: [.init(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [1])
+        return try PairingPhoneProposal(phone: offer,
+            transportKey: .init(keyID: Data(repeating: 52, count: 16),
+                publicKey: transportPoint ?? P256.Signing.PrivateKey().publicKey.x963Representation),
+            decisionKey: .init(keyID: Data(repeating: 53, count: 16),
+                publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            biometricKey: .init(keyID: Data(repeating: 54, count: 16), publicKey: biometric.publicKey.x963Representation),
+            replacement: predecessor)
+    }
+
+    func testRePairStagesAndCommitsOnlyAfterRevocation() async throws {
+        let f = try Fixture(configureGateway: true), (channel, _) = try await pairForRevocation(f)
+        let listed = try await channel.pairedPhones()
+        let selection = try XCTUnwrap(listed.selection(for: XCTUnwrap(listed.phones.first)))
+        let predecessor = try PairingReplacement(phoneID: selection.phone.phoneID, epoch: selection.phone.enrollmentEpoch)
+        let biometric = P256.Signing.PrivateKey()
+        let proposal = try rePairProposal(f, predecessor: predecessor, biometric: biometric)
+        let status = try await channel.revokePhone(selection, authorization: authorization)
+        XCTAssertEqual(status, .gatewayPending)
+
+        let staged = try await channel.stage(proposal, authorization: authorization)
+        try proposal.validate(staged)
+        let proof = try biometric.signature(for: staged.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let receipt = try await channel.commit(confirmedDigest: staged.digest(), biometricProof: proof, authorization: authorization)
+        XCTAssertTrue(try staged.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        let retained = try f.journal.read { try $0.approvalEnrollments() }
+        XCTAssertEqual(retained.count, 2)
+        let old = try XCTUnwrap(retained.first { $0.epoch == predecessor.epoch })
+        XCTAssertFalse(old.approval.active)
+        XCTAssertEqual(old.gatewayRevocation?.progress, .pending)
+        XCTAssertEqual(retained.first { $0.approval.active }?.epoch, staged.phone.scope.enrollmentEpoch)
+        let trust = try f.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024) }
+        let peer = try XCTUnwrap(trust.peers.first)
+        let recovered = try f.journal.withRequests { requests in
+            try requests.pairingReceipt(setupID: staged.setupID, binding: AuthorityPeerBinding(peer: peer, revision: trust.revision),
+                authorityPublicKey: f.authority.publicKey.x963Representation, verifyHost: { _ in },
+                sign: { try f.authority.signature(for: $0).rawRepresentation })
+        }
+        XCTAssertTrue(try staged.verify(signature: XCTUnwrap(recovered), publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(try f.records(), 3)
+        try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testRePairRejectsActiveMissingAndReusedPredecessorMaterial() async throws {
+        let f = try Fixture(), (channel, _) = try await pairForRevocation(f)
+        let listed = try await channel.pairedPhones()
+        let selection = try XCTUnwrap(listed.selection(for: XCTUnwrap(listed.phones.first)))
+        let predecessor = try PairingReplacement(phoneID: selection.phone.phoneID, epoch: selection.phone.enrollmentEpoch)
+        let missing = try PairingReplacement(phoneID: selection.phone.phoneID, epoch: Data(repeating: 55, count: 16))
+        let biometric = P256.Signing.PrivateKey()
+        for target in [predecessor, missing] {
+            let proposal = try rePairProposal(f, predecessor: target, biometric: biometric)
+            XCTAssertThrowsError(try f.access.stage(proposal.encode())) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+            }
+        }
+        XCTAssertEqual(try f.records(), 1)
+        _ = try await channel.revokePhone(selection, authorization: authorization)
+        let old = try XCTUnwrap(f.journal.read { try $0.approvalEnrollments().first })
+        let reused = try rePairProposal(f, predecessor: predecessor, biometric: biometric, transportPoint: old.identityPublicKey)
+        XCTAssertThrowsError(try f.access.stage(reused.encode())) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .reusedIdentity)
+        }
+        XCTAssertEqual(try f.records(), 2)
+        try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testVersionOneRefusesTheRevokedPhoneIDAndAllowsANewPhone() async throws {
+        let f = try Fixture(), (channel, _) = try await pairForRevocation(f)
+        let listed = try await channel.pairedPhones()
+        let selection = try XCTUnwrap(listed.selection(for: XCTUnwrap(listed.phones.first)))
+        _ = try await channel.revokePhone(selection, authorization: authorization)
+        let biometric = P256.Signing.PrivateKey()
+        let reused = try f.proposal(epoch: 57, keyBase: 58, biometric: biometric)
+        XCTAssertThrowsError(try f.access.stage(reused.encode())) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .reusedIdentity)
+        }
+        XCTAssertEqual(try f.records(), 2)
+
+        let fresh = try f.proposal(phone: 56, epoch: 57, keyBase: 58, biometric: biometric)
+        let staged = try await channel.stage(fresh, authorization: authorization)
+        let proof = try biometric.signature(for: staged.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let receipt = try await channel.commit(confirmedDigest: staged.digest(), biometricProof: proof, authorization: authorization)
+        XCTAssertTrue(try staged.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(try f.records(), 3)
+        try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testRePairRefusesAConcurrentCommitAndKeepsTheNewEnrollment() async throws {
+        let f = try Fixture(), (channel, _) = try await pairForRevocation(f)
+        let listed = try await channel.pairedPhones()
+        let selection = try XCTUnwrap(listed.selection(for: XCTUnwrap(listed.phones.first)))
+        let predecessor = try PairingReplacement(phoneID: selection.phone.phoneID, epoch: selection.phone.enrollmentEpoch)
+        _ = try await channel.revokePhone(selection, authorization: authorization)
+        let firstKey = P256.Signing.PrivateKey(), secondKey = P256.Signing.PrivateKey()
+        let first = try f.access.stage(rePairProposal(f, predecessor: predecessor, biometric: firstKey).encode())
+        let second = try f.access.stage(rePairProposal(f, predecessor: predecessor, biometric: secondKey).encode())
+        func commitAttempt(_ attempt: PairingEnrollmentAttempt, key: P256.Signing.PrivateKey) throws {
+            let transcript = attempt.transcript
+            _ = try f.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(),
+                proof: key.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation, authorize: {})
+        }
+        try commitAttempt(first, key: firstKey)
+        XCTAssertThrowsError(try commitAttempt(second, key: secondKey)) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        }
+        let new = try XCTUnwrap(f.journal.read { try $0.approvalEnrollments().first { $0.approval.active } })
+        XCTAssertEqual(new.identityPublicKey, first.transcript.transportKey.publicKey)
+        XCTAssertEqual(try f.records(), 3)
+        try f.assertCheckpoint()
+        await channel.close()
     }
 
     func testPairedPhoneRevocationIsCheckpointedAndRejectsOldSelection() async throws {

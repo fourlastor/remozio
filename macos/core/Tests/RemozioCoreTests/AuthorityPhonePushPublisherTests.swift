@@ -167,6 +167,7 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         let phonePushConfiguration: AuthorityPhonePushPublication
         init(enrollmentCount: Int = 1, maximumPhonesPerTurn: Int = 16, earlier: EarlierControl? = nil, candidateBeforeEarlier: Bool = false,
              enablePhonePush: Bool = true, enableRootGateway: Bool = true, prepareRetirementSchema: Bool = false,
+             deferRevocationControl: Bool = false,
              phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)? = nil,
              beforePublisherSigns: (@Sendable (Clock) -> Void)? = nil) throws {
             var retained: GatewayAuthorityEnvelope?
@@ -192,10 +193,17 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                 let head = try tx.gatewayAuthorityHead(r)
                 switch earlier {
                 case .phoneRevocation:
+                    let phone = UInt8(enrollmentCount == 1 ? 5 : 15), epoch = UInt8(enrollmentCount == 1 ? 9 : 19)
+                    if deferRevocationControl {
+                        let recipient = DeliveryRecipient(phoneID: Data(repeating: phone, count: 16),
+                            enrollmentEpoch: Data(repeating: epoch, count: 16))
+                        _ = try tx.revokeManagedPhone(recipient, expectedTrustRevision: tx.approvalTrustSnapshot().revision,
+                            eventID: Data(repeating: 90, count: 16), writer: writer, expectedAuditHead: UInt64(enrollmentCount))
+                        return
+                    }
                     let gateway = EnrollmentGatewayRemoval(registration: r, expectedHead: head, nowUnixMillis: 1000, now: now,
                         sign: { try key.signature(for: GatewayRecipientSigningInput.make(wireVersion: 1, kind: .phoneRevocation,
                             canonicalPayload: $0.encode(limits: limits), payloadLimits: limits, inputLimits: limits)).rawRepresentation })
-                    let phone = UInt8(enrollmentCount == 1 ? 5 : 15), epoch = UInt8(enrollmentCount == 1 ? 9 : 19)
                     retained = try tx.revokeApprovalEnrollment(phoneID: Data(repeating: phone, count: 16), epoch: Data(repeating: epoch, count: 16),
                         expectedTrustRevision: tx.approvalTrustSnapshot().revision, eventID: Data(repeating: 90, count: 16), receiptTimeMs: 1000,
                         writer: writer, expectedAuditHead: UInt64(enrollmentCount), gateway: gateway).gatewayControl
@@ -708,6 +716,118 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(rows.first { $0.phoneID == other.approval.phoneID }?.epoch, other.epoch)
         }
         XCTAssertTrue(try f.journal.withRequests { try $0.wakeDeliveryTrust().enrollments.contains { $0.epoch == old.epoch && !$0.approval.active } })
+    }
+
+    func testRePairCommitProjectsNewEpochAndDelayedRevocationKeepsItsMapping() async throws {
+        let f = try Fixture(earlier: .phoneRevocation, deferRevocationControl: true)
+        let registration = f.root.registration
+        let old = try XCTUnwrap(f.journal.read { try $0.approvalEnrollments().first })
+        let predecessor = try PairingReplacement(phoneID: old.approval.phoneID, epoch: old.epoch)
+        let epoch = Data(repeating: 62, count: 16)
+        let scope = try ChannelScope(macID: registration.macID, accountID: registration.accountID,
+            phoneID: predecessor.phoneID, enrollmentEpoch: epoch)
+        let phone = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 63, count: 32),
+            envelopeVersions: [1], requests: [.init(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [])
+        let mac = try ChannelOffer(role: .mac, scope: scope, nonce: Data(repeating: 64, count: 32),
+            envelopeVersions: [1], requests: [], auditVersions: [])
+        let authority = f.root.key, transport = P256.Signing.PrivateKey(), biometric = P256.Signing.PrivateKey()
+        let authorityPoint = authority.publicKey.x963Representation, macTransport = P256.Signing.PrivateKey().publicKey.x963Representation
+        let trust = try f.journal.read { try $0.approvalTrustSnapshot() }
+        let transcript = try PairingTranscript(setupID: Data(repeating: 65, count: 16), challenge: Data(repeating: 66, count: 32),
+            phone: phone, mac: mac, minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1,
+            macAuthorityKey: authorityPoint, macTransportKey: macTransport,
+            transportKey: .init(keyID: Data(repeating: 67, count: 16), publicKey: transport.publicKey.x963Representation),
+            decisionKey: .init(keyID: Data(repeating: 68, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            biometricKey: .init(keyID: Data(repeating: 69, count: 16), publicKey: biometric.publicKey.x963Representation),
+            enrollmentTag: Data(repeating: 70, count: 32), replacement: predecessor,
+            expectedTrustRevision: GatewayHostSnapshot.bytes(trust.revision), issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
+        let clock = f.clock
+        let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trust, replacement: .requireRevoked(predecessor),
+            authorityPublicKey: authorityPoint, transportPublicKey: macTransport, minimumEnvelopeVersion: 1,
+            started: clock.now(), startedAtUnixMillis: clock.wall(), deadlineMilliseconds: 1100)
+        let proof = try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let receipt = try f.journal.commitPairingFixture(attempt, biometricProof: proof, authorityPublicKey: authorityPoint,
+            addEventID: Data(repeating: 71, count: 16), recheckAdministrator: {}, now: { clock.now() }, validate: { _ in },
+            sign: { try authority.signature(for: $0).rawRepresentation })
+        XCTAssertTrue(try transcript.verify(signature: receipt, publicKey: authorityPoint, purpose: .macCommit))
+        let retained = try f.journal.read { try $0.approvalEnrollments() }
+        XCTAssertEqual(retained.count, 2)
+        XCTAssertEqual(retained.first { $0.epoch == old.epoch }?.gatewayRevocation?.progress, .pending)
+        let projected = try AuthorityWakePublisher.gatewaySnapshotEnrollments(retained)
+        XCTAssertEqual(projected.count, 1)
+        XCTAssertEqual(projected.first?.phoneID, predecessor.phoneID)
+        XCTAssertEqual(projected.first?.epoch, epoch)
+        XCTAssertEqual(projected.first?.active, true)
+
+        let binding = try AuthorityPeerBinding(scope: scope, transportPublicKey: transport.publicKey.derRepresentation,
+            revision: f.journal.read { try $0.approvalTrustSnapshot().revision })
+        let offer = try f.root.offer()
+        let prepared = try f.journal.withRequests { _ in
+            try f.root.exchange(offer, time: clock.now().milliseconds, binding: binding)
+        }
+        guard case .prepared(_, let metadata) = prepared else { return XCTFail("Expected a candidate for the new epoch") }
+        let rootEpoch = UUID()
+        func synchronize(sequence: UInt64) async throws {
+            let now = clock.now()
+            let snapshot = try GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch, sequence: sequence,
+                observedAtMilliseconds: now.milliseconds, leaseDeadlineMilliseconds: now.milliseconds + 1000,
+                enrollments: projected, active: true, phoneRouting: true)
+            try await f.coordinator.synchronizeHost(snapshot, lease: f.driver.lease)
+        }
+        func tokenState() throws -> GatewayCurrentTokenState {
+            try XCTUnwrap(f.journal.withRequests { owner in
+                try owner.currentPhonePushRegistration(f.root.provider, phoneID: predecessor.phoneID, enrollmentEpoch: epoch,
+                    now: clock.now(), wall: clock.wall())
+            })
+        }
+        try await synchronize(sequence: 1)
+        let grant = try tokenState().candidate
+        let admission = try await f.coordinator.admitCandidate(canonicalPayload: grant.canonicalPayload, signature: grant.signature,
+            wireVersion: 1, registrationToken: "synthetic-token", phoneID: predecessor.phoneID)
+        XCTAssertTrue(admission.inserted)
+        _ = try await f.coordinator.deliverProbe(operationID: grant.operationID, phoneID: predecessor.phoneID)
+        let challenges = await f.provider.challenges
+        let challenge = try XCTUnwrap(challenges.first { $0.candidateID == metadata.candidateID })
+        let proofFrame = PhonePushRegistrationFrame.proof(correlationID: Data(repeating: 72, count: 16),
+            proof: try metadata.proof(challenge))
+        let activated = try f.journal.withRequests { _ in
+            try f.root.exchange(proofFrame, time: clock.now().milliseconds, binding: binding)
+        }
+        guard case .outcome(_, .proofCommitted) = activated else { return XCTFail("Expected the registration proof to commit") }
+        let activation = try XCTUnwrap(tokenState().activation)
+        let applied = try await f.coordinator.applyRecipient(canonicalPayload: activation.canonicalPayload,
+            signature: activation.signature, wireVersion: 1, kind: .activation, phoneID: predecessor.phoneID)
+        XCTAssertTrue(applied.inserted)
+        XCTAssertGreaterThan(activation.revision, grant.revision)
+        try await f.assertGatewayHead(activation.revision)
+
+        let preparedRevocation = try f.journal.withRequests { owner in
+            try owner.prepareManagedPhoneRevocation(f.root.provider, now: clock.now(), wall: clock.wall())
+        }
+        XCTAssertTrue(preparedRevocation)
+        let revocation = try XCTUnwrap(f.journal.read {
+            try $0.gatewayLocalRevocation(for: DeliveryRecipient(old), registration: registration)
+        })
+        XCTAssertEqual(revocation.revision, activation.revision + 1)
+        clock.advance(1001)
+        try await synchronize(sequence: 2)
+        let recovered = try await f.coordinator.recoverPhoneRevocation(canonicalPayload: revocation.canonicalPayload,
+            signature: revocation.signature, phoneID: predecessor.phoneID, expectedHead: activation.revision, lease: f.driver.lease)
+        XCTAssertTrue(recovered.inserted)
+        XCTAssertEqual(recovered.receipt.enrollmentEpoch, old.epoch)
+        try await f.assertGatewayHead(revocation.revision)
+
+        let candidate = try GatewayTokenCandidate.decode(grant.canonicalPayload, limits: f.root.limits)
+        let mappingScope = try GatewayMappingScope(registration: registration, binding: candidate.binding)
+        let receiptKey = f.driver.receiptKey
+        let query = try GatewayMappingQueryOwner(scope: mappingScope, gatewayPublicKey: receiptKey.publicKey.x963Representation,
+            clockEpoch: clock.epoch)
+        let reply = try await f.coordinator.mappingStateReply(canonicalQuery: query.query(now: clock.now())) {
+            try receiptKey.signature(for: $0).rawRepresentation
+        }
+        let mapping = try query.accept(reply, now: clock.now())
+        XCTAssertEqual(mapping.activation?.binding.enrollmentEpoch, epoch)
+        await f.close()
     }
 
     func testExpiredNonRegistrationControlsStillBlockLaterRegistration() async throws {

@@ -167,7 +167,7 @@ if setup.pairing == true {
                 minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: invitation.authorityPublicKey,
                 macTransportKey: invitation.transportPublicKey, transportKey: proposal.transportKey,
                 decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey, enrollmentTag: pairingRandom(32),
-                replacement: nil, expectedTrustRevision: pairingRandom(16), issuedAtUnixMillis: wall, expiresAtUnixMillis: wall + 10000)
+                replacement: proposal.replacement, expectedTrustRevision: pairingRandom(16), issuedAtUnixMillis: wall, expiresAtUnixMillis: wall + 10000)
             try await channel.stage(transcript)
             _ = try await channel.receiveProof()
             let receipt = try authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation

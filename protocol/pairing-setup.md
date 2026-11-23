@@ -1,4 +1,4 @@
-# Restricted pairing exchange, version 1
+# Restricted pairing exchange
 
 An unpaired phone can submit public claims through a separate TLS profile. This exchange grants no approval or enrollment authority.
 The invitation supplies the expected Mac pins. The phone must authenticate those pins through an independent setup surface.
@@ -75,18 +75,28 @@ The phone proposal uses exactly four fields: domain `dev.remozio.pairing.proposa
 Each row contains a 16-byte key ID and a valid 65-byte P-256 point, in transport, decision, biometric order.
 All three IDs and points must differ. Proposal limits are 66,000 bytes, depth 3, and 24 items.
 The proposal must use the phone role. The setup channel checks the invitation scope and exact returned phone claims.
-Version 1 supports adding an enrollment. Replacement has no representation in this proposal.
+Version 1 adds an enrollment and retains its original encoding. It requires a phone ID that has no retained enrollment.
+The re-pair proposal uses version 2 and adds field 4, an array containing the predecessor phone ID and epoch.
+Both are 16-byte strings. The phone offer must retain that phone ID and specify a different epoch.
+Reject version 2 without field 4, version 1 with field 4, and any mismatch between the proposal and the returned transcript.
+Peers that support only version 1 refuse this proposal.
 
 ## Authorization and recovery
 
-The local adapter constructs a temporary legacy transcript from authenticated Root context and the phone claims.
-It uses the existing local version 1 staging call. Root replaces the temporary Mac fields with fresh setup values.
+For ordinary pairing, the local adapter constructs a temporary legacy transcript from authenticated Root context and the phone claims.
+It sends it through the existing local version 1 staging call. For re-pair, it forwards the canonical version 2 proposal in that call.
+Root supplies the actual Mac fields and binds the predecessor through the existing signed transcript replacement field.
 Temporary IDs, challenges, revisions, and times never travel over the setup network. Confirm and sign only the actual returned transcript.
 This adapter does not change the existing local handshake or administrator authorization contract.
 
 Accept one proposal, one returned transcript, one proof, and one receipt, in order.
 Bind both signatures to the same setup ID and digest. Use PHONE_BIOMETRIC for the phone proof and MAC_COMMIT for the receipt.
 The network owner verifies signatures mathematically. Root still checks consent, current policy, freshness, and durable commit.
+For re-pair, Root checks the exact retained predecessor at staging and commit. It must already be revoked.
+Root retains the old row and commits only the new enrollment, with a fresh epoch and three fresh keys.
+Root refuses a key already present in any retained enrollment.
+An exact recovered revocation remains evidence for that epoch. A phone-wide restriction for unknown gateway history requires separate administrator recovery.
+The receipt format stays the same and confirms the full transcript.
 The Android owner must persist PREPARED before submitting its hardware proof. It activates only after the authority receipt passes verification.
 
 A failed receipt delivery leaves the result ambiguous. Preserve PREPARED and use the existing recovery contract.

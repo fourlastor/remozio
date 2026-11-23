@@ -9,16 +9,39 @@ public enum PairingEnrollmentError: Error, Equatable {
 /// Network input cannot create this authorization context. A restart requires a new authorized attempt.
 public final class PairingEnrollmentAttempt: Sendable {
     public let transcript: PairingTranscript
-    private let authorizedReplacement: PairingReplacement?
+    private let replacement: Replacement
     private let revision: UUID
     private let started: AuthorityMoment
     private let deadline: UInt64
     private let enrollment: StoredApprovalEnrollment
 
-    public init(transcript: PairingTranscript, trusted: ApprovalTrustSnapshot,
-                authorizedReplacement: PairingReplacement?,
-                authorityPublicKey: Data, transportPublicKey: Data, minimumEnvelopeVersion: UInt64,
-                started: AuthorityMoment, startedAtUnixMillis: UInt64, deadlineMilliseconds: UInt64) throws {
+    enum Replacement: Sendable {
+        case none
+        case revokeActive(PairingReplacement)
+        case requireRevoked(PairingReplacement)
+
+        var predecessor: PairingReplacement? {
+            switch self {
+            case .none: nil
+            case .revokeActive(let value), .requireRevoked(let value): value
+            }
+        }
+    }
+
+    public convenience init(transcript: PairingTranscript, trusted: ApprovalTrustSnapshot,
+                            authorizedReplacement: PairingReplacement?,
+                            authorityPublicKey: Data, transportPublicKey: Data, minimumEnvelopeVersion: UInt64,
+                            started: AuthorityMoment, startedAtUnixMillis: UInt64, deadlineMilliseconds: UInt64) throws {
+        try self.init(transcript: transcript, trusted: trusted,
+            replacement: authorizedReplacement.map(Replacement.revokeActive) ?? .none,
+            authorityPublicKey: authorityPublicKey, transportPublicKey: transportPublicKey,
+            minimumEnvelopeVersion: minimumEnvelopeVersion, started: started,
+            startedAtUnixMillis: startedAtUnixMillis, deadlineMilliseconds: deadlineMilliseconds)
+    }
+
+    init(transcript: PairingTranscript, trusted: ApprovalTrustSnapshot, replacement: Replacement,
+         authorityPublicKey: Data, transportPublicKey: Data, minimumEnvelopeVersion: UInt64,
+         started: AuthorityMoment, startedAtUnixMillis: UInt64, deadlineMilliseconds: UInt64) throws {
         let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 5, maxItems: 5000)
         guard case let .map(offer) = try DeterministicCBOR.decode(transcript.phone.encode(), limits: limits),
               case let .array(scope) = offer[2], scope.count == 4,
@@ -26,8 +49,7 @@ public final class PairingEnrollmentAttempt: Sendable {
               case let .bytes(phone) = scope[2], case let .bytes(epoch) = scope[3] else { throw PairingEnrollmentError.wrongContext }
         var uuid = trusted.revision.uuid
         let revisionBytes = withUnsafeBytes(of: &uuid) { Data($0) }
-        guard transcript.replacement?.phoneID == authorizedReplacement?.phoneID,
-              transcript.replacement?.epoch == authorizedReplacement?.epoch,
+        guard transcript.replacement == replacement.predecessor,
               mac == trusted.macID, account == trusted.accountID,
               transcript.expectedTrustRevision == revisionBytes,
               transcript.macAuthorityKey == authorityPublicKey, transcript.macTransportKey == transportPublicKey,
@@ -45,7 +67,7 @@ public final class PairingEnrollmentAttempt: Sendable {
                 EnrolledApprovalKey(id: transcript.decisionKey.keyID, keyClass: .decision, publicKey: transcript.decisionKey.publicKey),
                 EnrolledApprovalKey(id: transcript.biometricKey.keyID, keyClass: .biometric, publicKey: transcript.biometricKey.publicKey),
             ]))
-        self.authorizedReplacement = authorizedReplacement
+        self.replacement = replacement
         self.transcript = transcript; self.revision = trusted.revision
         self.started = started; self.deadline = started.milliseconds + lifetime
     }
@@ -88,6 +110,35 @@ public final class PairingEnrollmentAttempt: Sendable {
         }
     }
 
+    func validateEnrollmentHistory(_ transaction: JournalTransaction) throws {
+        let scope = transcript.phone.scope
+        let retained = try transaction.approvalEnrollments()
+        let samePhone = retained.filter { $0.approval.phoneID == scope.phoneID }
+        switch replacement {
+        case .none:
+            guard samePhone.isEmpty else { throw EnrollmentJournalError.reusedIdentity }
+        case .requireRevoked(let predecessor):
+            guard predecessor.phoneID == scope.phoneID, predecessor.epoch != scope.enrollmentEpoch else {
+                throw PairingEnrollmentError.wrongContext
+            }
+            guard try !transaction.approvalTrustRestrictions().contains(scope.phoneID) else {
+                throw EnrollmentJournalError.recoveryRequired
+            }
+            guard let old = samePhone.first(where: { $0.epoch == predecessor.epoch }), !old.approval.active,
+                  !samePhone.contains(where: { $0.approval.active }) else {
+                throw EnrollmentJournalError.unavailableEnrollment
+            }
+        case .revokeActive:
+            return
+        }
+        let proposedKeys = Set([transcript.transportKey.publicKey, transcript.decisionKey.publicKey, transcript.biometricKey.publicKey])
+        for row in retained {
+            guard proposedKeys.isDisjoint(with: [row.identityPublicKey] + row.approval.keys.map(\.publicKey)) else {
+                throw EnrollmentJournalError.reusedIdentity
+            }
+        }
+    }
+
     /// The shared request owner supplies its checkpointed transaction and current audit head.
     func commit(transaction: JournalTransaction, biometricProof: Data, writer: AuditEpochWriter,
                 expectedAuditHead: UInt64, addEventID: Data, removalEventID: Data?,
@@ -97,7 +148,7 @@ public final class PairingEnrollmentAttempt: Sendable {
             throw PairingEnrollmentError.invalidProof
         }
         guard addEventID.count == 16, expectedAuditHead < UInt64.max else { throw PairingEnrollmentError.invalidAudit }
-        if authorizedReplacement != nil {
+        if case .revokeActive = replacement {
             guard let removalEventID, removalEventID.count == 16, removalEventID != addEventID,
                   expectedAuditHead < UInt64.max - 1 else { throw PairingEnrollmentError.invalidAudit }
         } else if removalEventID != nil || gateway != nil { throw PairingEnrollmentError.wrongContext }
@@ -108,10 +159,11 @@ public final class PairingEnrollmentAttempt: Sendable {
         guard trust.revision == revision else { throw EnrollmentJournalError.staleRevision }
         guard try transcript.phone.scope == ChannelScope(macID: trust.macID, accountID: trust.accountID,
             phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch) else { throw PairingEnrollmentError.wrongContext }
+        try validateEnrollmentHistory(transaction)
         var expected = revision
         var head = expectedAuditHead
         var control: GatewayAuthorityEnvelope?
-        if let replacement = authorizedReplacement {
+        if case .revokeActive(let replacement) = replacement {
             let removed = try transaction.revokeApprovalEnrollment(phoneID: replacement.phoneID, epoch: replacement.epoch,
                 expectedTrustRevision: expected, eventID: removalEventID!, receiptTimeMs: receiptTimeMs,
                 writer: writer, expectedAuditHead: head, gateway: gateway)
