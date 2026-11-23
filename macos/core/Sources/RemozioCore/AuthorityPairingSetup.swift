@@ -195,10 +195,10 @@ final class AuthorityPairingSetupAccess: Sendable {
                 ?? GatewayRevocationHealth.read(trust.enrollments, availability: availability)
             let health = inconclusiveSince != nil && (liveHealth == .clear || liveHealth == .pending)
                 ? .grantAbandonmentInconclusive : liveHealth
+            let rePairable = try includeRePair ? tx.rePairPredecessors(in: trust.enrollments) : []
             return PairedPhoneSnapshot(macID: self.macID, accountID: self.accountID, revision: trust.approval.revision,
                 phones: trust.enrollments.filter { $0.approval.active }.map(DeliveryRecipient.init),
-                rePairablePhones: includeRePair ? PairingEnrollmentAttempt.revokedPredecessors(trust.enrollments,
-                    restrictions: try tx.approvalTrustRestrictions()) : [],
+                rePairablePhones: rePairable,
                 revocationAvailability: availability, gatewayRevocationHealth: health,
                 gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil)
         }
@@ -210,8 +210,8 @@ final class AuthorityPairingSetupAccess: Sendable {
             try self.requireCurrent(tx)
             let trust = try tx.requestDeliveryTrust()
             guard selection.revision == trust.approval.revision else { return false }
-            return try PairingEnrollmentAttempt.revokedPredecessors(trust.enrollments,
-                restrictions: tx.approvalTrustRestrictions()).contains(selection.phone)
+            let samePhone = trust.enrollments.filter { $0.approval.phoneID == selection.phone.phoneID }
+            return try tx.rePairPredecessors(in: samePhone).contains(selection.phone)
         }
     }
 

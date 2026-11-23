@@ -12,10 +12,14 @@ private actor MacPairingRootFixture: MacPairingRootControl {
     var stages = 0
     var commits = 0
     var loseCommitReply = false
-    var allowedToRePair = true
+    var remainingRePairChecks: Int?
     var heldCommit: AsyncStream<Void>?
-    func canRePair(_ selection: PairedPhoneSelection) -> Bool { allowedToRePair }
-    func rejectRePair() { allowedToRePair = false }
+    func canRePair(_ selection: PairedPhoneSelection) -> Bool {
+        guard let remainingRePairChecks else { return true }
+        self.remainingRePairChecks = max(0, remainingRePairChecks - 1)
+        return remainingRePairChecks > 0
+    }
+    func permitRePairChecks(_ count: Int) { remainingRePairChecks = count }
     func holdCommit(_ signal: AsyncStream<Void>) { heldCommit = signal }
     init(_ fixture: TransportPairingFixture) { self.fixture = fixture }
     func start() -> AuthorityPairingContext {
@@ -49,20 +53,22 @@ private actor MacPairingTransportFixture: MacPairingTransportControl {
     var receipts = 0
     var loseReceiptReply = false
     var rePairStarts = 0
-    var stops = 0
+    private let aborts = Mutex(0)
+    nonisolated var abortCount: Int { aborts.withLock { $0 } }
+    var staged = 0
     func start(rePair: RePairInvitation) throws -> UInt16 {
         XCTAssertEqual(rePair.predecessor, fixture.proposal.replacement)
         XCTAssertEqual(try rePair.invitation.encode(), try fixture.invitation.encode())
         rePairStarts += 1
         return 4321
     }
-    func stop() { stops += 1 }
     init(_ fixture: TransportPairingFixture) { self.fixture = fixture }
     func start(invitation: PairingInvitation) throws -> UInt16 { XCTAssertEqual(try invitation.encode(), try fixture.invitation.encode()); return 4321 }
     func current() throws -> TransportPairingSnapshot {
         try .init(port: 4321, candidates: disappear ? [] : [.init(id: id, proposal: fixture.proposal, phase: phase, biometricProof: proof)])
     }
     func stage(candidateID: Data, transcript: PairingTranscript) throws {
+        staged += 1
         XCTAssertEqual(candidateID, id); XCTAssertEqual(try transcript.encode(), try fixture.transcript.encode()); phase = .awaitingProof
     }
     func deliverReceipt(candidateID: Data, signature: Data) throws {
@@ -75,7 +81,7 @@ private actor MacPairingTransportFixture: MacPairingTransportControl {
     func showProof(_ value: Data) { proof = value; phase = .proofReady }
     func removeCandidate() { disappear = true }
     func loseDelivery() { loseReceiptReply = true }
-    nonisolated func abort() {}
+    nonisolated func abort() { aborts.withLock { $0 += 1 } }
     func close() {}
 }
 private actor MacPairingAdministratorFixture: MacPairingAdministrator {
@@ -110,13 +116,13 @@ final class MacPairingSessionTests: XCTestCase {
         let admin: MacPairingAdministratorFixture
         let clock = MacPairingClockFixture()
         let session: MacPairingSession
-        init(rePair: Bool = false) throws {
+        init(rePair: Bool = false, selectedRevision: UUID? = nil) throws {
             let fixture = try TransportPairingFixture(rePair: rePair)
             self.fixture = fixture
             root = .init(fixture); transport = .init(fixture); admin = .init(root)
             let predecessor = try fixture.proposal.replacement.map { replacement in
                 PairedPhoneSelection(macID: fixture.configuration.macID, accountID: fixture.configuration.accountID,
-                    revision: try GatewayHostSnapshot.uuid(fixture.transcript.expectedTrustRevision),
+                    revision: try selectedRevision ?? GatewayHostSnapshot.uuid(fixture.transcript.expectedTrustRevision),
                     phone: DeliveryRecipient(phoneID: replacement.phoneID, enrollmentEpoch: replacement.epoch))
             }
             let clock = clock
@@ -143,7 +149,7 @@ final class MacPairingSessionTests: XCTestCase {
     }
     func testRePairRevalidatesSelectionBeforePublishingAndStaging() async throws {
         let denied = try Owner(rePair: true)
-        await denied.root.rejectRePair()
+        await denied.root.permitRePairChecks(0)
         do { try await denied.start(); XCTFail("Published a stale selection") }
         catch { XCTAssertTrue(error is MacPairingSessionError) }
         let starts = await denied.transport.rePairStarts
@@ -153,11 +159,36 @@ final class MacPairingSessionTests: XCTestCase {
         try await stale.start()
         let snapshot = await stale.session.snapshot()
         XCTAssertEqual(snapshot.rePairInvitation?.predecessor, stale.fixture.proposal.replacement)
-        await stale.root.rejectRePair()
+        await stale.root.permitRePairChecks(0)
         do { try await stale.select(); XCTFail("Staged a stale selection") }
         catch { XCTAssertTrue(error is MacPairingSessionError) }
         let stages = await stale.root.stages
         XCTAssertEqual(stages, 0)
+    }
+
+    func testRePairRechecksEligibilityAfterWaitingForTheHelper() async throws {
+        let o = try Owner(rePair: true)
+        await o.root.permitRePairChecks(1)
+        do { try await o.start(); XCTFail("Published an invitation after eligibility changed") }
+        catch MacPairingSessionError.ineligiblePredecessor {}
+        let starts = await o.transport.rePairStarts
+        let snapshot = await o.session.snapshot()
+        XCTAssertEqual(starts, 1)
+        XCTAssertGreaterThan(o.transport.abortCount, 0)
+        XCTAssertNil(snapshot.rePairInvitation)
+    }
+
+    func testRePairRejectsAStagedTranscriptForADifferentTrustRevision() async throws {
+        let o = try Owner(rePair: true, selectedRevision: GatewayHostSnapshot.uuid(Data(repeating: 12, count: 16)))
+        try await o.start()
+        do { try await o.select(); XCTFail("Exposed a transcript for a different revision") }
+        catch MacPairingSessionError.ineligiblePredecessor {}
+        let rootStages = await o.root.stages
+        let transportStages = await o.transport.staged
+        XCTAssertEqual(rootStages, 1)
+        XCTAssertEqual(transportStages, 0)
+        let state = await o.session.snapshot()
+        XCTAssertNil(state.comparisonCode)
     }
 
     func testRePairCloseWaitsForSubmittedCommitAndPreservesReceipt() async throws {
@@ -182,17 +213,15 @@ final class MacPairingSessionTests: XCTestCase {
         }
         try await Task.sleep(for: .milliseconds(40))
         XCTAssertFalse(closed.withLock { $0 })
-        let stops = await o.transport.stops
-        XCTAssertEqual(stops, 0)
+        XCTAssertEqual(o.transport.abortCount, 0)
         release.continuation.finish()
         let state = try await commit.value
         let current = await close.value
         XCTAssertTrue(current)
         XCTAssertEqual(state.phase, .receiptSent)
         let receipts = await o.transport.receipts
-        let finalStops = await o.transport.stops
         XCTAssertEqual(receipts, 1)
-        XCTAssertEqual(finalStops, 1)
+        XCTAssertGreaterThan(o.transport.abortCount, 0)
     }
 
     func testRePairCloseRefusesAReplacementAfterAnUnknownCommit() async throws {

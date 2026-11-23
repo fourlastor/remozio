@@ -82,10 +82,16 @@ The CBOR is at most 640 bytes. Each ID and the epoch are 16 bytes. The Mac and a
 embedded canonical ordinary invitation. The envelope carries the selection and existing pins. The setup
 exchange authenticates the Mac and authorizes the exact transcript after comparison and biometric proof.
 
+Root uses verified retained pairing transcripts to identify the latest epoch in the phone's enrollment history.
+Only that epoch can be selected for re-pair, and it must already be revoked. Root checks it at export, staging, and commit.
+An ambiguous history leaves re-pair unavailable.
+
 The Mac binds the listener to its own retained selection. It admits only a proposal for that predecessor
 and a different epoch of the same phone. An ordinary invitation admits only the ordinary proposal.
-A replacement export waits for the prior listener and candidates to drain. A submitted commit settles
-before the app releases the old generation. The signed receipt stays available after the listener closes.
+A replacement export waits for the helper to drain the prior listener and candidates for that predecessor.
+Other pairings can open after the old control connection closes. A submitted commit settles before the app
+releases the old generation. If the Root result stays unknown, the app blocks that predecessor for the rest of
+the app process. The signed receipt stays available after the listener closes.
 
 The re-pair proposal uses version 2 and adds field 4, an array containing the predecessor phone ID and epoch.
 Both are 16-byte strings. The phone offer must retain that phone ID and specify a different epoch.

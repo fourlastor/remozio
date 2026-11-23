@@ -40,19 +40,22 @@ final class MacPairingControls {
     @ObservationIgnored private var jobs: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var cleanup: Task<Void, Never>?
     @ObservationIgnored private var polling: Task<MacPairingSessionSnapshot, Error>?
-    @ObservationIgnored private var rePairStart: UUID?
+    @ObservationIgnored private var rePairSheet: UUID?
     @ObservationIgnored private var predecessor: DeliveryRecipient?
     @ObservationIgnored private var unresolved = Set<DeliveryRecipient>()
     deinit { polling?.cancel(); for job in jobs.values { job.cancel() }; session?.abort() }
 
-    func startRePair(_ selection: PairedPhoneSelection) async {
+    func startRePair(_ selection: PairedPhoneSelection, sheet: UUID) async {
         if session != nil { stop() }
-        let request = UUID()
-        rePairStart = request
+        rePairSheet = sheet
         await cleanup?.value
-        guard !Task.isCancelled, rePairStart == request else { return }
-        rePairStart = nil
+        guard !Task.isCancelled, rePairSheet == sheet else { return }
         start(predecessor: selection)
+    }
+
+    func stopRePair(sheet: UUID) {
+        guard rePairSheet == sheet else { return }
+        stop()
     }
 
     func start(predecessor selection: PairedPhoneSelection? = nil) {
@@ -142,7 +145,7 @@ final class MacPairingControls {
         }
     }
     func stop() {
-        rePairStart = nil
+        rePairSheet = nil
         guard !closing else { return }
         generation = nil; closing = true
         presentation = PairingPresentation()
@@ -187,15 +190,16 @@ struct PairingSheet: View {
 struct RePairSheet: View {
     @Environment(\.dismiss) private var dismiss
     let controls: MacPairingControls
+    let requestID: UUID
     let selection: PairedPhoneSelection
     let identifier: String
 
     var body: some View {
         PairingSheetContent(state: controls.presentation, working: controls.working,
-            onSelect: controls.select, onConfirm: controls.confirm, onClose: { controls.stop(); dismiss() },
-            rePairIdentifier: identifier)
-            .task { await controls.startRePair(selection) }
-            .onDisappear { controls.stop() }
+            onSelect: controls.select, onConfirm: controls.confirm,
+            onClose: { controls.stopRePair(sheet: requestID); dismiss() }, rePairIdentifier: identifier)
+            .task { await controls.startRePair(selection, sheet: requestID) }
+            .onDisappear { controls.stopRePair(sheet: requestID) }
     }
 }
 
@@ -435,7 +439,8 @@ struct PairedPhonesSheet: View {
         }
         .onDisappear { channel?.abort() }
         .sheet(item: $rePairRequest, onDismiss: { run { await refresh() } }) { request in
-            RePairSheet(controls: rePairControls, selection: request.selection, identifier: request.identifier)
+            RePairSheet(controls: rePairControls, requestID: request.id, selection: request.selection,
+                identifier: request.identifier)
         }
         .alert("Revoke this phone?", isPresented: $showingConfirmation, presenting: confirmation) { item in
             Button("Cancel", role: .cancel) {}

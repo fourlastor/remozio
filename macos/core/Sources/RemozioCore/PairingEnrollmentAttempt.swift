@@ -110,14 +110,6 @@ public final class PairingEnrollmentAttempt: Sendable {
         }
     }
 
-    static func revokedPredecessors(_ rows: [StoredApprovalEnrollment], restrictions: Set<Data>) -> [DeliveryRecipient] {
-        let active = Set(rows.lazy.filter { $0.approval.active }.map { $0.approval.phoneID })
-        return rows.compactMap { row in
-            guard !active.contains(row.approval.phoneID), !restrictions.contains(row.approval.phoneID) else { return nil }
-            return DeliveryRecipient(row)
-        }
-    }
-
     func validateEnrollmentHistory(_ transaction: JournalTransaction) throws {
         let scope = transcript.phone.scope
         let retained = try transaction.approvalEnrollments()
@@ -132,7 +124,7 @@ public final class PairingEnrollmentAttempt: Sendable {
             guard try !transaction.approvalTrustRestrictions().contains(scope.phoneID) else {
                 throw EnrollmentJournalError.recoveryRequired
             }
-            guard Self.revokedPredecessors(samePhone, restrictions: []).contains(
+            guard try transaction.rePairPredecessors(in: samePhone).contains(
                 DeliveryRecipient(phoneID: predecessor.phoneID, enrollmentEpoch: predecessor.epoch)) else {
                 throw EnrollmentJournalError.unavailableEnrollment
             }

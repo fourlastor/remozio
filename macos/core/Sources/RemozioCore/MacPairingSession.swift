@@ -30,7 +30,6 @@ protocol MacPairingRootControl: Sendable {
 protocol MacPairingTransportControl: Sendable {
     func start(invitation: PairingInvitation) async throws -> UInt16
     func start(rePair: RePairInvitation) async throws -> UInt16
-    func stop() async throws
     func current() async throws -> TransportPairingSnapshot
     func stage(candidateID: Data, transcript: PairingTranscript) async throws
     func deliverReceipt(candidateID: Data, signature: Data) async throws
@@ -82,7 +81,6 @@ public actor MacPairingSession {
     private var humanConfirmed = false
     private var closingForRePair = false
     private var commitWaiters: [CheckedContinuation<Void, Never>] = []
-    private var rePairRelease: Task<Void, Never>?
 
     /// Both inputs must come from protected installation metadata. This opens no channel until start is called.
     public init(rootConfiguration: AuthorityPresenceClientConfiguration, transportConfiguration: TransportPairingControlConfiguration,
@@ -119,6 +117,9 @@ public actor MacPairingSession {
                 try active()
                 let rePair = try RePairInvitation(invitation: invitation, predecessor: predecessor.predecessor)
                 _ = try await transport.start(rePair: rePair)
+                try active()
+                guard try await root.canRePair(predecessor) else { throw MacPairingSessionError.ineligiblePredecessor }
+                try active()
                 rePairInvitation = rePair
             } else {
                 _ = try await transport.start(invitation: invitation)
@@ -244,8 +245,7 @@ public actor MacPairingSession {
     public nonisolated func abort() { cancellation.cancel(); root.abort(); transport.abort() }
     /// Cancels admission immediately. Native authorization cleanup may wait for its actual OS call to return.
     public func close() async {
-        if predecessor == nil { abort() }
-        else { cancellation.cancel(); root.abort() }
+        abort()
         if phase != .registeredOnMac && phase != .receiptSent && phase != .outcomeUnknown { phase = commitAttempted ? .outcomeUnknown : .closed }
         await releaseChannels()
     }
@@ -267,23 +267,11 @@ public actor MacPairingSession {
     }
     private func releaseChannels() async {
         root.abort()
-        if predecessor == nil {
-            transport.abort()
-            await root.close()
-            await transport.close()
-            await administrator.close()
-            return
-        }
-        if let rePairRelease { await rePairRelease.value; return }
-        let task = Task { [root, transport, administrator] in
-            // The native stop reply follows the listener and candidate drain.
-            do { try await transport.stop() } catch { transport.abort() }
-            await root.close()
-            await transport.close()
-            await administrator.close()
-        }
-        rePairRelease = task
-        await task.value
+        // A new re-pair awaits the helper's drain for that predecessor before beginning setup.
+        transport.abort()
+        await root.close()
+        await transport.close()
+        await administrator.close()
     }
     public func snapshot() -> MacPairingSessionSnapshot {
         let elapsed = elapsedMilliseconds()

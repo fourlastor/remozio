@@ -109,7 +109,8 @@ class PairingSetupInteropTest {
             } finally { channel?.closeAndJoin(); owner.cancelAndJoin() }
         }
     }
-    @Test fun rePairProposalRoundTripsTheSelectedPredecessorInASignedNativeReceipt(): Unit = runBlocking {
+    // The synthetic peer checks the transmitted bytes and the client imports the invitation.
+    @Test fun rePairClientImportsTheInvitationAndSendsTheSelectedPredecessorToTheSyntheticPeer(): Unit = runBlocking {
         Fixture(rePair = true).use { f ->
             val owner = SupervisorJob(); val scope = CoroutineScope(owner)
             var channel: PairingSetupChannel? = null

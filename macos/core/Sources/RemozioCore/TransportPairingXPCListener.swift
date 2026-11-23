@@ -25,7 +25,10 @@ public final class TransportPairingXPCListener: NSObject, NSXPCListenerDelegate,
     public init(configuration: TransportPairingControlConfiguration, identity: SecIdentity) throws {
         try DedicatedServiceAccount.requireCurrent(serviceUID: configuration.transportUID, ownerUID: configuration.ownerUID)
         let holder = TransportPairingListenerIdentity(identity)
-        ownerFactory = { try TransportPairingSetupOwner(configuration: configuration, identity: holder.value) }
+        let rePairAdmission = TransportRePairAdmission()
+        ownerFactory = {
+            try TransportPairingSetupOwner(configuration: configuration, identity: holder.value, rePairAdmission: rePairAdmission)
+        }
         policy = configuration.appPolicy
         registry = try AuthorityConnectionRegistry(maximum: 1, timeoutMilliseconds: configuration.timeoutMilliseconds)
         listener = NSXPCListener(machServiceName: configuration.serviceName)
@@ -52,7 +55,7 @@ public final class TransportPairingXPCListener: NSObject, NSXPCListenerDelegate,
     }
     public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         lock.withLock {
-            guard listener === self.listener, started, !closed, retired.isEmpty, let id = registry.reserve() else { connection.invalidate(); return false }
+            guard listener === self.listener, started, !closed, let id = registry.reserve() else { connection.invalidate(); return false }
             do {
                 policy.configure(connection)
                 let endpoint = try TransportPairingXPCEndpoint(connection: connection, policy: policy, owner: ownerFactory(),

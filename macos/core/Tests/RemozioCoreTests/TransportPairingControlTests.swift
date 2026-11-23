@@ -64,8 +64,10 @@ final class PairingControlIngressFixture: TransportPairingIngress, @unchecked Se
     }
     func close() { lock.withLock { closed = true; for task in tasks { task.cancel() } } }
     func closeAndWait() async { close(); let tasks = lock.withLock { self.tasks }; for task in tasks { await task.value } }
-    func owner(_ configuration: TransportPairingControlConfiguration) -> TransportPairingSetupOwner {
-        .init(configuration: configuration, factory: { [self] _, event, handler in prepare(event: event, handler: handler); return self })
+    func owner(_ configuration: TransportPairingControlConfiguration,
+               rePairAdmission: TransportRePairAdmission = TransportRePairAdmission()) -> TransportPairingSetupOwner {
+        .init(configuration: configuration, rePairAdmission: rePairAdmission,
+            factory: { [self] _, event, handler in prepare(event: event, handler: handler); return self })
     }
 }
 actor PairingControlPeerFixture: TransportPairingPeer {
@@ -117,6 +119,9 @@ final class PairingControlLocalDriver: TransportPairingDriver, @unchecked Sendab
             switch call {
             case .hello:
                 calls.append("hello"); if let helloVersion { reply(.number(helloVersion)) } else { endpoint.setupHello { reply(.number($0)) } }
+            case .waitForRePairDrain(let bytes):
+                calls.append("rePairDrain")
+                endpoint.waitForRePairSetupDrain(bytes) { reply(.flag($0)) }
             case .begin(let bytes): calls.append("begin"); endpoint.beginSetup(bytes) { reply(.number($0)) }
             case .snapshot:
                 calls.append("snapshot")
@@ -280,6 +285,53 @@ final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(complete.withLock { $0 }, 2)
         do { _ = try await owner.snapshot(); XCTFail() } catch {}
     }
+    func testOrdinarySetupStartsWhileThePreviousRePairListenerDrains() async throws {
+        let f = try TransportPairingFixture(rePair: true)
+        let admission = TransportRePairAdmission()
+        let firstIngress = PairingControlIngressFixture()
+        let first = firstIngress.owner(f.configuration, rePairAdmission: admission)
+        let envelope = RePairInvitation(invitation: f.invitation, predecessor: try XCTUnwrap(f.proposal.replacement))
+        _ = try await first.begin(rePair: envelope)
+        let oldPeer = PairingControlPeerFixture(f.proposal, holdAfterAbort: true)
+        firstIngress.accept(oldPeer)
+        try await until { try await !first.snapshot().candidates.isEmpty }
+        let candidates = try await first.snapshot().candidates
+        let candidate = try XCTUnwrap(candidates.first)
+        try await first.stage(candidateID: candidate.id, transcript: f.transcript)
+        try await until { await oldPeer.reading }
+        defer { Task { await oldPeer.release(Data(count: 64)) } }
+        first.abort()
+        try await until { await oldPeer.isClosed }
+
+        let ordinaryIngress = PairingControlIngressFixture()
+        let ordinary = ordinaryIngress.owner(f.configuration, rePairAdmission: admission)
+        let port = try await ordinary.begin(f.invitation)
+        XCTAssertEqual(port, 4321)
+        await ordinary.closeAndWait()
+
+        let other = PairingControlIngressFixture().owner(f.configuration, rePairAdmission: admission)
+        let otherPredecessor = try PairingReplacement(phoneID: envelope.predecessor.phoneID, epoch: Data(repeating: 11, count: 16))
+        let otherPort = try await other.begin(rePair: RePairInvitation(invitation: f.invitation, predecessor: otherPredecessor))
+        XCTAssertEqual(otherPort, 4321)
+        await other.closeAndWait()
+
+        let nextIngress = PairingControlIngressFixture()
+        let next = nextIngress.owner(f.configuration, rePairAdmission: admission)
+        do { _ = try await next.begin(rePair: envelope); XCTFail("Started a second listener for the same predecessor") }
+        catch { XCTAssertEqual(error as? TransportPairingControlError, .busy) }
+
+        let driver = PairingControlLocalDriver(owner: next)
+        let client = TransportPairingChannel(configuration: f.configuration, driver: driver)
+        let export = Task { try await client.start(rePair: envelope) }
+        try await until { driver.counts("rePairDrain") == 1 }
+        XCTAssertEqual(driver.counts("begin"), 0)
+        await oldPeer.release(Data(count: 64))
+        let secondPort = try await export.value
+        XCTAssertEqual(secondPort, 4321)
+        XCTAssertEqual(driver.counts("begin"), 1)
+        try await client.stop()
+    }
+
     func testRePairStopAcknowledgesOnlyAfterTheOldProofReaderDrains() async throws {
         let f = try TransportPairingFixture(rePair: true)
         let predecessor = try XCTUnwrap(f.proposal.replacement)
