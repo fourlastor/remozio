@@ -123,7 +123,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func enrollment(active: Bool = true, phone: UInt8 = 6, epoch: UInt8 = 7) throws -> GatewayPhoneEnrollment {
             try .init(phoneID: id(phone), epoch: id(epoch), tag: id(phone, 32), active: active)
         }
-        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil, validateAuthority: @escaping @Sendable () throws -> Void = {}, beforeSend: @escaping @Sendable () throws -> Void = {}) throws -> GatewayDeliveryCoordinator {
+        func coordinator(_ provider: Provider, maximumOperations: Int = 20, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil, validateAuthority: @escaping @Sendable () throws -> Void = {}, beforeSend: @escaping @Sendable () throws -> Void = {}) throws -> GatewayDeliveryCoordinator {
             let clock = clock, refreshes = refreshes
             let source = try tokenSource ?? FCMTokenSource(now: { .now }, refresh: {
                 refreshes.value.withLock { $0 += 1 }
@@ -131,8 +131,8 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             })
             let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
             let db = try GatewayDatabase(lease: ProtectedGatewayLease(anchor: root.path, relativeDirectory: "store", serviceUID: geteuid(), ancestorUID: geteuid()),
-                identity: identity(), payloadLimits: limits, signingLimits: limits, maximumOperations: 20,
-                maximumPendingPerEnrollment: 5, maximumLifetimeMillis: lifetime, clockEpoch: clock.epoch, busyMilliseconds: 100,
+                identity: identity(), payloadLimits: limits, signingLimits: limits, maximumOperations: maximumOperations,
+                maximumPendingPerEnrollment: min(5, maximumOperations), maximumLifetimeMillis: lifetime, clockEpoch: clock.epoch, busyMilliseconds: 100,
                 initialize: true, probePolicy: GatewayProbePolicy(maximumAttempts: attempts, minimumRetryDelayMillis: 50, maximumTTLSeconds: 60))
             let wakeSend: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)?
             if wakePolicy != nil {
@@ -2024,7 +2024,8 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
     }
 
     func testApprovalWakeRevocationLeavesOtherPhoneDeliveryRunning() async throws {
-        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        let f = try Fixture(), provider = Provider([])
+        let c = try f.coordinator(provider, maximumOperations: 4, wakePolicy: wakePolicy())
         try await c.replaceTrustedEnrollments([f.enrollment(), f.enrollment(phone: 8)], active: true)
         try await f.admit(c); try await f.activate(c)
         try await f.admit(c, n: 3, phone: 8); try await f.activate(c, n: 3, phone: 8)

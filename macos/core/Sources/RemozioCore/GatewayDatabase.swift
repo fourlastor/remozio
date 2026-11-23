@@ -364,7 +364,8 @@ public final class GatewayDatabase {
                 guard nowUnixMillis < control.expires else { throw GatewayCandidateVerificationError.expired }
             }
             guard control.expires - control.issued <= maximumLifetimeMillis else { throw GatewayCandidateVerificationError.excessiveLifetime }
-            try requireCapacity()
+            let firstRevocation = try kind == .phoneRevocation && !isRevoked(phone: control.phoneID, enrollment: control.enrollmentEpoch)
+            try requireCapacity(firstRevocation ? .firstPhoneRevocation : .ordinary)
             let token: Data?
             switch control {
             case .activation(let activation):
@@ -459,7 +460,7 @@ public final class GatewayDatabase {
                 return GatewayControlTombstoneApplication(receipt: previous, inserted: false)
             }
             guard head == expectedHead else { throw GatewayDatabaseError.headMismatch }
-            try requireCapacity()
+            try requireCapacity(.tombstone)
             if try !hasTombstones() {
                 try createTombstoneTable()
                 try exec("PRAGMA user_version=5")
@@ -686,13 +687,46 @@ public final class GatewayDatabase {
               receipt.phoneID == phone, receipt.enrollmentEpoch == enrollment else { throw GatewayDatabaseError.corruptData }
         return true
     }
-    private func operationCount(includeSubmission: Bool = true) throws -> Int64 {
-        let submission = includeSubmission ? "+(SELECT count(*) FROM gateway_submission_controls_v4)" : ""
-        let tombstones = try hasTombstones() ? "+(SELECT count(*) FROM gateway_control_tombstones_v5)" : ""
-        return try scalar("SELECT (SELECT count(*) FROM gateway_candidates_v1)+(SELECT count(*) FROM gateway_recipients_v2)" + submission + tombstones)
+    private enum ControlCapacity { case ordinary, firstPhoneRevocation, tombstone }
+
+    private struct ControlUsage {
+        let ordinary: Int64
+        let firstRevocations: Int64
+        let tombstones: Int64
     }
-    private func requireCapacity() throws {
-        guard try operationCount() < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+
+    private func controlUsage(includeSubmission: Bool, includeTombstones: Bool) throws -> ControlUsage {
+        let submission = includeSubmission ? "+(SELECT count(*) FROM gateway_submission_controls_v4)" : ""
+        let tombstones = includeTombstones ? "(SELECT count(*) FROM gateway_control_tombstones_v5)" : "0"
+        let sql = """
+            SELECT (SELECT count(*) FROM gateway_candidates_v1)+(SELECT count(*) FROM gateway_recipients_v2)\(submission),
+                   (SELECT count(*) FROM (
+                       SELECT phone,enrollment FROM gateway_recipients_v2
+                       WHERE kind=? GROUP BY phone,enrollment LIMIT \(EnrollmentJournal.maximumRows)
+                   )),
+                   \(tombstones)
+            """
+        return try statement(sql, [uint(GatewayRecipientKind.phoneRevocation.rawValue)]) { row in
+            guard sqlite3_step(row) == SQLITE_ROW else { throw GatewayDatabaseError.storage(sqlite3_errcode(db)) }
+            let total = sqlite3_column_int64(row, 0)
+            let firstRevocations = sqlite3_column_int64(row, 1)
+            let tombstones = sqlite3_column_int64(row, 2)
+            let ordinaryTombstones = max(0, tombstones - Int64(maximumOperations))
+            return ControlUsage(ordinary: total - firstRevocations + ordinaryTombstones,
+                firstRevocations: firstRevocations, tombstones: tombstones)
+        }
+    }
+
+    private func requireCapacity(_ capacity: ControlCapacity = .ordinary) throws {
+        let usage = try controlUsage(includeSubmission: true, includeTombstones: hasTombstones())
+        switch capacity {
+        case .firstPhoneRevocation where usage.firstRevocations < EnrollmentJournal.maximumRows:
+            return
+        case .tombstone where usage.tombstones < maximumOperations:
+            return
+        default:
+            guard usage.ordinary < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+        }
     }
     private func advanceHead(_ revision: UInt64, from previous: UInt64) throws {
         try statement("UPDATE gateway_identity_v1 SET head=? WHERE id=1 AND head=?", [uint(revision), uint(previous)]) {
@@ -1011,7 +1045,8 @@ public final class GatewayDatabase {
                     guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
                 }
             }
-            guard try operationCount(includeSubmission: version >= 4) <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+            let usage = try controlUsage(includeSubmission: version >= 4, includeTombstones: version == 5)
+            guard usage.ordinary <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
         } else {
             guard try scalar("SELECT count(*) FROM gateway_candidates_v1") <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
         }

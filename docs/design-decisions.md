@@ -36,6 +36,14 @@ The first durable Root retirement upgrades the journal to schema 18 and commits 
 
 The main Setup window and paired-phone controls read the same protected intent and publisher observations. A gateway without tombstone support reports that it needs an update when an abandoned grant blocks the next revision. Root retains the start time before the first delivery attempt, so a missing reply leaves an inconclusive status and elapsed time across restart. A later authenticated tombstone receipt confirms delivery. The current gateway protocol does not provide an explicit negative reply. See #889.
 
+## Gateway control capacity
+
+The gateway keeps its configured ordinary control limit for candidates, activations, submission controls and repeated revocations for the same phone and enrollment epoch. Each fixed registration lifecycle has room for up to 1,024 first phone revocations. Tombstones have a separate reserve equal to the configured ordinary limit. If either reserve is full, extra controls of that kind need ordinary capacity. A retry of an accepted operation uses its retained receipt and takes no additional space.
+
+At the default limit of 4,096 ordinary controls, the receiver retains at most 9,216 control rows. At the maximum setting of 1,000,000, it retains at most 2,001,024. The reserved tombstones add at most 4 MiB at the default and about 977 MiB at the maximum, using a conservative 1 KiB per tombstone. The signed payload and the other row fields total at most 312 bytes before SQLite overhead. The reserve does not change the storage schema.
+
+An older gateway cannot open a store whose control count exceeds its configured limit. This also affects its read-only update health check. Restore a compatible backup before downgrading. A newly provisioned registration starts a new lifecycle. A whole-Mac backup rollback is outside the guarantees for the per-lifecycle revocation reserve.
+
 ## Delayed gateway phone revocation
 
 A signed phone revocation can only remove privileges for the enrollment epoch in the control. The gateway can recover that original control after its delivery deadline. It checks the same registration, the unchanged Root signature and a fresh lease on the authenticated Root connection. The gateway uses the latest complete snapshot accepted from any authenticated Root connection. The requesting connection must still hold a fresh lease. Recovery refuses an epoch that the snapshot lists as active. The snapshot can omit a revoked phone or list a replacement epoch. Recovery requires a current snapshot in both cases. A gateway with an inactive registration also rejects the capability query.
