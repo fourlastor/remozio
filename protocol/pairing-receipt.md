@@ -74,3 +74,25 @@ Component tests cover real software signatures, encrypted prepared-record activa
 A native/JVM loopback fixture checks the TLS purpose through direct and opaque relay routes. Its receipt bytes are synthetic.
 The native XPC experiment checks production selectors across processes. Its service is an ordinary-user fixture.
 These checks do not establish Root installation, hardware custody, Pixel UI behavior or complete Mac–Pixel approval.
+
+## Signed expiry payload for re-pair
+
+This payload is for the separate recovery path in #901. The version 1 enrolled lookup above does not accept it. The codecs define and verify the payload. The recovery listener, Root producer, and phone retirement are separate changes.
+
+The signed input is a canonical CBOR map with these fields.
+
+| Key | Value |
+| --- | --- |
+| 0 | Text `dev.remozio.pairing.expired-without-commit` |
+| 1 | Unsigned version 1 |
+| 2 | 16-byte setup ID |
+| 3 | 32-byte digest of the retained pairing transcript |
+| 4 | Array of Mac ID, account ID, phone ID, and candidate epoch. Each is 16 bytes. |
+| 5 | 16-byte predecessor epoch for the same phone ID |
+| 6 | 16-byte trust revision from the retained transcript |
+| 7 | Unsigned transcript expiry in Unix milliseconds |
+| 8 | Unsigned reason. Zero is deadline elapsed. One is retired authority incarnation. |
+
+The outer map is limited to 1 KiB and contains the canonical input as bytes at key 0 and a raw 64-byte P-256 signature at key 1. Reject unknown fields and noncanonical inputs. Like other Root signatures, this format accepts both high-S and low-S signatures. A claim can have multiple valid receipt byte sequences. Use the setup ID and transcript digest to identify the attempt. Both reason values attest that the exact attempt can no longer commit. The retired-incarnation reason does not assert that the wall deadline passed.
+
+Verify all claims against the retained re-pair transcript. Verify the signature with its pinned Root authority key and the dedicated signing input. An ordinary pairing transcript is ineligible. Swift and Kotlin share the signed, malformed, and signature or binding rejection cases in `vectors/pairing-expiry-receipt-v1.json`.

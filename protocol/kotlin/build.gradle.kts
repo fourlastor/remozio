@@ -25,6 +25,7 @@ kotlin {
 // A vector change regenerates the source and invalidates every test task that compiles it.
 val commonTestVectors = mapOf(
     "cborSubset" to "protocol/vectors/cbor-subset-v1.json",
+    "pairingExpiryReceipt" to "protocol/vectors/pairing-expiry-receipt-v1.json",
     "pairingInvitation" to "protocol/vectors/pairing-invitation-v1.json",
     "pairingReceipt" to "protocol/vectors/pairing-receipt-v1.json",
     "pairingSetup" to "protocol/vectors/pairing-setup-v1.json",
