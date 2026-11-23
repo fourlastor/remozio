@@ -149,13 +149,14 @@ final class RoutingJournalTests: XCTestCase {
             expectedRoutingRevision: revision, nowUnixMillis: 1000, now: now(moment))
     }
     private func apply(_ tx: JournalTransaction, _ control: RoutingAwayControl, trust: UUID, writer: AuditEpochWriter,
-                       head: UInt64 = 1, wall: UInt64 = 1100, moment: UInt64 = 200, signingKey: P256.Signing.PrivateKey? = nil) throws -> RoutingChange {
+                       head: UInt64 = 1, wall: UInt64 = 1100, moment: UInt64 = 200, signingKey: P256.Signing.PrivateKey? = nil,
+                       event: UInt8 = 9) throws -> RoutingChange {
         let payload = try control.encode(limits: limits)
         let signature = try (signingKey ?? key).signature(for: RoutingAwaySigningInput.make(wireVersion: 1, canonicalPayload: payload,
             payloadLimits: limits, inputLimits: limits)).rawRepresentation
         return try tx.applyRoutingAway(canonicalPayload: payload, signature: signature, authenticatedPhoneID: id(5),
             authenticatedEnrollmentEpoch: id(4), expectedTrustRevision: trust, nowUnixMillis: wall, now: now(moment),
-            eventID: id(9), writer: writer, expectedAuditHead: head)
+            eventID: id(event), writer: writer, expectedAuditHead: head)
     }
     private func local(_ db: JournalDatabase, _ mode: RoutingMode, writer: AuditEpochWriter, revision: UInt64, head: UInt64) throws -> RoutingState {
         try db.write { try $0.setLocalRoutingMode(mode, expectedRevision: revision, eventID: id(UInt8(20 + head)), receiptTimeMs: 1200,
@@ -329,7 +330,7 @@ final class RoutingJournalTests: XCTestCase {
         }
         XCTAssertEqual(try db.read { try $0.routingState() }, result.state)
         XCTAssertEqual(try db.read { try $0.epoch(writer.epoch)?.head }, 2)
-        XCTAssertTrue(try db.write { try apply($0, pending, trust: trust, writer: writer, head: 2, moment: 1_101) }.inserted)
+        XCTAssertTrue(try db.write { try apply($0, pending, trust: trust, writer: writer, head: 2, moment: 1_101, event: 10) }.inserted)
     }
 
     func testRoutingCleanupPrunesUnusedChallengesBeforeOldestReceipts() throws {
@@ -338,7 +339,7 @@ final class RoutingJournalTests: XCTestCase {
         let oldest = try issue(db, trust: trust, moment: 100)
         let first = try db.write { try apply($0, oldest, trust: trust, writer: writer, moment: 150) }
         let newer = try issue(db, trust: trust, revision: 1, moment: 160)
-        let second = try db.write { try apply($0, newer, trust: trust, writer: writer, head: 2, moment: 200) }
+        let second = try db.write { try apply($0, newer, trust: trust, writer: writer, head: 2, moment: 200, event: 10) }
         let unused = try issue(db, trust: trust, revision: 2, moment: 220)
         let live = try issue(db, trust: trust, revision: 2, moment: 1_500)
 
@@ -359,7 +360,7 @@ final class RoutingJournalTests: XCTestCase {
         XCTAssertEqual(newRetry.state, second.state)
         XCTAssertEqual(try db.read { try $0.routingState() }, second.state)
         XCTAssertEqual(try db.read { try $0.epoch(writer.epoch)?.head }, 3)
-        XCTAssertTrue(try db.write { try apply($0, live, trust: trust, writer: writer, head: 3, moment: 1_502) }.inserted)
+        XCTAssertTrue(try db.write { try apply($0, live, trust: trust, writer: writer, head: 3, moment: 1_502, event: 11) }.inserted)
     }
 
     func testFullRoutingStoreReclaimsPreviousRunRowsOnDemand() throws {
