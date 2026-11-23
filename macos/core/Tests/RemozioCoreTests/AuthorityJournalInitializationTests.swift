@@ -123,6 +123,26 @@ final class AuthorityJournalInitializationTests: XCTestCase {
             }
         }
     }
+    func testInitialCheckpointRequiresTheLegacyTierForItsReplayChoice() throws {
+        for (replay, tier) in [(false, UInt64(13)), (true, UInt64(15))] {
+            try fixture { root in
+                let initial = try seed(replay: replay)
+                let database = try open(root, initialize: true, initial: initial)
+                defer { try? database.close() }
+                let databasePath = root.appendingPathComponent("journal/journal.sqlite").path
+                XCTAssertEqual(try database.read { try $0.storageSchemaVersion }, tier)
+                let expected = try database.read {
+                    try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch, generation: 1, authorityGeneration: 1)
+                }
+                XCTAssertEqual(try database.initialAuthorityCheckpoint(initial: initial, databasePath: databasePath), expected)
+                let other = try seed(replay: !replay)
+                XCTAssertThrowsError(try database.initialAuthorityCheckpoint(initial: other, databasePath: databasePath)) {
+                    XCTAssertEqual($0 as? AuthorityInitializationError, .invalidBoundary)
+                }
+            }
+        }
+    }
+
     func testCommittedInitialStateBuildsAndReconcilesTheIndependentCheckpoint() throws {
         try fixture { root in
             let database = try open(root, initialize: true, initial: seed())

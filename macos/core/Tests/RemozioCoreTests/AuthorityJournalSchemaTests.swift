@@ -1,3 +1,5 @@
+import Foundation
+import RemozioProtocol
 import SQLite3
 import XCTest
 @testable import RemozioCore
@@ -35,6 +37,22 @@ final class AuthorityJournalSchemaTests: XCTestCase {
             }
             XCTAssertEqual(try AuthorityJournalSchema.featureTierInTransaction(on: db), 13)
             try execute("COMMIT", on: db)
+        }
+    }
+
+    func testAbandonmentHistoryIsOnlyInstalledAtLegacyTierEighteen() throws {
+        let limits = try CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
+        let policy = try GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits,
+            maximumControls: 10, candidateLifetimeMillis: 1_000, clockEpoch: UUID())
+        let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16)
+        try withDatabase { db in
+            let journal = GatewayAuthorityJournal(connection: db, macID: mac, accountID: account, policy: policy)
+            for (tier, expected) in zip(Int64(12)...18, [false, false, false, false, false, false, true]) {
+                try execute("BEGIN IMMEDIATE", on: db)
+                try AuthorityJournalSchema.setFeatureTier(tier, on: db)
+                XCTAssertEqual(try journal.abandonmentHistoryInstalled(), expected, "tier \(tier)")
+                try execute("COMMIT", on: db)
+            }
         }
     }
 

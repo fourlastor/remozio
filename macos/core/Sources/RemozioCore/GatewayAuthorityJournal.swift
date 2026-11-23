@@ -566,7 +566,7 @@ final class GatewayAuthorityJournal {
 
     static let abandonmentTable = "gateway_abandoned_grants_v1"
 
-    private func abandonmentHistoryInstalled() throws -> Bool {
+    func abandonmentHistoryInstalled() throws -> Bool {
         try AuthorityJournalSchema.featureTier(on: db) == 18
     }
 
