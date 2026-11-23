@@ -3,7 +3,7 @@ import Foundation
 import RemozioProtocol
 
 // The driver represents only this local control connection, not a Root authorization channel.
-enum TransportPairingCall: Sendable { case hello, begin(Data), snapshot, stage(Data, Data), receipt(Data, Data), cancel(Data), stop }
+enum TransportPairingCall: Sendable { case hello, waitForRePairDrain(Data), begin(Data), snapshot, stage(Data, Data), receipt(Data, Data), cancel(Data), stop }
 enum TransportPairingReply: Sendable { case number(UInt64), bytes(Data?), flag(Bool), failed }
 protocol TransportPairingDriver: Sendable {
     func start(closed: @escaping @Sendable () -> Void)
@@ -30,6 +30,8 @@ final class NativeTransportPairingDriver: TransportPairingDriver, @unchecked Sen
         }
         switch call {
         case .hello: proxy.setupHello { [self] in checked(.number($0), reply) }
+        case .waitForRePairDrain(let invitation):
+            proxy.waitForRePairSetupDrain(invitation) { [self] in checked(.flag($0), reply) }
         case .begin(let invitation): proxy.beginSetup(invitation) { [self] in checked(.number($0), reply) }
         case .snapshot: proxy.setupCandidates { [self] in checked(.bytes($0), reply) }
         case .stage(let id, let transcript): proxy.stageSetup(id, transcript: transcript) { [self] in checked(.flag($0), reply) }
@@ -60,6 +62,7 @@ public actor TransportPairingChannel {
     private let lifetime = TransportPairingClientLifetime()
     private var state = State.new
     private var invitation: PairingInvitation?
+    private var rePair: RePairInvitation?
     private var port: UInt16?
     private var candidates: [Data: TransportPairingCandidate] = [:]
     private var staged: [Data: PairingTranscript] = [:]
@@ -79,15 +82,25 @@ public actor TransportPairingChannel {
     }
     deinit { timer?.cancel(); driver.close() }
     public func start(invitation: PairingInvitation) async throws -> UInt16 {
+        try await start(invitation: invitation, rePair: nil)
+    }
+
+    public func start(rePair: RePairInvitation) async throws -> UInt16 {
+        try await start(invitation: rePair.invitation, rePair: rePair)
+    }
+
+    private func start(invitation: PairingInvitation, rePair: RePairInvitation?) async throws -> UInt16 {
         guard state == .new, invitation.macID == configuration.macID, invitation.accountID == configuration.accountID,
               invitation.minimumEnvelopeVersion == 1 else { throw TransportPairingControlError.invalidMessage }
         state = .opening
         do {
             guard case .number(1) = try await perform(.hello) else { throw TransportPairingControlError.unsupportedVersion }
-            guard case .number(let value) = try await perform(.begin(invitation.encode())), let port = UInt16(exactly: value), port > 0 else {
+            let bytes = try rePair?.encode() ?? invitation.encode()
+            if rePair != nil { try await flag(.waitForRePairDrain(bytes)) }
+            guard case .number(let value) = try await perform(.begin(bytes)), let port = UInt16(exactly: value), port > 0 else {
                 throw TransportPairingControlError.invalidMessage
             }
-            self.invitation = invitation; self.port = port; state = .open; return port
+            self.invitation = invitation; self.rePair = rePair; self.port = port; state = .open; return port
         } catch { close(); throw error }
     }
     public func current() async throws -> TransportPairingSnapshot {
@@ -100,7 +113,8 @@ public actor TransportPairingChannel {
             var next: [Data: TransportPairingCandidate] = [:]
             for candidate in snapshot.candidates {
                 let proposal = candidate.proposal
-                guard proposal.phone.scope.macID == invitation.macID, proposal.phone.scope.accountID == invitation.accountID,
+                guard (rePair?.matches(proposal) ?? (proposal.replacement == nil)),
+                      proposal.phone.scope.macID == invitation.macID, proposal.phone.scope.accountID == invitation.accountID,
                       [proposal.transportKey, proposal.decisionKey, proposal.biometricKey].allSatisfy({
                           $0.publicKey != invitation.authorityPublicKey && $0.publicKey != invitation.transportPublicKey
                       }) else { throw TransportPairingControlError.invalidMessage }
@@ -152,7 +166,7 @@ public actor TransportPairingChannel {
     public nonisolated func abort() { lifetime.close(); driver.close(); Task { await self.close() } }
     public func close() {
         guard state != .closed else { return }; state = .closed; lifetime.close(); driver.close(); timer?.cancel(); timer = nil
-        let previous = pending; pending = nil; invitation = nil; port = nil; candidates.removeAll(); staged.removeAll(); submittedReceipts.removeAll()
+        let previous = pending; pending = nil; invitation = nil; rePair = nil; port = nil; candidates.removeAll(); staged.removeAll(); submittedReceipts.removeAll()
         previous?.continuation.resume(throwing: TransportPairingControlError.closed)
     }
     private func flag(_ call: TransportPairingCall) async throws {
@@ -162,7 +176,7 @@ public actor TransportPairingChannel {
         do { try verifyAccount(); try Task.checkCancellation() } catch { close(); throw error }
         guard lifetime.ifOpen({}) else { close(); throw TransportPairingControlError.closed }
         switch call {
-        case .hello, .begin: guard state == .opening else { throw TransportPairingControlError.closed }
+        case .hello, .waitForRePairDrain, .begin: guard state == .opening else { throw TransportPairingControlError.closed }
         default: guard state == .open else { throw TransportPairingControlError.closed }
         }
         guard pending == nil else { throw TransportPairingControlError.busy }

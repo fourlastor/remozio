@@ -113,6 +113,7 @@ private struct SetupOverview: View {
     let setup: MacSetupServiceControls
     @State private var showingSetupPreview = false
     @State private var showingPairing = false
+    @State private var rePairControls = MacPairingControls()
     @State private var showingPairedPhones = false
     @State private var gatewayRevocationStatus: GatewayRevocationStatus?
     @State private var gatewayStatusUnavailable = false
@@ -193,7 +194,7 @@ private struct SetupOverview: View {
             }
         }
         .sheet(isPresented: $showingPairing) { PairingSheet() }
-        .sheet(isPresented: $showingPairedPhones) { PairedPhonesSheet() }
+        .sheet(isPresented: $showingPairedPhones) { PairedPhonesSheet(rePairControls: rePairControls) }
         .sheet(isPresented: $showingSetupPreview) {
             SetupFilePreview(setup: setup, accountPreparation: { AnyView(AccountSetupSheet(importingSetupFile: true)) })
         }

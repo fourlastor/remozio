@@ -124,8 +124,8 @@ public final class PairingEnrollmentAttempt: Sendable {
             guard try !transaction.approvalTrustRestrictions().contains(scope.phoneID) else {
                 throw EnrollmentJournalError.recoveryRequired
             }
-            guard let old = samePhone.first(where: { $0.epoch == predecessor.epoch }), !old.approval.active,
-                  !samePhone.contains(where: { $0.approval.active }) else {
+            guard try transaction.rePairPredecessors(in: samePhone).contains(
+                DeliveryRecipient(phoneID: predecessor.phoneID, enrollmentEpoch: predecessor.epoch)) else {
                 throw EnrollmentJournalError.unavailableEnrollment
             }
         case .revokeActive:

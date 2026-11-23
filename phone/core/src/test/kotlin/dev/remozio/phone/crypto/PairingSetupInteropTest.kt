@@ -36,7 +36,7 @@ class PairingSetupInteropTest {
         val failure = assertFails { withTimeout(timeoutMillis) { operation() } }
         assertFalse(failure is TimeoutCancellationException, "A timeout does not prove rejection")
     }
-    private inner class Fixture(private val holdPairingStage: Boolean = false) : AutoCloseable {
+    private inner class Fixture(private val holdPairingStage: Boolean = false, rePair: Boolean = false) : AutoCloseable {
         val phone = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-phone").build()
         val mac = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-mac").build()
         val biometric = key(); val decision = key()
@@ -44,6 +44,7 @@ class PairingSetupInteropTest {
         private val process: Process
         val port: Int
         val invitation: PairingInvitation
+        val rePairInvitation: RePairInvitation?
         val keys: Array<KeyManager> = arrayOf(HandshakeCertificates.Builder().heldCertificate(phone).build().keyManager)
         init {
             var started: Process? = null
@@ -59,13 +60,15 @@ class PairingSetupInteropTest {
                     .redirectError(directory.resolve("stderr.log").toFile()).start()
                 process = started
                 process.outputStream.write(("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) +
-                    "\",\"pairing\":true,\"holdPairingStage\":" + holdPairingStage + "}\n").toByteArray()); process.outputStream.flush()
+                    "\",\"pairing\":true,\"holdPairingStage\":" + holdPairingStage + ",\"rePair\":" + rePair + "}\n").toByteArray()); process.outputStream.flush()
                 val executor = Executors.newSingleThreadExecutor()
                 val line = try { executor.submit<String> { process.inputStream.bufferedReader().readLine() }.get(10, TimeUnit.SECONDS) }
                 finally { executor.shutdownNow() }
                 val output = Json.parseToJsonElement(line).jsonObject
                 port = output.getValue("port").jsonPrimitive.int
-                invitation = PairingInvitation.importText(output.getValue("invitation").jsonPrimitive.content)
+                val text = output.getValue("invitation").jsonPrimitive.content
+                rePairInvitation = if (rePair) RePairInvitation.importText(text) else null
+                invitation = rePairInvitation?.invitation ?: PairingInvitation.importText(text)
             } catch (failure: Throwable) {
                 started?.destroyForcibly(); started?.waitFor(5, TimeUnit.SECONDS)
                 directory.toFile().deleteRecursively(); throw failure
@@ -106,12 +109,19 @@ class PairingSetupInteropTest {
             } finally { channel?.closeAndJoin(); owner.cancelAndJoin() }
         }
     }
-    @Test fun rePairProposalRoundTripsThePredecessorInASignedNativeReceipt(): Unit = runBlocking {
-        Fixture().use { f ->
+    // The synthetic peer checks the transmitted bytes and the client imports the invitation.
+    @Test fun rePairClientImportsTheInvitationAndSendsTheSelectedPredecessorToTheSyntheticPeer(): Unit = runBlocking {
+        Fixture(rePair = true).use { f ->
             val owner = SupervisorJob(); val scope = CoroutineScope(owner)
             var channel: PairingSetupChannel? = null
             try {
-                val replacement = PairingReplacement(ByteArray(16) { 3 }, ByteArray(16) { 10 })
+                val replacement = checkNotNull(f.rePairInvitation).predecessor
+                val wrong = PairingReplacement(replacement.phoneID.copyBytes(), ByteArray(16) { 11 })
+                for (proposal in listOf(f.proposal(), f.proposal(replacement = wrong))) {
+                    rejectedWithin(10000) {
+                        PairingSetupChannel.connect(scope, f.open(scope), f.keys, f.invitation, proposal).closeAndJoin()
+                    }
+                }
                 channel = withTimeout(15000) {
                     PairingSetupChannel.connect(scope, f.open(scope), f.keys, f.invitation, f.proposal(replacement = replacement))
                 }

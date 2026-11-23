@@ -53,6 +53,40 @@ private final class PairingControlLifetime: @unchecked Sendable {
     }
 }
 
+/// Re-pair exports for one Mac and account hold their predecessor until native I/O drains.
+final class TransportRePairAdmission: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reservations: [DeliveryRecipient: [UUID: AsyncStream<Void>.Continuation]] = [:]
+
+    func reserve(_ predecessor: DeliveryRecipient) throws {
+        try lock.withLock {
+            guard reservations[predecessor] == nil else { throw TransportPairingControlError.busy }
+            reservations[predecessor] = [:]
+        }
+    }
+
+    func release(_ predecessor: DeliveryRecipient) {
+        let waiters = lock.withLock { reservations.removeValue(forKey: predecessor) }
+        if let waiters {
+            for continuation in waiters.values { continuation.finish() }
+        }
+    }
+
+    func waitForDrain(_ predecessor: DeliveryRecipient) async throws {
+        let waiter = AsyncStream<Void>.makeStream(), id = UUID()
+        let waiting = lock.withLock {
+            guard reservations[predecessor] != nil else { return false }
+            reservations[predecessor]?[id] = waiter.continuation
+            return true
+        }
+        if waiting {
+            defer { lock.withLock { reservations[predecessor]?[id] = nil } }
+            for await _ in waiter.stream {}
+        }
+        try Task.checkCancellation()
+    }
+}
+
 /// One signed app connection owns one temporary setup listener. No method can stage or commit Root enrollment.
 public actor TransportPairingSetupOwner {
     typealias Factory = @Sendable (PairingInvitation, @escaping @Sendable (DirectListenerEvent) -> Void,
@@ -73,6 +107,9 @@ public actor TransportPairingSetupOwner {
     private let verifyAccount: @Sendable () throws -> Void
     private let lifetime = PairingControlLifetime()
     private var invitation: PairingInvitation?
+    private var rePair: RePairInvitation?
+    private let rePairAdmission: TransportRePairAdmission
+    private var rePairReservation: DeliveryRecipient?
     private var ingress: (any TransportPairingIngress)?
     private var port: UInt16?
     private var opening: CheckedContinuation<UInt16, any Error>?
@@ -83,8 +120,14 @@ public actor TransportPairingSetupOwner {
     private var started = false
     private var closed = false
     public init(configuration: TransportPairingControlConfiguration, identity: SecIdentity) throws {
+        try self.init(configuration: configuration, identity: identity, rePairAdmission: TransportRePairAdmission())
+    }
+
+    init(configuration: TransportPairingControlConfiguration, identity: SecIdentity,
+         rePairAdmission: TransportRePairAdmission) throws {
         try DedicatedServiceAccount.requireCurrent(serviceUID: configuration.transportUID, ownerUID: configuration.ownerUID)
         self.configuration = configuration
+        self.rePairAdmission = rePairAdmission
         let holder = PairingIdentityHolder(identity), processID = getpid(), uid = configuration.transportUID
         factory = { invitation, event, handler in
             try NativePairingIngress(identity: holder.identity, invitation: invitation, configuration: configuration, event: event, handler: handler)
@@ -94,16 +137,44 @@ public actor TransportPairingSetupOwner {
         }
     }
     // Logical ingress controls cannot prove native code signing, role accounts or TLS identity.
-    init(configuration: TransportPairingControlConfiguration, factory: @escaping Factory,
-         verifyAccount: @escaping @Sendable () throws -> Void = {}) {
+    init(configuration: TransportPairingControlConfiguration, rePairAdmission: TransportRePairAdmission = TransportRePairAdmission(),
+         factory: @escaping Factory, verifyAccount: @escaping @Sendable () throws -> Void = {}) {
         self.configuration = configuration; self.factory = factory; self.verifyAccount = verifyAccount
+        self.rePairAdmission = rePairAdmission
     }
     deinit { openingTimer?.cancel(); lifetime.close() }
     public func begin(_ invitation: PairingInvitation) async throws -> UInt16 {
+        try await begin(invitation, rePair: nil)
+    }
+
+    public func begin(rePair: RePairInvitation) async throws -> UInt16 {
+        try await begin(rePair.invitation, rePair: rePair)
+    }
+
+    func waitForRePairDrain(_ invitation: RePairInvitation) async throws {
+        try active()
+        guard !started else { throw TransportPairingControlError.busy }
+        let predecessor = try rePairPredecessor(invitation)
+        try await rePairAdmission.waitForDrain(predecessor)
+        try active()
+    }
+
+    private func rePairPredecessor(_ invitation: RePairInvitation) throws -> DeliveryRecipient {
+        guard invitation.invitation.macID == configuration.macID, invitation.invitation.accountID == configuration.accountID,
+              invitation.invitation.minimumEnvelopeVersion == 1 else { throw TransportPairingControlError.invalidMessage }
+        return DeliveryRecipient(phoneID: invitation.predecessor.phoneID, enrollmentEpoch: invitation.predecessor.epoch)
+    }
+
+    private func begin(_ invitation: PairingInvitation, rePair: RePairInvitation?) async throws -> UInt16 {
         try active()
         guard !started, invitation.macID == configuration.macID, invitation.accountID == configuration.accountID,
               invitation.minimumEnvelopeVersion == 1 else { throw TransportPairingControlError.invalidMessage }
-        started = true; self.invitation = invitation
+        if let rePair {
+            let predecessor = try rePairPredecessor(rePair)
+            try rePairAdmission.reserve(predecessor)
+            rePairReservation = predecessor
+        }
+        started = true; self.invitation = invitation; self.rePair = rePair
         do {
             let listener = try factory(invitation, { [weak self] event in Task { await self?.changed(event) } },
                 { [weak self] peer in guard let self else { peer.abort(); return }; try await self.accept(peer) })
@@ -171,7 +242,11 @@ public actor TransportPairingSetupOwner {
         let tasks = Array(readers.values)
         for task in tasks { task.cancel(); await task.value }
         await listener?.closeAndWait()
-        readers.removeAll(); invitation = nil; port = nil
+        readers.removeAll(); invitation = nil; rePair = nil; port = nil
+        if let predecessor = rePairReservation {
+            rePairReservation = nil
+            rePairAdmission.release(predecessor)
+        }
     }
     private func active() throws {
         try verifyAccount(); try Task.checkCancellation()
@@ -204,6 +279,7 @@ public actor TransportPairingSetupOwner {
             }
             let proposal = try await peer.proposal(); try active()
             guard entries.count < configuration.maximumCandidates,
+                  (rePair?.matches(proposal) ?? (proposal.replacement == nil)),
                   proposal.phone.scope.macID == invitation.macID, proposal.phone.scope.accountID == invitation.accountID else {
                 throw TransportPairingControlError.invalidMessage
             }

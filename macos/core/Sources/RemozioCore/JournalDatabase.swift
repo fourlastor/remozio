@@ -763,6 +763,10 @@ public final class JournalTransaction {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
     }
 
+    func rePairPredecessors(in rows: [StoredApprovalEnrollment]) throws -> [DeliveryRecipient] {
+        try withEnrollment(write: false) { try $0.rePairPredecessors(in: rows) }
+    }
+
     /// Returns receipt material only for an active enrollment on an authenticated phone channel.
     public func committedPairing(setupID: Data, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data) throws -> PairingTranscript? {
         try withEnrollment(write: false) { try $0.committedPairing(setupID: setupID, phoneID: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch) }

@@ -131,6 +131,12 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             case .list:
                 guard selection.isEmpty, authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
                 return try access.pairedPhones().encode()
+            case .listForRePair:
+                guard selection.isEmpty, authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+                return try access.pairedPhones(includeRePair: true).encode(includeRePair: true)
+            case .validateRePair:
+                guard authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+                return try Data([access.canRePair(.decode(selection)) ? 1 : 0])
             case .status:
                 guard authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
                 return try Data([UInt8(access.revocationStatus(.decode(selection)).rawValue)])

@@ -48,14 +48,18 @@ public struct GatewayRevocationStatus: Equatable, Sendable {
 }
 
 enum PairedPhoneOperation: UInt64 {
-    case list, status, revoke
+    case list, status, revoke, listForRePair, validateRePair
 }
 
 public struct PairedPhoneSelection: Sendable {
     let macID: Data
     let accountID: Data
     let revision: UUID
-    let phone: DeliveryRecipient
+    public let phone: DeliveryRecipient
+
+    var predecessor: PairingReplacement {
+        get throws { try PairingReplacement(phoneID: phone.phoneID, epoch: phone.enrollmentEpoch) }
+    }
 
     func encode() throws -> Data {
         try DeterministicCBOR.encode(.array([.bytes(macID), .bytes(accountID), .bytes(GatewayHostSnapshot.bytes(revision)),
@@ -83,6 +87,7 @@ public struct PairedPhoneSnapshot: Sendable {
     let accountID: Data
     let revision: UUID
     public let phones: [DeliveryRecipient]
+    public let rePairablePhones: [DeliveryRecipient]
     public let revocationAvailability: PairedPhoneRevocationAvailability
     public let gatewayRevocationHealth: GatewayRevocationHealth
     public let gatewayInconclusiveSinceUnixMillis: UInt64?
@@ -96,31 +101,54 @@ public struct PairedPhoneSnapshot: Sendable {
         return PairedPhoneSelection(macID: macID, accountID: accountID, revision: revision, phone: phone)
     }
 
-    func encode() throws -> Data {
-        try DeterministicCBOR.encode(.array([.bytes(macID), .bytes(accountID), .bytes(GatewayHostSnapshot.bytes(revision)),
-            .array(phones.map { .array([.bytes($0.phoneID), .bytes($0.enrollmentEpoch)]) }),
-            .unsigned(revocationAvailability.rawValue), .unsigned(gatewayRevocationHealth.rawValue),
-            gatewayInconclusiveSinceUnixMillis.map(CBORValue.unsigned) ?? .null]), limits: Self.limits)
+    public func rePairSelection(for phone: DeliveryRecipient) -> PairedPhoneSelection? {
+        guard rePairablePhones.contains(phone) else { return nil }
+        return PairedPhoneSelection(macID: macID, accountID: accountID, revision: revision, phone: phone)
     }
 
-    static func decode(_ data: Data, macID: Data, accountID: Data) throws -> Self {
-        guard case .array(let fields) = try DeterministicCBOR.decode(data, limits: limits), fields.count == 7,
-              fields[0] == .bytes(macID), fields[1] == .bytes(accountID), case .bytes(let revision) = fields[2],
-              revision.count == 16, case .array(let rows) = fields[3], rows.count <= EnrollmentJournal.maximumRows,
+    func encode(includeRePair: Bool = false) throws -> Data {
+        func rows(_ phones: [DeliveryRecipient]) -> CBORValue {
+            .array(phones.map { .array([.bytes($0.phoneID), .bytes($0.enrollmentEpoch)]) })
+        }
+        var fields: [CBORValue] = [.bytes(macID), .bytes(accountID), .bytes(GatewayHostSnapshot.bytes(revision)),
+            rows(phones), .unsigned(revocationAvailability.rawValue), .unsigned(gatewayRevocationHealth.rawValue),
+            gatewayInconclusiveSinceUnixMillis.map(CBORValue.unsigned) ?? .null]
+        if includeRePair { fields.append(rows(rePairablePhones)) }
+        return try DeterministicCBOR.encode(.array(fields), limits: Self.limits)
+    }
+
+    static func decode(_ data: Data, macID: Data, accountID: Data, includeRePair: Bool = false) throws -> Self {
+        guard case .array(let fields) = try DeterministicCBOR.decode(data, limits: limits),
+              fields.count == (includeRePair ? 8 : 7), fields[0] == .bytes(macID), fields[1] == .bytes(accountID),
+              case .bytes(let revision) = fields[2], revision.count == 16, case .array(let rows) = fields[3],
               case .unsigned(let availability) = fields[4],
               let revocationAvailability = PairedPhoneRevocationAvailability(rawValue: availability),
               case .unsigned(let health) = fields[5], let gatewayRevocationHealth = GatewayRevocationHealth(rawValue: health) else {
             throw AuthorityPairingChannelError.invalidMessage
         }
-        let phones = try rows.map { row -> DeliveryRecipient in
-            guard case .array(let values) = row, values.count == 2, case .bytes(let phoneID) = values[0],
-                  case .bytes(let epoch) = values[1], phoneID.count == 16, epoch.count == 16 else {
-                throw AuthorityPairingChannelError.invalidMessage
+        func decodeRows(_ rows: [CBORValue]) throws -> [DeliveryRecipient] {
+            guard rows.count <= EnrollmentJournal.maximumRows else { throw AuthorityPairingChannelError.invalidMessage }
+            return try rows.map { row in
+                guard case .array(let values) = row, values.count == 2, case .bytes(let phoneID) = values[0],
+                      case .bytes(let epoch) = values[1], phoneID.count == 16, epoch.count == 16 else {
+                    throw AuthorityPairingChannelError.invalidMessage
+                }
+                return DeliveryRecipient(phoneID: phoneID, enrollmentEpoch: epoch)
             }
-            return DeliveryRecipient(phoneID: phoneID, enrollmentEpoch: epoch)
         }
-        guard Set(phones.map(\.phoneID)).count == phones.count,
-              Set(phones.map(\.enrollmentEpoch)).count == phones.count else {
+        let phones = try decodeRows(rows)
+        let rePairablePhones: [DeliveryRecipient]
+        if includeRePair, case .array(let retained) = fields[7] {
+            rePairablePhones = try decodeRows(retained)
+        } else if includeRePair {
+            throw AuthorityPairingChannelError.invalidMessage
+        } else {
+            rePairablePhones = []
+        }
+        guard phones.count + rePairablePhones.count <= EnrollmentJournal.maximumRows,
+              Set(phones.map(\.phoneID)).count == phones.count,
+              Set(phones.map(\.phoneID)).isDisjoint(with: rePairablePhones.map(\.phoneID)),
+              Set((phones + rePairablePhones).map(\.enrollmentEpoch)).count == phones.count + rePairablePhones.count else {
             throw AuthorityPairingChannelError.invalidMessage
         }
         let inconclusiveSince: UInt64?
@@ -130,9 +158,9 @@ public struct PairedPhoneSnapshot: Sendable {
         default: throw AuthorityPairingChannelError.invalidMessage
         }
         let result = try Self(macID: macID, accountID: accountID, revision: GatewayHostSnapshot.uuid(revision),
-            phones: phones, revocationAvailability: revocationAvailability, gatewayRevocationHealth: gatewayRevocationHealth,
+            phones: phones, rePairablePhones: rePairablePhones, revocationAvailability: revocationAvailability, gatewayRevocationHealth: gatewayRevocationHealth,
             gatewayInconclusiveSinceUnixMillis: inconclusiveSince)
-        guard try result.encode() == data else { throw AuthorityPairingChannelError.invalidMessage }
+        guard try result.encode(includeRePair: includeRePair) == data else { throw AuthorityPairingChannelError.invalidMessage }
         return result
     }
 

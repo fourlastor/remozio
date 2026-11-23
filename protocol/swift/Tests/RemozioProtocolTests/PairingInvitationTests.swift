@@ -5,7 +5,13 @@ import XCTest
 final class PairingInvitationTests: XCTestCase {
     private struct Valid: Decodable { let name: String; let hex: String; let text: String; let fingerprint: String }
     private struct Invalid: Decodable { let name: String; let hex: String }
-    private struct Vectors: Decodable { let valid: [Valid]; let invalid: [Invalid] }
+    private struct RePair: Decodable { let hex: String; let ordinaryHex: String; let text: String }
+    private struct Vectors: Decodable {
+        let valid: [Valid]
+        let invalid: [Invalid]
+        let rePairValid: [RePair]
+        let rePairInvalid: [Invalid]
+    }
     private var vectorRoot: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("vectors")
@@ -34,6 +40,31 @@ final class PairingInvitationTests: XCTestCase {
             XCTAssertEqual(invitation.description, "PairingInvitation(redacted)")
         }
     }
+    func testSharedRePairInvitationWrapsTheExactOrdinaryBytes() throws {
+        for row in try vectors().rePairValid {
+            let rePair = try RePairInvitation.importText(row.text)
+            XCTAssertEqual(try rePair.encode(), hex(row.hex))
+            XCTAssertEqual(try rePair.invitation.encode(), hex(row.ordinaryHex))
+            XCTAssertEqual(try RePairInvitation.decode(hex(row.hex)).exportText(), row.text)
+            XCTAssertEqual(rePair.predecessor.phoneID, Data(repeating: 3, count: 16))
+            XCTAssertEqual(rePair.predecessor.epoch, Data(repeating: 10, count: 16))
+            XCTAssertThrowsError(try PairingInvitation.importText(row.text))
+        }
+    }
+
+    func testRePairInvitationRefusesMalformedAndOversizedInputs() throws {
+        let samples = try vectors()
+        for row in samples.rePairInvalid {
+            XCTAssertThrowsError(try RePairInvitation.decode(hex(row.hex)), row.name)
+        }
+        let text = try XCTUnwrap(samples.rePairValid.first).text
+        for bad in [text + "=", text + "\n", text.replacingOccurrences(of: ":v1:", with: ":v2:"),
+                    "remozio-repair:v1:" + String(repeating: "A", count: 900)] {
+            XCTAssertThrowsError(try RePairInvitation.importText(bad))
+        }
+        XCTAssertThrowsError(try RePairInvitation.decode(Data(repeating: 0, count: 641)))
+    }
+
     func testMalformedAndOversizedInvitationsFail() throws {
         for row in try vectors().invalid { XCTAssertThrowsError(try PairingInvitation.decode(hex(row.hex)), row.name) }
         XCTAssertThrowsError(try PairingInvitation.decode(Data(repeating: 0, count: 513)))

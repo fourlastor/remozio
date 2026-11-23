@@ -5,6 +5,7 @@ import RemozioProtocol
 /// This local protocol carries setup claims and receipts, never administrator forms or command decisions.
 @objc public protocol TransportPairingXPCProtocol {
     func setupHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func waitForRePairSetupDrain(_ invitation: Data, reply: @escaping @Sendable (Bool) -> Void)
     func beginSetup(_ invitation: Data, reply: @escaping @Sendable (UInt64) -> Void)
     func setupCandidates(reply: @escaping @Sendable (Data?) -> Void)
     func stageSetup(_ candidateID: Data, transcript: Data, reply: @escaping @Sendable (Bool) -> Void)
@@ -58,10 +59,21 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
             onHandshake(); send { reply(1) }
         } catch { close(); reply(0) }
     }
+    func waitForRePairSetupDrain(_ invitation: Data, reply: @escaping @Sendable (Bool) -> Void) {
+        launch(failed: { reply(false) }) { owner in
+            try await owner.waitForRePairDrain(RePairInvitation.decode(invitation))
+            return { reply(true) }
+        }
+    }
+
     func beginSetup(_ invitation: Data, reply: @escaping @Sendable (UInt64) -> Void) {
         launch(failed: { reply(0) }) { owner in
-            guard invitation.count <= 512 else { throw TransportPairingControlError.invalidMessage }
-            let port = try await owner.begin(PairingInvitation.decode(invitation))
+            let port: UInt16
+            if let ordinary = try? PairingInvitation.decode(invitation) {
+                port = try await owner.begin(ordinary)
+            } else {
+                port = try await owner.begin(rePair: RePairInvitation.decode(invitation))
+            }
             return { reply(UInt64(port)) }
         }
     }
