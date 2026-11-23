@@ -78,10 +78,7 @@ final class RoutingJournal {
         let expires = wall.addingReportingOverflow(policy.challengeLifetimeMillis)
         let deadline = now.milliseconds.addingReportingOverflow(policy.challengeLifetimeMillis)
         guard !expires.overflow, !deadline.overflow else { throw RoutingJournalError.invalidClock }
-        let count: Int64 = try statement("SELECT count(*) FROM main.routing_operations_v1", []) {
-            guard sqlite3_step($0) == SQLITE_ROW else { throw RoutingJournalError.corruptData }; return sqlite3_column_int64($0, 0)
-        }
-        guard count < policy.maximumOperations else { throw RoutingJournalError.capacityExceeded }
+        try ensureOperationCapacity(now: now.milliseconds)
         var challenge = Data(count: 32)
         guard challenge.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
             throw RoutingJournalError.unavailableChallenge
@@ -93,6 +90,35 @@ final class RoutingJournal {
             [control.operationID, try control.encode(limits: policy.payloadLimits), bytes(run), uint(now.milliseconds), uint(deadline.partialValue)]) { try done($0) }
         return control
     }
+    private func ensureOperationCapacity(now: UInt64) throws {
+        let maximum = Int64(policy.maximumOperations)
+        guard try operationCount() >= maximum else { return }
+        let scope = [bytes(run), uint(now)]
+        try statement("""
+            DELETE FROM main.routing_operations_v1
+            WHERE consumed IS NULL AND (run<>? OR deadline<=?)
+            """, scope) { try done($0) }
+        let remaining = try operationCount()
+        guard remaining >= maximum else { return }
+
+        // Keep current-run receipts through their original retry window.
+        let needed = remaining - maximum + 1
+        try statement("""
+            DELETE FROM main.routing_operations_v1 WHERE operation IN (
+                SELECT operation FROM main.routing_operations_v1
+                WHERE consumed IS NOT NULL AND (run<>? OR deadline<=?)
+                ORDER BY consumed, operation LIMIT \(needed)
+            )
+            """, scope) { try done($0) }
+        guard try operationCount() < maximum else { throw RoutingJournalError.capacityExceeded }
+    }
+    private func operationCount() throws -> Int64 {
+        try statement("SELECT count(*) FROM main.routing_operations_v1", []) {
+            guard sqlite3_step($0) == SQLITE_ROW else { throw RoutingJournalError.corruptData }
+            return sqlite3_column_int64($0, 0)
+        }
+    }
+
     func apply(payload: Data, signature: Data, enrollment: StoredApprovalEnrollment, wall: UInt64, now: AuthorityMoment) throws -> RoutingChange {
         try clock(now)
         let control = try RoutingAwayControl.decode(payload, limits: policy.payloadLimits)
