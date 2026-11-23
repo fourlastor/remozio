@@ -192,7 +192,7 @@ internal class StoredPairingHost(
                 checkNotNull(openExisting()).use { store ->
                     require(recordID !in liveRePairs)
                     val row = store.snapshot().entries.single { it.enrollment.recordID == recordID }
-                    require(row.rePair == null || row.rePair.proofMayHaveBeenSent)
+                    require(row.rePair?.proofMayHaveBeenSent != false)
                     store.recoverPairing(recordID.copyBytes()).transcript
                 }
             }
