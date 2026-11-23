@@ -3279,9 +3279,10 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     }
 
     private func receiver(_ endpoint: Endpoint, expression: String? = nil, user: uid_t? = nil,
-                          session: au_asid_t? = nil, maximum: Int = 64) throws -> MachCommandCallerReceiver {
+                          session: au_asid_t? = nil, maximum: Int = 64,
+                          observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil) throws -> MachCommandCallerReceiver {
         try MachCommandCallerReceiver(receivePort: endpoint.port, expression: expression ?? selfExpression(),
-            userID: user ?? geteuid(), auditSessionID: session, maxPayloadBytes: maximum)
+            userID: user ?? geteuid(), auditSessionID: session, maxPayloadBytes: maximum, observeTimeout: observeTimeout)
     }
 
     func testTerminalContextUsesTheOriginalAuthenticatedCallerAndRejectsRetiredRecords() throws {
@@ -4621,8 +4622,9 @@ extension MachCommandCallerReceiverTests {
         defer { raw.caller.close() }
         return try CommandAdmissionResultPayload.decode(raw.payload, profile: profile, original: submission)
     }
-    private func ownerTerminal(_ endpoint: Endpoint, submission: CommandSubmission, admission: VerifiedCommandAdmissionResult) throws -> VerifiedCommandTerminalResult {
-        let raw = try receiver(endpoint, maximum: 4096).receiveTerminalReply(timeoutMilliseconds: 1000)
+    private func ownerTerminal(_ endpoint: Endpoint, submission: CommandSubmission, admission: VerifiedCommandAdmissionResult,
+                               observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil) throws -> VerifiedCommandTerminalResult {
+        let raw = try receiver(endpoint, maximum: 4096, observeTimeout: observeTimeout).receiveTerminalReply(timeoutMilliseconds: 1000)
         defer { raw.caller.close() }
         return try CommandTerminalResultPayload.decode(raw.payload, profile: admission.profile, original: submission, admission: admission)
     }
@@ -6974,9 +6976,11 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(completed.wait(timeout: .now() + 5), .success); try result.withLock { try XCTUnwrap($0).get() }
     }
     private func pipeOpened(_ terminal: Endpoint, profile: CommandHandshakeProfile, submission: CommandSubmission,
-                            admission: VerifiedCommandAdmissionResult) throws -> MachCommandAuthorityPort {
+                            admission: VerifiedCommandAdmissionResult,
+                            observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil) throws -> MachCommandAuthorityPort {
         guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
-        guard case .stream(let opened, let carried) = try receiver(terminal, maximum: 8192).receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+        guard case .stream(let opened, let carried) = try receiver(terminal, maximum: 8192, observeTimeout: observeTimeout)
+            .receiveExecutionEvent(timeoutMilliseconds: 2000) else {
             throw CommandStreamError.closed
         }
         defer { opened.caller.close(); carried?.close() }
@@ -7268,12 +7272,14 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(completed.wait(timeout: .now() + 5), .success); try result.withLock { try XCTUnwrap($0).get() }
     }
     private func waitForNativeJob(_ terminal: Endpoint, profile: CommandHandshakeProfile, submission: CommandSubmission,
-                                  admission: VerifiedCommandAdmissionResult, stopped: Bool) throws -> CommandJobStatePayload {
+                                  admission: VerifiedCommandAdmissionResult, stopped: Bool,
+                                  observeTimeout: @escaping @Sendable (MachCommandReceiveTimeoutStage) -> Void) throws -> CommandJobStatePayload {
         guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
         let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: request)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192).receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+            guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192, observeTimeout: observeTimeout)
+                .receiveExecutionEvent(timeoutMilliseconds: 1000) else {
                 throw CommandStreamError.closed
             }
             defer { reply.caller.close(); right?.close() }
@@ -7289,46 +7295,84 @@ extension MachCommandCallerReceiverTests {
     }
     func testNativeJobEventsReportOwnedTargetStopContinueAndActualCancellationForBothModes() throws {
         for wire: UInt64 in [6, 7] {
-            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
-            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
-            let marker = fixture.root.appendingPathComponent("started")
-            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
-                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
-                    Data("printf ready > \"$1\"; exec /bin/sleep 60".utf8), Data("sh".utf8), Data(marker.path.utf8)],
-                wire: wire, ioMode: wire == 6 ? .pty : .pipes)
-            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
-            _ = try ownerDecision(request, fixture: fixture, decline: false); try beginDispatch(fixture, request: request, launcher: launcher)
-            let control = try pipeOpened(terminal, profile: profile, submission: submission, admission: admission); defer { control.close() }
-            try waitForPipeMarker(marker)
-            try pipeSend(.signal(UInt32(SIGSTOP)), control: control, profile: profile, submission: submission, admission: admission)
-            let stopped = try waitForNativeJob(terminal, profile: profile, submission: submission, admission: admission, stopped: true)
-            guard case .stopped(let signal, let code, _) = stopped.state else { return XCTFail("The original target must stop") }
-            XCTAssertEqual(signal, UInt32(SIGSTOP)); XCTAssertEqual(code, UInt32(CLD_STOPPED))
-            try pipeSend(.signal(UInt32(SIGCONT)), control: control, profile: profile, submission: submission, admission: admission, sequence: 1)
-            let continued = try waitForNativeJob(terminal, profile: profile, submission: submission, admission: admission, stopped: false)
-            XCTAssertEqual(continued.state, .continued); XCTAssertGreaterThan(continued.revision, stopped.revision)
-            try pipeSend(.cancel, control: control, profile: profile, submission: submission, admission: admission, sequence: 2)
-            if wire == 6 {
-                guard case .admitted(let retained) = admission.outcome else { throw CommandStreamError.binding }
-                let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: retained)
-                var ended = false
-                let deadline = Date().addingTimeInterval(5)
-                while !ended {
-                    guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192).receiveExecutionEvent(timeoutMilliseconds: 1000) else {
-                        throw CommandStreamError.closed
-                    }
-                    defer { reply.caller.close(); right?.close() }
-                    let body = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend).body
-                    if body == .outputEnd { ended = true }
-                    else if case .output = body { }
-                    else { throw CommandStreamError.closed }
-                    guard Date() < deadline else { throw MachCommandCallerError.timeout }
-                }
-                try pipeSend(.outputDrained, control: control, profile: profile, submission: submission, admission: admission, sequence: 3)
+            let stage = Mutex<MachCommandReceiveTimeoutStage?>(nil)
+            let observeTimeout: @Sendable (MachCommandReceiveTimeoutStage) -> Void = { value in
+                stage.withLock { $0 = value }
             }
-            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .signalled(UInt32(SIGKILL)))
-            try awaitDispatchCleanup(authority)
-            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+            var phase = "prepare fixture", phaseStarted = ContinuousClock.now
+            func beginPhase(_ name: String) {
+                phase = name
+                phaseStarted = .now
+                stage.withLock { $0 = nil }
+            }
+            func phaseDetails() -> String {
+                let receiveStage = stage.withLock { $0.map { String(describing: $0) } ?? "none" }
+                return "wire=\(wire) phase=\(phase) receive stage=\(receiveStage) elapsed=\(ContinuousClock.now - phaseStarted)"
+            }
+            do {
+                let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+                let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+                let marker = fixture.root.appendingPathComponent("started")
+                let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                    executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                        Data("printf ready > \"$1\"; exec /bin/sleep 60".utf8), Data("sh".utf8), Data(marker.path.utf8)],
+                    wire: wire, ioMode: wire == 6 ? .pty : .pipes)
+                let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+                _ = try ownerDecision(request, fixture: fixture, decline: false); try beginDispatch(fixture, request: request, launcher: launcher)
+                beginPhase("open stream")
+                let control = try pipeOpened(terminal, profile: profile, submission: submission, admission: admission,
+                                             observeTimeout: observeTimeout)
+                defer { control.close() }
+                beginPhase("target ready marker")
+                try waitForPipeMarker(marker)
+                beginPhase("send stop")
+                try pipeSend(.signal(UInt32(SIGSTOP)), control: control, profile: profile, submission: submission, admission: admission)
+                beginPhase("receive stopped state")
+                let stopped = try waitForNativeJob(terminal, profile: profile, submission: submission, admission: admission, stopped: true,
+                                                   observeTimeout: observeTimeout)
+                guard case .stopped(let signal, let code, _) = stopped.state else { return XCTFail(phaseDetails()) }
+                XCTAssertEqual(signal, UInt32(SIGSTOP), phaseDetails())
+                XCTAssertEqual(code, UInt32(CLD_STOPPED), phaseDetails())
+                beginPhase("send continue")
+                try pipeSend(.signal(UInt32(SIGCONT)), control: control, profile: profile, submission: submission, admission: admission, sequence: 1)
+                beginPhase("receive continued state")
+                let continued = try waitForNativeJob(terminal, profile: profile, submission: submission, admission: admission, stopped: false,
+                                                     observeTimeout: observeTimeout)
+                XCTAssertEqual(continued.state, .continued, phaseDetails())
+                XCTAssertGreaterThan(continued.revision, stopped.revision, phaseDetails())
+                beginPhase("send cancel")
+                try pipeSend(.cancel, control: control, profile: profile, submission: submission, admission: admission, sequence: 2)
+                if wire == 6 {
+                    beginPhase("receive PTY output end")
+                    guard case .admitted(let retained) = admission.outcome else { throw CommandStreamError.binding }
+                    let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: retained)
+                    var ended = false
+                    let deadline = Date().addingTimeInterval(5)
+                    while !ended {
+                        guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192, observeTimeout: observeTimeout)
+                            .receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+                            throw CommandStreamError.closed
+                        }
+                        defer { reply.caller.close(); right?.close() }
+                        let body = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend).body
+                        if body == .outputEnd { ended = true }
+                        else if case .output = body { }
+                        else { throw CommandStreamError.closed }
+                        guard Date() < deadline else { throw MachCommandCallerError.timeout }
+                    }
+                    beginPhase("acknowledge PTY drain")
+                    try pipeSend(.outputDrained, control: control, profile: profile, submission: submission, admission: admission, sequence: 3)
+                }
+                beginPhase("receive terminal result")
+                let result = try ownerTerminal(terminal, submission: submission, admission: admission, observeTimeout: observeTimeout)
+                XCTAssertEqual(result.outcome, .signalled(UInt32(SIGKILL)), phaseDetails())
+                beginPhase("dispatch cleanup")
+                try awaitDispatchCleanup(authority)
+                XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher), phaseDetails())
+            } catch {
+                print("Native job event failed: \(phaseDetails()) error=\(error)")
+                throw error
+            }
         }
     }
 }
@@ -8373,7 +8417,8 @@ extension MachCommandCallerReceiverTests {
                                  policy: CurrentCommandElevationPolicy,
                                  streamBinding: @escaping @Sendable () throws -> Data,
                                  onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void,
-                                 diagnostics: ReceiveDiagnostics? = nil) throws -> AuthorityCommandReceiveWorker {
+                                 diagnostics: ReceiveDiagnostics? = nil,
+                                 report: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in }) throws -> AuthorityCommandReceiveWorker {
         let journal = try XCTUnwrap(fixture.authority), epoch = fixture.clock, expression = try selfExpression()
         let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
         let limits = fixture.limits, environment = assemblyEnvironment, contract = fixture.contract
@@ -8390,7 +8435,7 @@ extension MachCommandCallerReceiverTests {
                             createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
                     }, now: { .init(epoch: epoch, milliseconds: 110) }, receiptTimeMs: time,
                     checkCancellation: { try stop.check() })
-            }, receiptTime: { 777 }, onAdmission: onAdmission,
+            }, receiptTime: { 777 }, onAdmission: onAdmission, report: report,
             observeReceive: { event in diagnostics?.record(event) })
     }
 
@@ -8456,24 +8501,56 @@ extension MachCommandCallerReceiverTests {
     @MainActor func testReceiveWorkerElevationBindingFailureReturnsTypedUncertaintyWithoutCaptureOrReservation() async throws {
         let fixture = try CommandRequestFixture(owned: true), port = WorkerPort(), box = ElevationGrantBox()
         let completed = Mutex(false), policy = try currentElevation(box)
+        let diagnostics = ReceiveDiagnostics(), timeline = Mutex<[String]>([])
+        let start = ContinuousClock.now
+        let record: @Sendable (String) -> Void = { event in
+            timeline.withLock { $0.append("\(ContinuousClock.now - start): \(event)") }
+        }
+        let details: @Sendable () -> String = {
+            "\(diagnostics.snapshot); \(timeline.withLock { $0.joined(separator: "; ") })"
+        }
         let worker = try elevationWorker(fixture, port: port, policy: policy, streamBinding: {
+            record("stream binding failed")
             throw ElevationReadFailure.unavailable
         }, onAdmission: { result in
-            guard case .failure(let error) = result else { return XCTFail("A failed binding must prevent admission") }
-            XCTAssertTrue(error is ElevationReadFailure); completed.withLock { $0 = true }
-        })
-        try await worker.start()
-        let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
-        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
-        let profile = try workerElevationProfile(destination), reply = try Endpoint(), before = try fixture.auditRecordCount
-        let submission = try workerElevationSubmission(destination, reply: reply, profile: profile,
-            descriptor: descriptor, id: 0xb2, executable: "/missing-before-binding")
-        try await waitForReceiveWorker { completed.withLock { $0 } }
-        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
-        XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
-        XCTAssertEqual(box.state.withLock { $0.reads }, 1); XCTAssertFalse(worker.isRetired)
-        XCTAssertEqual(try sendReferences(reply.port), 1); XCTAssertGreaterThanOrEqual(fcntl(descriptor, F_GETFD), 0)
-        await worker.close()
+            switch result {
+            case .success: record("admission callback succeeded")
+            case .failure(let error): record("admission callback failed: \(type(of: error))")
+            }
+            guard case .failure(let error) = result else { return XCTFail("A failed binding must prevent admission. \(details())") }
+            XCTAssertTrue(error is ElevationReadFailure, details())
+            completed.withLock { $0 = true }
+        }, diagnostics: diagnostics, report: { record("worker status: \($0)") })
+        do {
+            try await worker.start()
+            let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+            defer {
+                record("cleanup: status=\(worker.status), retired=\(worker.isRetired)")
+                worker.requestStop()
+                _ = mach_port_deallocate(mach_task_self_, destination)
+                _ = Darwin.close(descriptor)
+            }
+            let profile = try workerElevationProfile(destination), reply = try Endpoint(), before = try fixture.auditRecordCount
+            record("send admission")
+            let submission = try workerElevationSubmission(destination, reply: reply, profile: profile,
+                descriptor: descriptor, id: 0xb2, executable: "/missing-before-binding")
+            record("send returned")
+            try await waitForReceiveWorker { completed.withLock { $0 } }
+            record("wait observed the callback")
+            let outcome = try typedOutcome(reply, submission: submission, profile: profile)
+            XCTAssertEqual(outcome, .uncertain(.admissionRejected), details())
+            XCTAssertNil(try fixture.reservation(submission.binding.id), details())
+            XCTAssertEqual(try fixture.auditRecordCount, before, details())
+            XCTAssertEqual(box.state.withLock { $0.reads }, 1, details())
+            XCTAssertFalse(worker.isRetired, details())
+            XCTAssertEqual(try sendReferences(reply.port), 1, details())
+            XCTAssertGreaterThanOrEqual(fcntl(descriptor, F_GETFD), 0, details())
+            await worker.close()
+        } catch {
+            record("failed: \(type(of: error)); status=\(worker.status), retired=\(worker.isRetired)")
+            print("Elevation binding failed: \(details())")
+            throw error
+        }
     }
 
     func testReceiveWorkerCurrentElevationPublicConstructionRefusesOrdinaryAccountBeforeFactories() throws {
