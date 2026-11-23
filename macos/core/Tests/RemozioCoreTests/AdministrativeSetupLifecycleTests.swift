@@ -378,9 +378,11 @@ final class AdministrativeSetupLifecycleTests: XCTestCase, @unchecked Sendable {
                 try await eventually { f.custody.counts.withLock { $0.admissionsClosed == 1 } }
             }
             await discovery.open()
-            try await eventually { f.routing.state == .retiring && f.custody.counts.withLock { $0.actualCloses == 1 } }
+            try await eventually {
+                f.routing.state == .retiring && f.custody.counts.withLock { $0.actualCloses == 1 }
+                    && f.clock.timerArms == 1
+            }
             XCTAssertEqual(f.clock.now, f.clock.epoch)
-            XCTAssertEqual(f.clock.timerArms, 1)
             XCTAssertEqual(f.probe.state.withLock { $0.confirmations }, 0)
             XCTAssertFalse(f.routing.allowsNormal)
             XCTAssertThrowsError(try f.routing.normalOwner())
