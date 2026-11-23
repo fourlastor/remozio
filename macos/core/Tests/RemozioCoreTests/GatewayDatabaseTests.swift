@@ -464,9 +464,11 @@ final class GatewayDatabaseTests: XCTestCase {
         try f.sql("DROP TRIGGER reject_head")
         XCTAssertTrue(try abandon(db, first, after: 0).inserted)
         let second = try signedTombstone(.activation, revision: 2, operation: 2)
-        fails(.capacityExceeded) { try abandon(db, second, after: 1) }
+        XCTAssertTrue(try abandon(db, second, after: 1).inserted)
+        let third = try signedTombstone(.candidate, revision: 3, operation: 3)
+        fails(.capacityExceeded) { try abandon(db, third, after: 2) }
         XCTAssertFalse(try abandon(db, first, after: 0).inserted)
-        XCTAssertEqual(try db.headEvidence().receipt?.signature, first.1)
+        XCTAssertEqual(try db.headEvidence().receipt?.signature, second.1)
     }
 
     func testDelayedRecoveryKeepsOriginalReceiptAfterAnotherPhoneAdvancesHead() throws {
@@ -541,7 +543,7 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertEqual(try db.head(), 0)
     }
 
-    func testDelayedRecoveryLeavesTheOrdinaryExpiryAndCapacityChecksInForce() throws {
+    func testDelayedRecoveryPreservesOrdinaryExpiryAndUsesTheRevocationReserve() throws {
         let f = try Fixture(), db = try open(f, initialize: true, maximum: 2)
         let first = try candidate(); _ = try admit(db, first)
         XCTAssertThrowsError(try admit(db, candidate(2, revision: 2, phone: 8), head: 1, wall: 2500)) {
@@ -552,9 +554,11 @@ final class GatewayDatabaseTests: XCTestCase {
         }
         XCTAssertThrowsError(try applySubmission(db, submission(revision: 2), head: 1, wall: 2500))
         _ = try activate(db, activation(first), head: 1)
-        fails(.capacityExceeded) { try recover(db, delayedRevocation(), head: 2) }
-        XCTAssertEqual(try db.head(), 2)
-        XCTAssertNotNil(try db.activeMapping(trust: trust(head: 2)))
+        let original = try delayedRevocation()
+        XCTAssertTrue(try recover(db, original, head: 2).inserted)
+        XCTAssertFalse(try recover(db, original, head: 2).inserted)
+        XCTAssertEqual(try db.head(), 3)
+        XCTAssertNil(try db.activeMapping(trust: trust(head: 3)))
     }
 
     func testDelayedRecoveryRollsBackHeadMappingAndReceiptTogether() throws {
@@ -710,15 +714,160 @@ final class GatewayDatabaseTests: XCTestCase {
         }
     }
 
+    func testFirstRevocationSurvivesFullOrdinaryCapacity() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, maximum: 6)
+        let first = try candidate(), other = try candidate(2, revision: 3, phone: 8)
+        _ = try admit(db, first)
+        _ = try activate(db, activation(first), head: 1)
+        _ = try admit(db, other, head: 2)
+        _ = try activate(db, activation(other, revision: 4, operation: 51), head: 3)
+        let pending = try candidate(3, revision: 5)
+        _ = try admit(db, pending, head: 4)
+        _ = try applySubmission(db, submission(revision: 6), head: 5)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 1)
+        fails(.capacityExceeded) { try admit(db, candidate(4, revision: 7, phone: 9), head: 6) }
+        fails(.capacityExceeded) { try activate(db, activation(pending, revision: 7, operation: 52), head: 6) }
+        fails(.capacityExceeded) { try applySubmission(db, submission(.revocation, operation: 32, revision: 7), head: 6) }
+        XCTAssertThrowsError(try revoke(db, revision: 7, head: 6, wall: 2500)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .expired)
+        }
+        let removal = try delayedRevocation(revision: 7)
+        fails(.wrongScope) { try recover(db, removal, head: 6, active: true) }
+        let foreign = try delayedRevocation(revision: 7, owner: 9)
+        fails(.wrongScope) { try recover(db, foreign, head: 6) }
+        XCTAssertEqual(try db.head(), 6)
+
+        let result: GatewayRecipientApplication
+        do {
+            result = try revoke(db, revision: 7, head: 6)
+        } catch {
+            XCTAssertEqual(error as? GatewayDatabaseError, .capacityExceeded)
+            XCTAssertEqual(try db.head(), 6)
+            XCTAssertNotNil(try db.activeMapping(trust: trust(head: 6)))
+            XCTAssertNil(try db.recipientReceipt(operationID: id(60)))
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 1)
+            throw error
+        }
+        XCTAssertTrue(result.inserted)
+        XCTAssertEqual(try db.head(), 7)
+        XCTAssertEqual(try db.headEvidence().receipt?.signature, result.receipt.signature)
+        XCTAssertNil(try db.activeMapping(trust: trust(head: 7)))
+        XCTAssertNotNil(try db.activeMapping(trust: trust(head: 7, phone: 8)))
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
+        XCTAssertFalse(try revoke(db, revision: 7, head: 7, wall: 2500).inserted)
+    }
+
+    func testTombstoneClosesFullBudgetGapBeforeProtectedRevocation() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, maximum: 2)
+        let first = try candidate()
+        _ = try admit(db, first)
+        _ = try activate(db, activation(first), head: 1)
+        let tombstone = try signedTombstone(.activation, revision: 3, operation: 3)
+        let result: GatewayControlTombstoneApplication
+        do {
+            result = try abandon(db, tombstone, after: 2)
+        } catch {
+            XCTAssertEqual(error as? GatewayDatabaseError, .capacityExceeded)
+            XCTAssertEqual(try db.head(), 2)
+            XCTAssertEqual(try f.scalar("PRAGMA user_version"), 4)
+            XCTAssertNotNil(try db.activeMapping(trust: trust(head: 2)))
+            throw error
+        }
+        XCTAssertTrue(result.inserted)
+        XCTAssertEqual(try db.head(), 3)
+        let revocation = try revoke(db, revision: 4, head: 3)
+        XCTAssertTrue(revocation.inserted)
+        XCTAssertFalse(try abandon(db, tombstone, after: 2).inserted)
+        XCTAssertEqual(try db.head(), 4)
+        XCTAssertNil(try db.activeMapping(trust: trust(head: 4)))
+        XCTAssertEqual(try db.controlHistory(afterRevision: 0, throughRevision: 4, maximumRecords: 4).records.map(\.revision),
+            [1, 2, 3, 4])
+    }
+
+    func testLastFirstRevocationSlotSurvivesRollbackAndIsIndependentOfTombstones() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, maximum: 1, pending: 1)
+        _ = try admit(db)
+        // These rows exercise counting only. The actual admissions and retries below are signed.
+        try f.sql("""
+            WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<1022)
+            INSERT INTO gateway_recipients_v2
+            SELECT CAST(printf('%016d',n) AS BLOB),x'0000000000000003',CAST(printf('%016d',n) AS BLOB),
+                   zeroblob(16),x'80',zeroblob(64),CAST(printf('%08d',n) AS BLOB) FROM rows
+            """)
+        let tombstone = try signedTombstone(.candidate, revision: 2, operation: 2)
+        XCTAssertTrue(try abandon(db, tombstone, after: 1).inserted)
+        XCTAssertTrue(try revoke(db, revision: 3, head: 2).inserted)
+
+        try f.sql("CREATE TRIGGER reject_head BEFORE UPDATE OF head ON gateway_identity_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try revoke(db, revision: 4, head: 3, operation: 61, phoneEpoch: 8))
+        XCTAssertNil(try db.recipientReceipt(operationID: id(61)))
+        XCTAssertEqual(try db.head(), 3)
+        try f.sql("DROP TRIGGER reject_head")
+        let last = try revoke(db, revision: 4, head: 3, operation: 61, phoneEpoch: 8)
+        XCTAssertTrue(last.inserted)
+        XCTAssertTrue(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
+        XCTAssertTrue(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(8)))
+
+        fails(.capacityExceeded) { try revoke(db, revision: 5, head: 4, operation: 62, phoneEpoch: 9) }
+        fails(.capacityExceeded) { try revoke(db, revision: 5, head: 4, operation: 63) }
+        let excess = try signedTombstone(.activation, revision: 5, operation: 3)
+        fails(.capacityExceeded) { try abandon(db, excess, after: 4) }
+        XCTAssertFalse(try abandon(db, tombstone, after: 1).inserted)
+        XCTAssertFalse(try revoke(db, revision: 4, head: 4, operation: 61, phoneEpoch: 8).inserted)
+        XCTAssertEqual(try db.head(), 4)
+    }
+
+    func testOrdinaryAndHealthReadersReopenFullV4AndReservedV5History() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, maximum: 2)
+        let candidate = try candidate()
+        _ = try admit(db, candidate)
+        let activation = try activate(db, activation(candidate), head: 1)
+        try db.close()
+
+        let oldHealth = try open(f, maximum: 2, health: true)
+        XCTAssertEqual(try oldHealth.updateHealthEvidence().receipt?.signature, activation.receipt.signature)
+        try oldHealth.close()
+        let writer = try open(f, maximum: 2)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), 4)
+        let tombstone = try signedTombstone(.activation, revision: 3, operation: 3)
+        XCTAssertTrue(try abandon(writer, tombstone, after: 2).inserted)
+        let revocation = try revoke(writer, revision: 4, head: 3)
+        try writer.close()
+
+        let before = try Data(contentsOf: URL(fileURLWithPath: f.path))
+        let health = try open(f, maximum: 2, health: true)
+        XCTAssertEqual(try health.updateHealthEvidence().receipt?.signature, revocation.receipt.signature)
+        try health.close()
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.path)), before)
+        let reopened = try open(f, maximum: 2)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), 5)
+        XCTAssertEqual(try reopened.head(), 4)
+        let receipts = try reopened.controlHistory(afterRevision: 0, throughRevision: 4, maximumRecords: 4).records
+        XCTAssertEqual(receipts.map(\.revision), [1, 2, 3, 4])
+        XCTAssertEqual(receipts[2].signature, tombstone.1)
+        XCTAssertNil(try reopened.activeMapping(trust: trust(head: 4)))
+        // A full pre-reserve capacity check would refuse these same four retained rows.
+        XCTAssertEqual(try f.scalar("SELECT (SELECT count(*) FROM gateway_candidates_v1) + (SELECT count(*) FROM gateway_recipients_v2) + (SELECT count(*) FROM gateway_control_tombstones_v5)"), 4)
+        fails(.capacityExceeded) { try admit(reopened, self.candidate(5, revision: 5, phone: 8), head: 4) }
+    }
+
+    func testMaximumRevisionTombstoneFitsTheStorageEstimate() throws {
+        let value = try GatewayControlTombstone(registration: identity(), revision: UInt64.max,
+            originalKind: .activation, operationID: id(1), originalDigest: id(2, 32))
+        XCTAssertEqual(try value.encode().count, 224)
+        XCTAssertLessThanOrEqual(try value.encode().count + 64 + 16 + 8, 1024)
+    }
+
     func testCombinedCapacityDoesNotEvictReceiptsOrTombstones() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true, maximum: 3)
         let candidate = try candidate(); _ = try admit(db, candidate); _ = try activate(db, activation(candidate), head: 1)
         _ = try revoke(db)
-        fails(.capacityExceeded) { try admit(db, self.candidate(2, revision: 4, phone: 9), head: 3) }
-        fails(.capacityExceeded) { try revoke(db, revision: 4, head: 3, operation: 61, phone: 9) }
-        XCTAssertFalse(try revoke(db, head: 3, wall: 9999).inserted)
+        _ = try applySubmission(db, submission(revision: 4), head: 3)
+        fails(.capacityExceeded) { try admit(db, self.candidate(2, revision: 5, phone: 9), head: 4) }
+        fails(.capacityExceeded) { try revoke(db, revision: 5, head: 4, operation: 61) }
+        XCTAssertFalse(try revoke(db, head: 4, wall: 9999).inserted)
         XCTAssertTrue(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
-        XCTAssertEqual(try db.head(), 3)
+        XCTAssertEqual(try db.head(), 4)
     }
 
     func testCorruptRecipientSignatureTokenAndMappingRetireOwner() throws {
@@ -1496,7 +1645,7 @@ final class GatewayDatabaseTests: XCTestCase {
     }
 
     func testSubmissionSharesOperationIdentityAndCapacityWithOtherControls() throws {
-        let fixture = try Fixture(), db = try open(fixture, initialize: true, maximum: 3)
+        let fixture = try Fixture(), db = try open(fixture, initialize: true, maximum: 2)
         _ = try admit(db)
         fails(.operationConflict) { try applySubmission(db, submission(operation: 1, revision: 2), head: 1) }
         _ = try applySubmission(db, submission(revision: 2), head: 1)
