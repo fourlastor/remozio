@@ -108,10 +108,14 @@ private struct CommandCallerSettingsForm: View {
 }
 
 private struct SetupOverview: View {
+    @Environment(\.scenePhase) private var scenePhase
     let presence: PresenceControls
     let setup: MacSetupServiceControls
     @State private var showingSetupPreview = false
     @State private var showingPairing = false
+    @State private var showingPairedPhones = false
+    @State private var gatewayRevocationStatus: GatewayRevocationStatus?
+    @State private var gatewayStatusUnavailable = false
     let recovery: MacSetupRecoveryControls
     @State private var showingAuditUpgrade = false
     @State private var showingSetupRecovery = false
@@ -136,6 +140,14 @@ private struct SetupOverview: View {
                             .font(.headline)
                         Divider()
                         SetupServiceSection(controls: setup)
+                        if presence.status != nil {
+                            if let gatewayRevocationStatus {
+                                GatewayRevocationWarning(status: gatewayRevocationStatus)
+                            }
+                            if gatewayStatusUnavailable {
+                                Text("Gateway delivery status unavailable.").foregroundStyle(.secondary)
+                            }
+                        }
                         if setup.state == .enabled {
                             Button("Set up command approvals…") { showingAccountSetup = true }
                             Button("Audit history setup…") { showingAuditUpgrade = true }
@@ -147,6 +159,7 @@ private struct SetupOverview: View {
                 }
                 HStack(spacing: 12) {
                     Button("Pair a phone…") { showingPairing = true }
+                    Button("Paired phones…") { showingPairedPhones = true }
                     Button("Import setup file…") { showingSetupPreview = true }
                 }
                 HStack {
@@ -160,13 +173,48 @@ private struct SetupOverview: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 440, minHeight: 340)
+        .onChange(of: presence.status?.binding) {
+            gatewayRevocationStatus = nil
+            gatewayStatusUnavailable = false
+        }
+        .task(id: gatewayStatusBinding) {
+            guard let binding = gatewayStatusBinding else { return }
+            while !Task.isCancelled {
+                do {
+                    let status = try await readGatewayStatus(binding)
+                    guard !Task.isCancelled, gatewayStatusBinding == binding else { return }
+                    gatewayRevocationStatus = status
+                    gatewayStatusUnavailable = false
+                } catch {
+                    guard !Task.isCancelled, gatewayStatusBinding == binding else { return }
+                    gatewayStatusUnavailable = true
+                }
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            }
+        }
         .sheet(isPresented: $showingPairing) { PairingSheet() }
+        .sheet(isPresented: $showingPairedPhones) { PairedPhonesSheet() }
         .sheet(isPresented: $showingSetupPreview) {
             SetupFilePreview(setup: setup, accountPreparation: { AnyView(AccountSetupSheet(importingSetupFile: true)) })
         }
         .sheet(isPresented: $showingAccountSetup) { AccountSetupSheet() }
         .sheet(isPresented: $showingAuditUpgrade) { AuditUpgradeSheet() }
         .sheet(isPresented: $showingSetupRecovery) { SetupRecoverySheet(controls: recovery) }
+    }
+
+    private var gatewayStatusBinding: AuthorityPresenceBinding? {
+        guard scenePhase == .active, !showingPairing, !showingPairedPhones else { return nil }
+        return presence.status?.binding
+    }
+
+    private func readGatewayStatus(_ binding: AuthorityPresenceBinding) async throws -> GatewayRevocationStatus {
+        let channel = try AuthorityPairingChannel.forCurrentAccount()
+        defer { channel.abort() }
+        let context = try await channel.start()
+        guard context.macID == binding.macID, context.accountID == binding.accountID else {
+            throw AuthorityPairingChannelError.wrongAccount
+        }
+        return try await channel.gatewayRevocationStatus()
     }
 }
 

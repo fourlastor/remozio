@@ -250,6 +250,14 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    func revokePairedPhone(_ selection: PairedPhoneSelection, eventID: Data,
+                           recheckAdministrator: () throws -> Void, validateSetupCode: (JournalTransaction) throws -> Void) throws -> PhoneRevocationStatus {
+        try withPairingRequestOwner { requests in
+            try requests.revokePairedPhone(selection, eventID: eventID, verifyHost: validateSetupCode,
+                recheckAdministrator: recheckAdministrator)
+        }
+    }
+
     /// Receipt recovery requires a current authenticated phone binding. It cannot grant or restore enrollment.
     public func pairingReceipt(setupID: Data, binding: AuthorityPeerBinding, signer: EnclaveAuthorityRequestSigner) throws -> Data? {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }

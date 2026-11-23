@@ -39,6 +39,52 @@ public struct AuthorityPhonePushRegistration: Sendable {
         try verifySelf(tx)
         return try tx.firstGatewayNonRegistrationControl(after: revision, registration: policy.registration)
     }
+    func localRevocation(at revision: UInt64, transaction tx: JournalTransaction) throws -> GatewayAuthorityEnvelope? {
+        try verifySelf(tx)
+        return try tx.gatewayLocalRevocation(at: revision, registration: policy.registration)
+    }
+
+    func localRevocation(for phone: DeliveryRecipient, transaction tx: JournalTransaction) throws -> GatewayAuthorityEnvelope? {
+        try verifySelf(tx)
+        return try tx.gatewayLocalRevocation(for: phone, registration: policy.registration)
+    }
+
+    func grantRetirement(at revision: UInt64, transaction tx: JournalTransaction, wall: UInt64) throws -> GatewayGrantRetirement {
+        try verifySelf(tx)
+        return try tx.gatewayGrantRetirement(at: revision, registration: policy.registration, wall: wall)
+    }
+
+    func stageAbandonment(_ control: GatewayControlTombstone, transaction tx: JournalTransaction, wall: UInt64) throws {
+        try verifySelf(tx)
+        guard control.registration == policy.registration else { throw GatewayAuthorityError.wrongScope }
+        try tx.stageGatewayGrantAbandonment(control, wall: wall)
+    }
+
+    func signAbandonment(_ control: GatewayControlTombstone, transaction tx: JournalTransaction, wall: UInt64) throws -> Data {
+        try verifySelf(tx)
+        guard control.registration == policy.registration else { throw GatewayAuthorityError.wrongScope }
+        return try tx.finishGatewayGrantAbandonment(control, wall: wall, sign: signing)
+    }
+
+    func prepareManagedRevocation(_ row: StoredApprovalEnrollment, transaction tx: JournalTransaction,
+                                  now: AuthorityMoment, wall: UInt64) throws -> GatewayAuthorityEnvelope? {
+        try verifySelf(tx)
+        let registration = policy.registration
+        guard !row.approval.active, row.gatewayRevocation?.registration == registration else {
+            throw GatewayAuthorityError.wrongScope
+        }
+        let phone = DeliveryRecipient(row)
+        if let existing = try tx.gatewayLocalRevocation(for: phone, registration: registration) { return existing }
+        guard row.gatewayRevocation?.progress != .applied else { return nil }
+        let enrollment = try GatewayPhoneEnrollment(phoneID: phone.phoneID, epoch: phone.enrollmentEpoch,
+            tag: row.notificationTag, active: false)
+        return try tx.revokeGatewayEnrollment(trust: GatewayAuthorityTrust(registration: registration, enrollment: enrollment, active: true),
+            expectedHead: tx.gatewayAuthorityHead(registration), nowUnixMillis: wall, now: now, sign: {
+                try signing(GatewayRecipientSigningInput.make(wireVersion: 1, kind: .phoneRevocation,
+                    canonicalPayload: $0.encode(limits: limits), payloadLimits: limits, inputLimits: limits))
+            })
+    }
+
     func current(phoneID: Data, enrollmentEpoch: Data, transaction tx: JournalTransaction,
                  now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
         try verifySelf(tx)
@@ -79,7 +125,8 @@ public struct AuthorityPhonePushRegistration: Sendable {
         guard try tx.approvalTrustSnapshot().revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
         guard observation.scope.registration == policy.registration, observation.activation == nil,
               let retained = try current(phoneID: observation.scope.phoneID, enrollmentEpoch: observation.scope.enrollmentEpoch,
-                transaction: tx, now: now, wall: wall), retained.activation != nil else { throw GatewayAuthorityError.superseded }
+                transaction: tx, now: now, wall: wall),
+              retained.activation != nil || retained.activationAbandonmentConfirmed else { throw GatewayAuthorityError.superseded }
         let candidate = try GatewayTokenCandidate.decode(retained.candidate.canonicalPayload, limits: limits)
         guard observation.scope.matches(candidate.binding) else { throw GatewayAuthorityError.superseded }
         let r = policy.registration

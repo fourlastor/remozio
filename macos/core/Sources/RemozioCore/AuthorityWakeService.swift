@@ -65,6 +65,7 @@ public actor AuthorityWakeService {
     private var retired = false
     public private(set) var wakeStatus = WakeStatus.idle
     public var isRetired: Bool { retired || requestsRetired() }
+
     init(makePublisher: @escaping @Sendable () throws -> AuthorityWakePublisher, hints: AuthorityWakeHintSource,
          interval: UInt64, initialRetryMilliseconds: UInt64 = 1000, maximumRetryMilliseconds: UInt64 = 30_000,
          startRequests: @escaping @Sendable () throws -> Void, closeRequests: @escaping @Sendable () throws -> Void,
@@ -216,6 +217,7 @@ public actor AuthorityWakeService {
                 clock: { try clock.now() }, wall: phonePushWall, makeProvider: {
                     try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)
                 })
+            let gatewayRevocations = AuthorityGatewayRevocationState(registration: configuration.registration)
             let hints = try AuthorityWakeHintSource(registration: configuration.registration)
             let retired = AuthorityRequestRetirementSignal()
             let makePublisher: @Sendable () throws -> AuthorityWakePublisher = {
@@ -223,7 +225,8 @@ public actor AuthorityWakeService {
                     timeoutMilliseconds: configuration.timeoutMilliseconds)
                 return try AuthorityWakePublisher(journal: journal, channel: channel, registration: configuration.registration,
                     leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
-                    ownerRouting: ownerRouting, phonePush: phoneCapability.publication, phonePushSource: { phoneCapability.publication })
+                    ownerRouting: ownerRouting, phonePush: phoneCapability.publication, phonePushSource: { phoneCapability.publication },
+                    gatewayRevocations: gatewayRevocations)
             }
             let updateScheduling = try updateSchedulingFactory?(journal, signer, clock)
             let executionWorker = try commandExecutionFactory?(journal, clock)
@@ -244,7 +247,8 @@ public actor AuthorityWakeService {
             if let presence, let appEndpoint {
                 presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock,
                     pairingConfiguration: pairingConfiguration, signer: pairingConfiguration == nil ? nil : signer,
-                    minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: auditVersions)
+                    minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: auditVersions,
+                    gatewayRevocations: gatewayRevocations)
             } else { presenceListener = nil }
             let commandReceiver = try commandReceiverFactory?(journal, clock)
             let result = try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,

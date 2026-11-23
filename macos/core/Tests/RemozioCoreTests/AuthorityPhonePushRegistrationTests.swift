@@ -242,12 +242,66 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
         let before = try h.store.read()
         let first = try h.owner.acknowledgePhonePushHead(h.provider, head: verified, expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 111))
         XCTAssertEqual(first.disposition, .recorded)
+        XCTAssertEqual(first.acknowledged?.abandonedGrant, false)
+        XCTAssertEqual(try h.owner.phonePushGrantRetirement(h.provider, after: 0,
+            now: .init(epoch: h.clock, milliseconds: 111), wall: 3000), .none)
         XCTAssertEqual(try h.store.read().committed.generation, before.committed.generation + 1)
         let checkpoint = try h.store.read()
         let duplicate = try h.owner.acknowledgePhonePushHead(h.provider, head: verified, expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 112))
         XCTAssertEqual(duplicate.disposition, .alreadyRecorded); XCTAssertEqual(try h.store.read(), checkpoint)
         XCTAssertThrowsError(try h.owner.acknowledgePhonePushHead(h.provider, head: verified, expectedTrustRevision: UUID(), now: .init(epoch: h.clock, milliseconds: 113)))
         XCTAssertEqual(try h.store.read(), checkpoint); try h.assertCheckpoint()
+    }
+
+    func testRetiredGrantSurvivesReopenBeforeTombstoneSigning() throws {
+        let h = try Harness(gatewaySetup: { tx, _, _, _, _, _ in
+            _ = try tx.installCodePolicy(.init(entries: [
+                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
+                    installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
+            ]), expectedRevision: nil)
+        })
+        let metadata = try prepared(h.exchange(h.offer()))
+        let now = AuthorityMoment(epoch: h.clock, milliseconds: 1200)
+        guard case .eligible(let control) = try h.owner.phonePushGrantRetirement(h.provider, after: 0, now: now, wall: 2100) else {
+            return XCTFail("Expected an expired grant at the next revision")
+        }
+        let signerUnavailable = AuthorityPhonePushRegistration(policy: h.provider.policy) { _ in throw Failure.injected }
+        XCTAssertThrowsError(try h.owner.abandonPhonePushGrant(control, provider: signerUnavailable, now: now, wall: 2100))
+        XCTAssertEqual(try h.db.read { try $0.storageSchemaVersion }, 18)
+        XCTAssertNil(try h.db.read { try $0.signedGatewayGrantAbandonment(control) })
+        XCTAssertEqual(try h.head, 1)
+        try h.assertCheckpoint()
+        h.owner.close(); try h.db.close(); h.store.close()
+
+        let epoch = UUID(), root = h.root.path, limits = h.limits, registration = h.registration, provider = h.provider
+        let storage = try AuthorityStorage(openJournal: {
+            try JournalDatabase(lease: ProtectedJournalLease(anchor: root, relativeDirectory: "store", owner: getuid()),
+                macID: registration.macID, accountID: registration.accountID, recordLimits: limits, descriptorLimits: limits,
+                decisionLimits: limits, maximumConsumptions: 30, busyMilliseconds: 100, initialize: false,
+                gatewayPolicy: GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits, maximumControls: 30,
+                    candidateLifetimeMillis: 1000, clockEpoch: epoch))
+        }, openContinuity: { _ in
+            try ContinuityStore(lease: ProtectedContinuityLease(anchor: root, relativeDirectory: "continuity", owner: getuid()),
+                macID: registration.macID, accountID: registration.accountID, initialize: nil)
+        })
+        let journal = try AuthorityJournal(storage: storage)
+        defer { try? journal.close() }
+        try journal.prepareRequests(clockEpoch: epoch, maximumPayloadBytes: 4096)
+        XCTAssertEqual(try journal.read { try $0.storageSchemaVersion }, 18)
+        XCTAssertNil(try journal.read { try $0.signedGatewayGrantAbandonment(control) })
+        let restartedAt = AuthorityMoment(epoch: epoch, milliseconds: 10)
+        try journal.withRequests { owner in
+            XCTAssertEqual(try owner.phonePushGrantRetirement(provider, after: 0, now: restartedAt, wall: 1001), .eligible(control))
+            let state = try XCTUnwrap(owner.currentPhonePushRegistration(provider, phoneID: pushID(5), enrollmentEpoch: pushID(9),
+                now: restartedAt, wall: 1001))
+            XCTAssertTrue(state.candidateExpired)
+            XCTAssertTrue(state.needsRenewal)
+            XCTAssertEqual(state.candidate.operationID, metadata.operationID)
+            let signature = try owner.abandonPhonePushGrant(control, provider: provider, now: restartedAt, wall: 1001)
+            XCTAssertEqual(try GatewayControlTombstone.authenticate(control.encode(), signature: signature, registration: registration), control)
+            XCTAssertEqual(try owner.abandonPhonePushGrant(control, provider: signerUnavailable, now: restartedAt, wall: 1001), signature)
+        }
+        XCTAssertNotNil(try journal.read { try $0.signedGatewayGrantAbandonment(control) })
     }
 
     func testReopenedAuthorityRetainsPairingAndTheCommittedMappingBoundary() throws {

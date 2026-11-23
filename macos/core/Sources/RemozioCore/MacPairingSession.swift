@@ -40,7 +40,7 @@ protocol MacPairingAdministrator: Sendable {
 extension AuthorityPairingChannel: MacPairingRootControl {}
 extension TransportPairingChannel: MacPairingTransportControl {}
 
-private actor NativePairingAdministrator: MacPairingAdministrator {
+actor NativePairingAdministrator: MacPairingAdministrator {
     private var session: SetupAdministratorSession?
     private var closed = false
     func authorization() throws -> Data {

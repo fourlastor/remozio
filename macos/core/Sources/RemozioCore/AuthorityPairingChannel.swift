@@ -39,7 +39,11 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
     }
 }
 
-enum PairingClientCall: Sendable { case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel }
+enum PairingClientCall: Sendable {
+    case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel
+    case phoneManagementHello, managePhone(PairedPhoneOperation, Data, Data)
+}
+
 enum PairingClientReply: Sendable { case version(UInt64), bytes(Data?), cancelled(Bool), failed }
 protocol PairingClientDriver: Sendable {
     func start(closed: @escaping @Sendable () -> Void)
@@ -52,7 +56,7 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
     init(configuration: AuthorityPresenceClientConfiguration) {
         policy = configuration.rootPolicy
         connection = NSXPCConnection(machServiceName: configuration.serviceName, options: .privileged)
-        connection.remoteObjectInterface = NSXPCInterface(with: AuthorityPairingXPCProtocol.self)
+        connection.remoteObjectInterface = NSXPCInterface(with: AuthorityAppXPCProtocol.self)
         policy.configure(connection)
     }
     func start(closed: @escaping @Sendable () -> Void) {
@@ -62,7 +66,7 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
         if case .hello = call {} else {
             do { _ = try policy.verifyCredentials(connection) } catch { reply(.failed); return }
         }
-        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in reply(.failed) }) as? any AuthorityPairingXPCProtocol else {
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in reply(.failed) }) as? any AuthorityAppXPCProtocol else {
             reply(.failed); return
         }
         switch call {
@@ -75,6 +79,11 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
                 [self] in checked(.bytes($0), reply: reply)
             }
         case .cancel: proxy.cancelPairing { [self] in checked(.cancelled($0), reply: reply) }
+        case .phoneManagementHello: proxy.pairedPhoneHello { [self] in checked(.version($0), reply: reply) }
+        case .managePhone(let operation, let selection, let authorization):
+            proxy.managePairedPhone(operation.rawValue, selection: selection, authorization: authorization) {
+                [self] in checked(.bytes($0), reply: reply)
+            }
         }
     }
     private func checked(_ value: PairingClientReply, reply: @Sendable (PairingClientReply) -> Void) {
@@ -103,6 +112,8 @@ public actor AuthorityPairingChannel {
     private var state = State.new
     private var context: AuthorityPairingContext?
     private var staged: PairingTranscript?
+    private var managesPhones = false
+    private var authorizingRevocation = false
     private var pending: (id: UUID, continuation: CheckedContinuation<PairingClientReply, any Error>)?
     private var timer: Task<Void, Never>?
 
@@ -132,6 +143,69 @@ public actor AuthorityPairingChannel {
             self.context = context; state = .open; return context
         } catch { close(); throw error }
     }
+    public func pairedPhones() async throws -> PairedPhoneSnapshot {
+        try await requirePhoneManagement()
+        return try PairedPhoneSnapshot.decode(bytes(await perform(.managePhone(.list, Data(), Data()))),
+            macID: macID, accountID: accountID)
+    }
+
+    public func gatewayRevocationStatus() async throws -> GatewayRevocationStatus {
+        try await pairedPhones().gatewayRevocationStatus
+    }
+
+    /// Call after explicit confirmation. The rights live only through this single mutation.
+    public func revokePhone(_ selection: PairedPhoneSelection) async throws -> PhoneRevocationStatus {
+        guard managesPhones, state == .open, !authorizingRevocation else { throw AuthorityPairingChannelError.closed }
+        try requireScope(selection)
+        authorizingRevocation = true
+        let administrator = NativePairingAdministrator()
+        defer { authorizingRevocation = false }
+        do {
+            let authorization = try await administrator.authorization()
+            let status = try await revokePhone(selection, authorization: authorization)
+            await administrator.close()
+            return status
+        } catch {
+            await administrator.close()
+            throw error
+        }
+    }
+
+    func revokePhone(_ selection: PairedPhoneSelection, authorization: Data) async throws -> PhoneRevocationStatus {
+        try requireScope(selection)
+        guard managesPhones, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+            throw AuthorityPairingChannelError.invalidMessage
+        }
+        return try decodeStatus(bytes(await perform(.managePhone(.revoke, selection.encode(), authorization))))
+    }
+
+    /// Independently reads the exact epoch. A lost mutation response is never replayed.
+    public func revocationStatus(_ selection: PairedPhoneSelection) async throws -> PhoneRevocationStatus {
+        try requireScope(selection)
+        try await requirePhoneManagement()
+        return try decodeStatus(bytes(await perform(.managePhone(.status, selection.encode(), Data()))))
+    }
+
+    private func requirePhoneManagement() async throws {
+        if managesPhones { return }
+        guard case .version(1) = try await perform(.phoneManagementHello) else {
+            throw AuthorityPairingChannelError.unsupportedVersion
+        }
+        managesPhones = true
+    }
+
+    private func requireScope(_ selection: PairedPhoneSelection) throws {
+        guard selection.macID == macID, selection.accountID == accountID else { throw AuthorityPairingChannelError.wrongAccount }
+    }
+
+    private func decodeStatus(_ data: Data) throws -> PhoneRevocationStatus {
+        guard data.count == 1, let value = data.first, let status = PhoneRevocationStatus(rawValue: UInt64(value)) else {
+            close()
+            throw AuthorityPairingChannelError.invalidMessage
+        }
+        return status
+    }
+
     /// Adapt phone-only network claims to the existing local version-1 staging contract.
     /// The placeholder fields never leave local XPC. Only Root's returned transcript can be confirmed or signed.
     public func stage(_ proposal: PairingPhoneProposal, authorization: Data) async throws -> PairingTranscript {
@@ -200,7 +274,8 @@ public actor AuthorityPairingChannel {
         switch call {
         case .hello: guard state == .opening else { throw AuthorityPairingChannelError.closed }
         case .context: guard state == .opening else { throw AuthorityPairingChannelError.closed }
-        case .stage, .commit, .cancel: guard state == .open else { throw AuthorityPairingChannelError.closed }
+        case .stage, .commit, .cancel, .phoneManagementHello, .managePhone:
+            guard state == .open else { throw AuthorityPairingChannelError.closed }
         }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }
         let lifetime = lifetime, driver = driver, id = UUID()

@@ -1975,25 +1975,76 @@ final class GatewayAuthorityJournalTests: XCTestCase {
 
     func testTombstoneHeadMustMatchTheExactRetainedGrant() throws {
         let f = try Fixture(), db = try setup(f), retained = try prepare(db)
-        let registration = try trust().registration
-        let digest = GatewayControlTombstone.digest(payload: retained.canonicalPayload, signature: retained.signature)
-        func evidence(_ digest: Data) throws -> VerifiedGatewayHead {
-            let record = try GatewayControlTombstone(registration: registration, revision: retained.revision,
-                originalKind: .candidate, operationID: retained.operationID, originalDigest: digest)
-            let payload = try record.encode()
-            let signature = try key.signature(for: GatewayControlTombstone.signingInput(payload)).rawRepresentation
-            let envelope = GatewayAuthorityEnvelope(kind: GatewayControlTombstone.receiptKind, operationID: retained.operationID,
-                revision: retained.revision, canonicalPayload: payload, signature: signature, registrationToken: nil)
+        let registration = try trust().registration, staged = try stageRetirement(db, for: retained)
+        func evidence(_ record: GatewayControlTombstone, signature: Data) throws -> VerifiedGatewayHead {
+            let envelope = GatewayAuthorityEnvelope(kind: GatewayControlTombstone.receiptKind, operationID: record.operationID,
+                revision: record.revision, canonicalPayload: try record.encode(), signature: signature, registrationToken: nil)
             return try verifiedHead([envelope])
         }
-        let mismatched = try db.write { try $0.acknowledgeGatewayHead(evidence(id(40, count: 32))) }
+        let wrongDigest = try GatewayControlTombstone(registration: registration, revision: staged.revision,
+            originalKind: staged.originalKind, operationID: staged.operationID, originalDigest: id(40, count: 32))
+        let wrongSignature = try key.signature(for: GatewayControlTombstone.signingInput(wrongDigest.encode())).rawRepresentation
+        let mismatched = try db.write { try $0.acknowledgeGatewayHead(evidence(wrongDigest, signature: wrongSignature)) }
         XCTAssertEqual(mismatched.disposition, .conflictingLocalHistory)
         XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(registration) })
-        let matched = try db.write { try $0.acknowledgeGatewayHead(evidence(digest)) }
+        let signature = try db.write { tx in
+            try tx.finishGatewayGrantAbandonment(staged, wall: 2000, sign: { try key.signature(for: $0).rawRepresentation })
+        }
+        XCTAssertEqual(try db.read { try $0.firstUnconfirmedGrantAbandonment() }, 2000)
+        let matched = try db.write { try $0.acknowledgeGatewayHead(evidence(staged, signature: signature)) }
         XCTAssertEqual(matched.disposition, .recorded)
         XCTAssertEqual(matched.acknowledged?.operationID, retained.operationID)
+        XCTAssertEqual(matched.acknowledged?.abandonedGrant, true)
+        XCTAssertNil(try db.read { try $0.firstUnconfirmedGrantAbandonment() })
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, retained.revision)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
+    }
+
+    func testFinishGrantAbandonmentDoesNotSignAnAppliedGrant() throws {
+        let f = try Fixture(), db = try setup(f), grant = try prepare(db)
+        let staged = try stageRetirement(db, for: grant)
+        _ = try db.write { try $0.acknowledgeGatewayHead(verifiedHead([grant])) }
+        try assertRetirementRefusesToSign(staged, db: db)
+    }
+
+    func testFinishGrantAbandonmentDoesNotSignANonGrantRevision() throws {
+        let f = try Fixture(), db = try setup(f), grant = try prepare(db)
+        _ = try stageRetirement(db, for: grant)
+        let removal = try revoke(db, head: grant.revision)
+        let wrongKind = try GatewayControlTombstone(registration: trust().registration, revision: removal.revision,
+            originalKind: .candidate, operationID: removal.operationID,
+            originalDigest: GatewayControlTombstone.digest(payload: removal.canonicalPayload, signature: removal.signature))
+        try assertRetirementRefusesToSign(wrongKind, db: db)
+    }
+
+    private func stageRetirement(_ db: JournalDatabase, for grant: GatewayAuthorityEnvelope) throws -> GatewayControlTombstone {
+        _ = try enrollForRecovery(db)
+        let registration = try trust().registration
+        return try db.write { tx in
+            _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [
+                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                    installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(10, count: 20), active: true)
+            ]), expectedRevision: nil)
+            guard case .eligible(let control) = try tx.gatewayGrantRetirement(at: grant.revision, registration: registration, wall: 2000) else {
+                throw Failure.injected
+            }
+            try tx.stageGatewayGrantAbandonment(control, wall: 2000)
+            return control
+        }
+    }
+
+    private func assertRetirementRefusesToSign(_ control: GatewayControlTombstone, db: JournalDatabase) throws {
+        let before = try db.read { try $0.continuityDigests() }
+        var signerCalls = 0
+        XCTAssertThrowsError(try db.write { tx in
+            try tx.finishGatewayGrantAbandonment(control, wall: 2000, sign: {
+                signerCalls += 1
+                return try key.signature(for: $0).rawRepresentation
+            })
+        }) { XCTAssertEqual($0 as? GatewayAuthorityError, .wrongScope) }
+        XCTAssertEqual(signerCalls, 0)
+        XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+        XCTAssertNil(try db.read { try $0.firstUnconfirmedGrantAbandonment() })
     }
 
     func testConflictingKnownOperationCannotBeAcknowledgedEvenBelowPriorHead() throws {

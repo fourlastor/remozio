@@ -56,11 +56,13 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     public convenience init(configuration: AuthorityPresenceEndpointConfiguration, journal: AuthorityJournal,
                 presence: AuthorityPresenceRuntime, clock: AuthorityClock,
                 pairingConfiguration: AuthorityPairingSetupConfiguration? = nil, signer: EnclaveAuthorityRequestSigner? = nil,
-                minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [], maximumConnections: Int = 4, handshakeTimeoutMilliseconds: UInt64 = 5000, maximumOperations: Int = 4) throws {
+                minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [], maximumConnections: Int = 4, handshakeTimeoutMilliseconds: UInt64 = 5000,
+                maximumOperations: Int = 4, gatewayRevocations: AuthorityGatewayRevocationState? = nil) throws {
         try self.init(configuration: configuration, journal: journal, presence: presence, clock: clock,
             pairingConfiguration: pairingConfiguration, signer: signer, minimumEnvelopeVersion: minimumEnvelopeVersion,
             auditVersions: auditVersions, maximumConnections: maximumConnections,
-            handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds, maximumOperations: maximumOperations, owned: nil)
+            handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds, maximumOperations: maximumOperations,
+            gatewayRevocations: gatewayRevocations, owned: nil)
     }
     static func openOwned(configuration: AuthorityPresenceEndpointConfiguration, journal: AuthorityJournal,
         presence: AuthorityPresenceRuntime, clock: AuthorityClock, controls: OwnedControls, maximumConnections: Int = 1) throws -> AuthorityPresenceXPCListener {
@@ -71,7 +73,8 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     private init(configuration: AuthorityPresenceEndpointConfiguration, journal: AuthorityJournal,
                 presence: AuthorityPresenceRuntime, clock: AuthorityClock,
                 pairingConfiguration: AuthorityPairingSetupConfiguration? = nil, signer: EnclaveAuthorityRequestSigner? = nil,
-                minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [], maximumConnections: Int = 4, handshakeTimeoutMilliseconds: UInt64 = 5000, maximumOperations: Int = 4, owned: OwnedControls?) throws {
+                minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [], maximumConnections: Int = 4, handshakeTimeoutMilliseconds: UInt64 = 5000,
+                maximumOperations: Int = 4, gatewayRevocations: AuthorityGatewayRevocationState? = nil, owned: OwnedControls?) throws {
         self.owned = owned
         registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
@@ -83,7 +86,8 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
                 throw AuthorityPairingSetupError.wrongScope
             }
             pairingAccess = try .init(journal: journal, signer: signer, appPolicy: configuration.appPolicy,
-                configuration: pairingConfiguration, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions, now: { try clock.now() })
+                configuration: pairingConfiguration, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions,
+                now: { try clock.now() }, gatewayRevocations: gatewayRevocations)
         } else { pairingAccess = nil }
         maintenancePairingOwners = pairingAccess.map { .init(admission: $0.maintenanceAdmission) }
         listener = owned?.listener ?? NSXPCListener(machServiceName: configuration.serviceName)

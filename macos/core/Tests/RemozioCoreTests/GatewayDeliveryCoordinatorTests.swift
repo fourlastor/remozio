@@ -1007,10 +1007,13 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(application.inserted)
         XCTAssertEqual(application.receipt.signature, signature)
 
+        let next = try GatewayControlTombstone(registration: registration, revision: 2, originalKind: .activation,
+            operationID: id(2), originalDigest: id(8, 32))
+        let nextSignature = try f.key.signature(for: GatewayControlTombstone.signingInput(next.encode())).rawRepresentation
         clock.advance(100)
         do {
-            _ = try await channel.abandonGrant(tombstone, signature: signature)
-            XCTFail("Accepted after lease expiry")
+            _ = try await channel.abandonGrant(next, signature: nextSignature)
+            XCTFail("Advanced the head after lease expiry")
         } catch { XCTAssertEqual(error as? GatewayRootChannelError, .rejected) }
         let now = clock.sample().moment
         let query = try GatewayHeadQueryOwner(registration: registration, gatewayPublicKey: gatewayKey.publicKey.x963Representation,

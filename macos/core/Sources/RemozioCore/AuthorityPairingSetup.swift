@@ -52,10 +52,12 @@ final class AuthorityPairingSetupAccess: Sendable {
     private let random: @Sendable (Int) throws -> Data
     private let validateSelf: @Sendable (JournalTransaction) throws -> Void
     private let commitPairing: Commit
+    private let gatewayRevocations: AuthorityGatewayRevocationState?
 
     convenience init(journal: AuthorityJournal, signer: EnclaveAuthorityRequestSigner, appPolicy: XPCPeerPolicy,
                      configuration: AuthorityPairingSetupConfiguration, minimumEnvelopeVersion: UInt64, auditVersions: Set<UInt64>,
-                     now: @escaping @Sendable () throws -> AuthorityMoment) throws {
+                     now: @escaping @Sendable () throws -> AuthorityMoment,
+                     gatewayRevocations: AuthorityGatewayRevocationState? = nil) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try self.init(journal: journal, macID: signer.macID, accountID: signer.accountID, authorityPublicKey: signer.publicKey,
             appPolicy: appPolicy, configuration: configuration, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions, now: now,
@@ -64,7 +66,7 @@ final class AuthorityPairingSetupAccess: Sendable {
                 guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityPairingSetupError.unavailable }
                 return UInt64(value)
             }, random: Self.secureRandom, validateSelf: AuthoritySelfValidation.validate,
-            commit: { attempt, proof, event, authorize, validate in
+            gatewayRevocations: gatewayRevocations, commit: { attempt, proof, event, authorize, validate in
                 try journal.commitPairing(attempt, biometricProof: proof, signer: signer, addEventID: event,
                     receiptTimeMs: nil, recheckAdministrator: authorize, now: now, validateSetupCode: validate).receipt
             })
@@ -75,7 +77,9 @@ final class AuthorityPairingSetupAccess: Sendable {
          configuration: AuthorityPairingSetupConfiguration, minimumEnvelopeVersion: UInt64, auditVersions: Set<UInt64>,
          now: @escaping @Sendable () throws -> AuthorityMoment, unixMilliseconds: @escaping @Sendable () throws -> UInt64,
          random: @escaping @Sendable (Int) throws -> Data = AuthorityPairingSetupAccess.secureRandom,
-         validateSelf: @escaping @Sendable (JournalTransaction) throws -> Void, commit: @escaping Commit) throws {
+         validateSelf: @escaping @Sendable (JournalTransaction) throws -> Void,
+         gatewayRevocations: AuthorityGatewayRevocationState? = nil,
+         commit: @escaping Commit) throws {
         guard macID.count == 16, accountID.count == 16, appPolicy.expectedUserID > 0, appPolicy.expectedUserID < UInt32.max,
               minimumEnvelopeVersion == 1, auditVersions.count <= 16, !auditVersions.contains(0), authorityPublicKey.count == 65,
               (try? P256.Signing.PublicKey(x963Representation: authorityPublicKey)) != nil,
@@ -98,6 +102,7 @@ final class AuthorityPairingSetupAccess: Sendable {
         self.configuration = configuration; self.minimumEnvelopeVersion = minimumEnvelopeVersion; self.auditVersions = auditVersions
         appEntry = retained.0; appRevision = retained.1
         self.now = now; self.unixMilliseconds = unixMilliseconds; self.random = random; self.validateSelf = validateSelf; self.commitPairing = commit
+        self.gatewayRevocations = gatewayRevocations
     }
 
     func acquireReleaseActivity() throws -> ReleaseActivityToken? { try journal.acquireReleaseActivity() }
@@ -167,6 +172,64 @@ final class AuthorityPairingSetupAccess: Sendable {
         }
         return try commitPairing(attempt, proof, random(16), authorize, { tx in try self.requireCurrent(tx) })
     }
+    func pairedPhones() throws -> PairedPhoneSnapshot {
+        try journal.read { tx in
+            try self.requireCurrent(tx)
+            let trust = try tx.requestDeliveryTrust()
+            let now = try self.now()
+            let gateway = try tx.hasApprovalGateway()
+            let availability: PairedPhoneRevocationAvailability = gateway
+                ? self.gatewayRevocations?.availability(now: now) ?? .gatewayUnavailable : .available
+            let inconclusiveSince = try tx.firstUnconfirmedGrantAbandonment()
+            let liveHealth = self.gatewayRevocations?.health(trust.enrollments, now: now)
+                ?? GatewayRevocationHealth.read(trust.enrollments, availability: availability)
+            let health = inconclusiveSince != nil && (liveHealth == .clear || liveHealth == .pending)
+                ? .grantAbandonmentInconclusive : liveHealth
+            return PairedPhoneSnapshot(macID: self.macID, accountID: self.accountID, revision: trust.approval.revision,
+                phones: trust.enrollments.filter { $0.approval.active }.map(DeliveryRecipient.init),
+                revocationAvailability: availability, gatewayRevocationHealth: health,
+                gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil)
+        }
+    }
+
+    func revocationStatus(_ selection: PairedPhoneSelection) throws -> PhoneRevocationStatus {
+        try requireSameScope(selection)
+        do {
+            return try journal.read { tx in
+                try self.requireCurrent(tx)
+                guard let row = try tx.approvalEnrollments().first(where: { DeliveryRecipient($0) == selection.phone }) else { return .unknown }
+                if row.approval.active { return .active }
+                if let intent = row.gatewayRevocation {
+                    switch intent.progress {
+                    case .applied: return .gatewayApplied
+                    case .blocked: return .gatewayBlocked
+                    case .pending:
+                        if try self.gatewayRevocations?.availability(now: self.now()) == .gatewayUnsupported { return .gatewayUnsupported }
+                        if let gateway = self.gatewayRevocations,
+                           let receipt = try? tx.gatewayLocalRevocation(for: selection.phone, registration: intent.registration),
+                           gateway.deliveryStatus(receipt.operationID) == .gatewayInconclusive { return .gatewayInconclusive }
+                        return .gatewayPending
+                    }
+                }
+                guard try tx.hasApprovalGateway() else { return .revokedOnMac }
+                guard let gateway = self.gatewayRevocations,
+                      let control = try tx.gatewayLocalRevocation(for: selection.phone, registration: gateway.registration) else { return .gatewayNotRequired }
+                return gateway.deliveryStatus(control.operationID)
+            }
+        } catch GatewayAuthorityError.wrongScope { return .gatewayBlocked }
+        catch GatewayAuthorityError.unconfigured { return .gatewayBlocked }
+    }
+
+    func revokePhone(_ selection: PairedPhoneSelection, authorize: () throws -> Void) throws -> PhoneRevocationStatus {
+        try requireSameScope(selection)
+        return try journal.revokePairedPhone(selection, eventID: random(16), recheckAdministrator: authorize,
+            validateSetupCode: requireCurrent)
+    }
+
+    private func requireSameScope(_ selection: PairedPhoneSelection) throws {
+        guard selection.macID == macID, selection.accountID == accountID else { throw AuthorityPairingSetupError.wrongScope }
+    }
+
     private func requireCurrent(_ tx: JournalTransaction) throws {
         try validateSelf(tx)
         let trust = try tx.approvalTrustSnapshot()

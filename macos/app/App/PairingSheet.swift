@@ -1,3 +1,4 @@
+import Accessibility
 import AppKit
 import CoreImage.CIFilterBuiltins
 import Darwin
@@ -232,5 +233,221 @@ struct PairingSheetContent: View {
         guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 6, y: 6)),
               let image = CIContext().createCGImage(output, from: output.extent) else { return nil }
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+}
+
+extension AuthorityPairingChannel {
+    static func forCurrentAccount() throws -> AuthorityPairingChannel {
+        let path = "/Library/Application Support/Remozio/presence-client-\(getuid()).cbor"
+        return try AuthorityPairingChannel(configuration: .load(path: path))
+    }
+}
+
+struct GatewayRevocationWarning: View {
+    let status: GatewayRevocationStatus
+
+    var body: some View {
+        if status.health != .clear {
+            Label {
+                message.fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private var message: Text {
+        switch status.health {
+        case .clear: return Text("")
+        case .pending: return Text("Gateway changes are pending. Push delivery may pause.")
+        case .blocked: return Text("Revocation delivery blocked. Push delivery may pause.")
+        case .gatewayUpdateNeeded: return Text("Gateway update needed to finish the pending changes.")
+        case .grantAbandonmentInconclusive:
+            if let since = status.inconclusiveSinceUnixMillis {
+                let started = min(Date(), Date(timeIntervalSince1970: Double(since) / 1000))
+                return Text("Revocation delivery inconclusive for \(started, style: .timer).")
+            } else {
+                return Text("Revocation delivery inconclusive. The gateway has not confirmed the retired phone registration.")
+            }
+        case .pushDisabled: return Text("Push is disabled. The gateway revocation is pending.")
+        case .registrationChanged: return Text("The gateway registration changed before it confirmed revocation.")
+        case .waitingForGrantExpiry: return Text("The gateway is waiting for an earlier phone registration to expire.")
+        }
+    }
+}
+
+struct PairedPhonesSheet: View {
+    private struct Confirmation {
+        let selection: PairedPhoneSelection
+        let identifier: String
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var channel: AuthorityPairingChannel?
+    @State private var snapshot: PairedPhoneSnapshot?
+    @State private var confirmation: Confirmation?
+    @State private var unconfirmed: PairedPhoneSelection?
+    @State private var showingConfirmation = false
+    @State private var busy = false
+    @State private var notice: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Paired phones").font(.title2).accessibilityAddTraits(.isHeader)
+            if let snapshot {
+                switch snapshot.revocationAvailability {
+                case .available: EmptyView()
+                case .gatewayUnsupported: Text("You can revoke a phone on this Mac. The gateway may need an update to receive the revocation.")
+                case .gatewayUnavailable: Text("You can revoke a phone on this Mac. Gateway delivery may be delayed.")
+                }
+                GatewayRevocationWarning(status: snapshot.gatewayRevocationStatus)
+                if snapshot.phones.isEmpty { Text("No phones are paired with this Mac.") }
+                else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(snapshot.phones, id: \.self) { phone in
+                                let id = displayID(phone, among: snapshot.phones)
+                                HStack {
+                                    Text("Phone \(id)")
+                                    Spacer()
+                                    Button("Revoke…") {
+                                        guard let selection = snapshot.selection(for: phone) else { return }
+                                        confirmation = Confirmation(selection: selection, identifier: id)
+                                        showingConfirmation = true
+                                    }
+                                    .accessibilityLabel(Text("Revoke phone \(id)"))
+                                    .disabled(busy)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 260)
+                }
+            }
+            if busy { ProgressView().controlSize(.small).accessibilityLabel("Checking paired phones") }
+            if let notice { Text(notice).fixedSize(horizontal: false, vertical: true) }
+            HStack {
+                if let unconfirmed {
+                    Button("Check revocation status") { run { await reconcile(unconfirmed) } }
+                        .disabled(busy)
+                }
+                Button("Refresh") { run { await refresh() } }
+                    .disabled(busy)
+                Spacer()
+                Button("Done") { dismiss() }.disabled(busy)
+            }
+        }
+        .frame(width: 420, alignment: .leading)
+        .padding(24)
+        .task {
+            guard !busy else { return }
+            busy = true
+            await refresh()
+            busy = false
+        }
+        .onDisappear { channel?.abort() }
+        .alert("Revoke this phone?", isPresented: $showingConfirmation, presenting: confirmation) { item in
+            Button("Cancel", role: .cancel) {}
+            Button("Revoke", role: .destructive) { run { await revoke(item.selection) } }
+        } message: { item in
+            Text("Phone \(item.identifier) will lose access to this Mac. Pair it again to restore access.")
+        }
+    }
+
+    private func displayID(_ phone: DeliveryRecipient, among rows: [DeliveryRecipient]) -> String {
+        let suffix = phone.phoneID.suffix(4)
+        let matching = rows.filter { $0.phoneID.suffix(4) == suffix }
+        let shortID = suffix.map { String(format: "%02X", $0) }.joined()
+        guard matching.count > 1, let position = matching.firstIndex(of: phone) else { return shortID }
+        return String(localized: "\(shortID), \(position + 1) of \(matching.count)")
+    }
+
+    private func run(_ work: @escaping @MainActor () async -> Void) {
+        guard !busy else { return }
+        busy = true
+        Task {
+            await work()
+            busy = false
+        }
+    }
+
+    private func connect() async throws -> AuthorityPairingChannel {
+        channel?.abort()
+        let next = try AuthorityPairingChannel.forCurrentAccount()
+        channel = next
+        _ = try await next.start()
+        return next
+    }
+
+    private func refresh() async {
+        do {
+            let active = try await connect()
+            snapshot = try await active.pairedPhones()
+        } catch {
+            snapshot = nil
+            if notice == nil { announce(String(localized: "Paired phones are unavailable.")) }
+        }
+    }
+
+    private func revoke(_ selection: PairedPhoneSelection) async {
+        guard let channel else { return }
+        do { await apply(try await channel.revokePhone(selection), selection: selection) }
+        catch SetupAdministratorAuthorizationError.cancelled {
+            announce(String(localized: "Authorization was cancelled."))
+        } catch {
+            snapshot = nil
+            await reconcile(selection)
+        }
+    }
+
+    private func reconcile(_ selection: PairedPhoneSelection) async {
+        do {
+            let active = try await connect()
+            await apply(try await active.revocationStatus(selection), selection: selection)
+        } catch {
+            await apply(.unknown, selection: selection)
+        }
+    }
+
+    private func apply(_ result: PhoneRevocationStatus, selection: PairedPhoneSelection) async {
+        unconfirmed = nil
+        switch result {
+        case .revokedOnMac:
+            announce(String(localized: "Phone revoked on this Mac."))
+        case .gatewayPending:
+            unconfirmed = selection
+            announce(String(localized: "Phone revoked on this Mac. Push delivery to other phones may pause until the gateway receives the revocation."))
+        case .gatewayApplied:
+            announce(String(localized: "Phone revoked on this Mac and at the gateway."))
+        case .gatewayBlocked:
+            unconfirmed = selection
+            announce(String(localized: "Phone revoked on this Mac. The gateway could not apply the revocation."))
+        case .gatewayUnsupported:
+            unconfirmed = selection
+            announce(String(localized: "Phone revoked on this Mac. The gateway may need an update to receive the revocation."))
+        case .gatewayUnavailable:
+            unconfirmed = selection
+            announce(String(localized: "Phone revoked on this Mac. Gateway delivery is unavailable."))
+        case .gatewayNotRequired:
+            announce(String(localized: "Phone revoked on this Mac. Gateway delivery is unnecessary."))
+        case .gatewayInconclusive:
+            unconfirmed = selection
+            announce(String(localized: "Phone revoked on this Mac. The gateway has not confirmed delivery."))
+        case .staleSelection:
+            announce(String(localized: "The list changed. Select the phone again."))
+        case .active:
+            announce(String(localized: "This phone is still paired. Select it again to revoke it."))
+        case .unknown:
+            snapshot = nil
+            unconfirmed = selection
+            announce(String(localized: "Could not confirm whether the phone was revoked. Check its status before trying again."))
+            return
+        }
+        await refresh()
+    }
+
+    private func announce(_ value: String) {
+        notice = value
+        AccessibilityNotification.Announcement(value).post()
     }
 }
