@@ -258,6 +258,11 @@ private enum GatewayHeadWire {
                 }
                 return .candidate(GatewayCandidateReceipt(candidate: candidate, canonicalPayload: payload, signature: signature))
             }
+            if kind == GatewayControlTombstone.receiptKind {
+                let control = try GatewayControlTombstone.authenticate(payload, signature: signature, registration: registration)
+                guard control.revision == revision else { throw GatewayHeadReplyError.invalidReceipt }
+                return .tombstone(GatewayControlTombstoneReceipt(tombstone: control, canonicalPayload: payload, signature: signature))
+            }
             if let submissionKind = GatewaySubmissionKind(rawValue: kind) {
                 let control = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
                     registration: registration, payloadLimits: receiptLimits, signingLimits: signingLimits)

@@ -9,9 +9,11 @@ public enum GatewayRootCommand: Sendable {
     case candidate(payload: Data, signature: Data, wireVersion: UInt64, phoneID: Data, token: String)
     case recipient(payload: Data, signature: Data, wireVersion: UInt64, phoneID: Data, kind: GatewayRecipientKind)
     case recoverPhoneRevocation(payload: Data, signature: Data, phoneID: Data, expectedHead: UInt64)
+    case abandonGrant(payload: Data, signature: Data, expectedHead: UInt64)
 
     // Probe through the existing head path. An older gateway rejects the inner query without closing the channel.
     static let phoneRevocationRecoveryProbe = Data("remozio.gateway.phone-revocation-recovery.v1".utf8)
+    static let abandonGrantProbe = Data("remozio.gateway.grant-tombstone.v1".utf8)
     case probe(operationID: Data, phoneID: Data)
     case wake(PhoneRequestDelivery)
     case withdraw(UUID)
@@ -33,6 +35,8 @@ public enum GatewayRootCommand: Sendable {
             value = .array([.unsigned(1), .unsigned(3), .bytes(payload), .bytes(signature), .unsigned(version), .bytes(phone), .unsigned(kind.rawValue)])
         case .recoverPhoneRevocation(let payload, let signature, let phone, let expectedHead):
             value = .array([.unsigned(1), .unsigned(9), .bytes(payload), .bytes(signature), .bytes(phone), .unsigned(expectedHead)])
+        case .abandonGrant(let payload, let signature, let expectedHead):
+            value = .array([.unsigned(1), .unsigned(10), .bytes(payload), .bytes(signature), .unsigned(expectedHead)])
         case .probe(let operation, let phone): value = .array([.unsigned(1), .unsigned(4), .bytes(operation), .bytes(phone)])
         case .wake(let delivery), .registerWake(let delivery):
             value = .array([.unsigned(protocolVersion), .unsigned(protocolVersion == 3 ? 8 : 5), .bytes(GatewayHostSnapshot.bytes(delivery.id)),
@@ -50,7 +54,7 @@ public enum GatewayRootCommand: Sendable {
     public static func decode(_ bytes: Data) throws -> Self {
         guard case .array(let values) = try DeterministicCBOR.decode(bytes, limits: limits), values.count >= 3,
               case .unsigned(let version) = values[0], case .unsigned(let kind) = values[1],
-              (version == 1 && (kind <= 6 || kind == 9)) || (version == 2 && kind == 7) ||
+              (version == 1 && (kind <= 6 || kind == 9 || kind == 10)) || (version == 2 && kind == 7) ||
               (version == 3 && kind == 8) else { throw GatewayServiceError.invalidMessage }
         func blob(_ i: Int, count: Int? = nil, maximum: Int = 65536) throws -> Data {
             guard i < values.count, case .bytes(let bytes) = values[i], !bytes.isEmpty, bytes.count <= maximum,
@@ -76,6 +80,9 @@ public enum GatewayRootCommand: Sendable {
             guard values.count == 6 else { throw GatewayServiceError.invalidMessage }
             return try .recoverPhoneRevocation(payload: blob(2, maximum: 4096), signature: blob(3, count: 64),
                 phoneID: blob(4, count: 16), expectedHead: number(5))
+        case 10:
+            guard values.count == 5 else { throw GatewayServiceError.invalidMessage }
+            return try .abandonGrant(payload: blob(2, maximum: 1024), signature: blob(3, count: 64), expectedHead: number(4))
         case 4:
             guard values.count == 4 else { throw GatewayServiceError.invalidMessage }
             return try .probe(operationID: blob(2, count: 16), phoneID: blob(3, count: 16))
