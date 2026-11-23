@@ -55,7 +55,10 @@ sequenceDiagram
 The root must compare every identity, challenge, operation, key, time, and revision with retained authority state.
 Check the original monotonic deadline as well as wall expiry. A later signed expiry must not extend the retained challenge.
 Reject removed enrollments, stale challenges, exhausted revision space, and concurrent revision conflicts without changing the mode.
-A valid retry returns the retained result without another mutation. Restart must not revive an unconsumed challenge.
+A valid retry returns the result without another mutation while Root retains its receipt.
+Root keeps a current-run receipt until the original challenge deadline. It can reclaim obsolete receipts to admit a new challenge.
+A retry for an evicted receipt is unavailable. Read current status without inferring the result of that old request.
+Restart must not revive an unconsumed challenge.
 
 Only acknowledge success after the durable change commits. Synchronize the resulting revision to the Mac menu and other enrolled phones.
 An unreachable Mac remains offline or unknown. Do not queue a routing change or show optimistic success.

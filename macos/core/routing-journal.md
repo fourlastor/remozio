@@ -42,22 +42,26 @@ An unused challenge must belong to this database run and pass both original dead
 A newly signed expiry cannot extend the retained deadline. Removed phones and stale enrollment epochs cannot change routing.
 
 The mode, consumed result, revision, and audit event commit atomically.
-A repeated accepted operation returns its original Away result and revision without another mutation or audit event.
+A repeated accepted operation returns its original Away result and revision while the journal retains its receipt.
 That result is historical acknowledgment. The controller must also read current routing status before displaying the current mode.
 Retries still require current enrollment and a valid signature. They cannot restore an earlier mode after a local change.
 
 ## Restart, storage and integration
 
-Each database owner has a fresh run ID. Reopening preserves modes and accepted results but rejects unused challenges from an earlier run.
+Each database owner has a fresh run ID. Reopening preserves modes and accepted results. It rejects unused challenges from an earlier run.
 A phone can obtain a fresh challenge automatically. This does not require a new biometric or administrator prompt.
 After restart, new audit writes require a fresh audit epoch under the existing journal rules.
 
 Clock regression or detected corruption retires the owner. Storage faults roll back the transaction; swallowed operation errors cannot commit later writes.
 Read-only and escaped transactions cannot mutate state. A failed migration preserves its source version and existing data.
-Revision overflow and operation capacity fail without eviction or counter reset.
+Revision overflow still fails. Routing revisions and audit records are independent of operation cleanup.
 
-Accepted results currently have no pruning policy. The bounded store also retains expired challenges.
-Production service scheduling must reclaim safely obsolete challenges and define retry-result retention before exposing this control at scale.
+When a valid challenge request reaches the operation cap, the same write first removes unused challenges from earlier runs or past their monotonic deadline.
+If space is still needed, it removes only the necessary number of eligible receipts, starting with the oldest applied revision.
+A receipt is eligible after its original monotonic deadline or after its run ends. At the exact deadline the row is eligible.
+If all remaining rows are live, the request fails for capacity and rolls back. It can succeed later as rows expire.
+The first valid request can reclaim rows on an existing full Mac without a schema migration.
+A retry for an evicted receipt fails without another mode change. Read current routing status to reconcile.
 These rows do not prove freshness after a complete, internally consistent backup restoration. Whole-Mac backup rollback is outside the [accepted guarantee](../../docs/design-decisions.md#whole-mac-backup-rollback); ordinary replay and protected-state checks remain required.
 
 The host must authenticate local and phone channels, establish continuity, and serialize calls with current enrollment changes.

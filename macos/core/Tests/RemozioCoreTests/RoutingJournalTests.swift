@@ -142,17 +142,21 @@ final class RoutingJournalTests: XCTestCase {
     }
 
     private func issue(_ db: JournalDatabase, trust: UUID, revision: UInt64 = 0, moment: UInt64 = 100) throws -> RoutingAwayControl {
-        try db.write { try $0.issueRoutingChallenge(authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(4), expectedTrustRevision: trust,
-            expectedRoutingRevision: revision, nowUnixMillis: 1000, now: now(moment)) }
+        try db.write { try issue($0, trust: trust, revision: revision, moment: moment) }
+    }
+    private func issue(_ tx: JournalTransaction, trust: UUID, revision: UInt64 = 0, moment: UInt64) throws -> RoutingAwayControl {
+        try tx.issueRoutingChallenge(authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(4), expectedTrustRevision: trust,
+            expectedRoutingRevision: revision, nowUnixMillis: 1000, now: now(moment))
     }
     private func apply(_ tx: JournalTransaction, _ control: RoutingAwayControl, trust: UUID, writer: AuditEpochWriter,
-                       head: UInt64 = 1, wall: UInt64 = 1100, moment: UInt64 = 200, signingKey: P256.Signing.PrivateKey? = nil) throws -> RoutingChange {
+                       head: UInt64 = 1, wall: UInt64 = 1100, moment: UInt64 = 200, signingKey: P256.Signing.PrivateKey? = nil,
+                       event: UInt8 = 9) throws -> RoutingChange {
         let payload = try control.encode(limits: limits)
         let signature = try (signingKey ?? key).signature(for: RoutingAwaySigningInput.make(wireVersion: 1, canonicalPayload: payload,
             payloadLimits: limits, inputLimits: limits)).rawRepresentation
         return try tx.applyRoutingAway(canonicalPayload: payload, signature: signature, authenticatedPhoneID: id(5),
             authenticatedEnrollmentEpoch: id(4), expectedTrustRevision: trust, nowUnixMillis: wall, now: now(moment),
-            eventID: id(9), writer: writer, expectedAuditHead: head)
+            eventID: id(event), writer: writer, expectedAuditHead: head)
     }
     private func local(_ db: JournalDatabase, _ mode: RoutingMode, writer: AuditEpochWriter, revision: UInt64, head: UInt64) throws -> RoutingState {
         try db.write { try $0.setLocalRoutingMode(mode, expectedRevision: revision, eventID: id(UInt8(20 + head)), receiptTimeMs: 1200,
@@ -288,6 +292,129 @@ final class RoutingJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.routingState().revision }, 0)
     }
 
+    func testExpiredRoutingChallengesReleaseCapacityAcrossMoreThanAThousandIssues() throws {
+        let f = try Fixture(), (db, writer, trust) = try setup(f, maximum: 1024)
+        defer { try? db.close() }
+        let (first, last) = try db.write { tx in
+            let first = try issue(tx, trust: trust, moment: 100)
+            var last = first
+            for index in 1...1024 {
+                last = try issue(tx, trust: trust, moment: 100 + UInt64(index) * 1_000)
+            }
+            return (first, last)
+        }
+        XCTAssertNotEqual(first.operationID, last.operationID)
+        fails(.unavailableChallenge) {
+            try db.write { try apply($0, first, trust: trust, writer: writer, moment: 1_024_100) }
+        }
+        XCTAssertEqual(try db.read { try $0.routingState() }, .init(mode: .automatic, revision: 0))
+        XCTAssertEqual(try db.read { try $0.epoch(writer.epoch)?.head }, 1)
+        XCTAssertTrue(try db.write { try apply($0, last, trust: trust, writer: writer, moment: 1_024_101) }.inserted)
+    }
+
+    func testFullLiveRoutingStoreKeepsReceiptsUntilTheirDeadline() throws {
+        let f = try Fixture(), (db, writer, trust) = try setup(f, maximum: 2)
+        defer { try? db.close() }
+        let first = try issue(db, trust: trust)
+        let result = try db.write { try apply($0, first, trust: trust, writer: writer) }
+        let pending = try issue(db, trust: trust, revision: 1, moment: 250)
+        let before = try db.read { try $0.continuityDigests() }
+        fails(.capacityExceeded) { try issue(db, trust: trust, revision: 1, moment: 1_099) }
+        XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+        let retry = try db.write { try apply($0, first, trust: trust, writer: writer, moment: 1_099) }
+        XCTAssertEqual(retry.state, result.state)
+        XCTAssertFalse(retry.inserted)
+        _ = try issue(db, trust: trust, revision: 1, moment: 1_100)
+        fails(.unavailableChallenge) {
+            try db.write { try apply($0, first, trust: trust, writer: writer, moment: 1_100) }
+        }
+        XCTAssertEqual(try db.read { try $0.routingState() }, result.state)
+        XCTAssertEqual(try db.read { try $0.epoch(writer.epoch)?.head }, 2)
+        XCTAssertTrue(try db.write { try apply($0, pending, trust: trust, writer: writer, head: 2, moment: 1_101, event: 10) }.inserted)
+    }
+
+    func testRoutingCleanupPrunesUnusedChallengesBeforeOldestReceipts() throws {
+        let f = try Fixture(), (db, writer, trust) = try setup(f, maximum: 4)
+        defer { try? db.close() }
+        let oldest = try issue(db, trust: trust, moment: 100)
+        let first = try db.write { try apply($0, oldest, trust: trust, writer: writer, moment: 150) }
+        let newer = try issue(db, trust: trust, revision: 1, moment: 160)
+        let second = try db.write { try apply($0, newer, trust: trust, writer: writer, head: 2, moment: 200, event: 10) }
+        let unused = try issue(db, trust: trust, revision: 2, moment: 220)
+        let live = try issue(db, trust: trust, revision: 2, moment: 1_500)
+
+        _ = try issue(db, trust: trust, revision: 2, moment: 1_500)
+        fails(.unavailableChallenge) {
+            try db.write { try apply($0, unused, trust: trust, writer: writer, moment: 1_500) }
+        }
+        let oldRetry = try db.write { try apply($0, oldest, trust: trust, writer: writer, moment: 1_500) }
+        XCTAssertFalse(oldRetry.inserted)
+        XCTAssertEqual(oldRetry.state, first.state)
+
+        _ = try issue(db, trust: trust, revision: 2, moment: 1_501)
+        fails(.unavailableChallenge) {
+            try db.write { try apply($0, oldest, trust: trust, writer: writer, moment: 1_501) }
+        }
+        let newRetry = try db.write { try apply($0, newer, trust: trust, writer: writer, moment: 1_501) }
+        XCTAssertFalse(newRetry.inserted)
+        XCTAssertEqual(newRetry.state, second.state)
+        XCTAssertEqual(try db.read { try $0.routingState() }, second.state)
+        XCTAssertEqual(try db.read { try $0.epoch(writer.epoch)?.head }, 3)
+        XCTAssertTrue(try db.write { try apply($0, live, trust: trust, writer: writer, head: 3, moment: 1_502, event: 11) }.inserted)
+    }
+
+    func testFullRoutingStoreReclaimsPreviousRunRowsOnDemand() throws {
+        let f = try Fixture(), (db, writer, trust) = try setup(f, maximum: 2)
+        let accepted = try issue(db, trust: trust, moment: 100)
+        let before = try db.write { try apply($0, accepted, trust: trust, writer: writer, moment: 200) }
+        let unused = try issue(db, trust: trust, revision: 1, moment: 250)
+        try db.close()
+        let reopened = try open(f, maximum: 2)
+        defer { try? reopened.close() }
+
+        _ = try issue(reopened, trust: trust, revision: 1, moment: 10)
+        fails(.unavailableChallenge) {
+            try reopened.write { try apply($0, unused, trust: trust, writer: writer, moment: 10) }
+        }
+        XCTAssertEqual(try reopened.write { try apply($0, accepted, trust: trust, writer: writer, moment: 10) }.state,
+                       before.state)
+        _ = try issue(reopened, trust: trust, revision: 1, moment: 11)
+        fails(.unavailableChallenge) {
+            try reopened.write { try apply($0, accepted, trust: trust, writer: writer, moment: 11) }
+        }
+        XCTAssertEqual(try reopened.read { try $0.routingState() }, before.state)
+        XCTAssertEqual(try reopened.read { try $0.epoch(writer.epoch)?.head }, 2)
+    }
+
+    func testRoutingCleanupRollsBackWithFailedIssueAndLeavesCheckpointIntact() throws {
+        let f = try Fixture(), (db, writer, trust) = try setup(f, maximum: 1)
+        defer { try? db.close() }
+        let original = try issue(db, trust: trust)
+        let before = try db.read {
+            try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch, generation: 1, authorityGeneration: 1)
+        }
+        let continuity = try f.makeContinuity(mac: id(1), account: id(2), initial: before)
+        defer { continuity.close() }
+        let commits = CheckpointedJournal(journal: db, continuity: continuity)
+        let initial = try continuity.read()
+        try f.sql("CREATE TRIGGER reject_routing_issue BEFORE INSERT ON routing_operations_v1 BEGIN SELECT RAISE(ABORT, 'fixture'); END")
+        XCTAssertThrowsError(try commits.write(epoch: writer.epoch, recoverRejectedBody: true) {
+            try issue($0, trust: trust, moment: 1_100)
+        })
+        XCTAssertFalse(commits.retired)
+        XCTAssertEqual(try continuity.read(), initial)
+        XCTAssertEqual(try commits.read { try $0.continuityDigests().authority }, before.authorityDigest)
+        try f.sql("DROP TRIGGER reject_routing_issue")
+        let fresh = try commits.write(epoch: writer.epoch) { try issue($0, trust: trust, moment: 1_100) }
+        XCTAssertNotEqual(fresh.operationID, original.operationID)
+        let after = try continuity.read()
+        XCTAssertNotEqual(after.committed.authorityDigest, before.authorityDigest)
+        XCTAssertEqual(after.committed.ledgerDigest, before.ledgerDigest)
+        XCTAssertEqual(after.committed.journalHead, before.journalHead)
+        XCTAssertNil(after.pending)
+        XCTAssertEqual(try commits.read { try $0.routingState() }, .init(mode: .automatic, revision: 0))
+    }
+
     func testStorageCapacityClockAndCorruptionFailuresDoNotResetState() throws {
         let f = try Fixture(), (db, _, trust) = try setup(f, maximum: 1)
         _ = try issue(db, trust: trust)
@@ -356,6 +483,17 @@ final class RoutingJournalTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func lease() throws -> ProtectedJournalLease { try .init(anchor: root.path, relativeDirectory: "store", owner: getuid()) }
+        func makeContinuity(mac: Data, account: Data, initial: ContinuityCheckpoint) throws -> ContinuityStore {
+            let directory = root.appendingPathComponent("continuity")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            for name in ["writer.lock", "continuity.sqlite"] {
+                let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                guard fd >= 0 else { throw Failure.injected }
+                Darwin.close(fd)
+            }
+            return try ContinuityStore(lease: .init(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
+                macID: mac, accountID: account, initialize: initial)
+        }
         func sql(_ sql: String) throws {
             var db: OpaquePointer?
             guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw Failure.injected }
