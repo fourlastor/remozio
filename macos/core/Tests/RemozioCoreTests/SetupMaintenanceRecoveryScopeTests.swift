@@ -81,6 +81,50 @@ private final class RecoveryCleanupOwner: SetupMaintenanceRecoveryOwnerCleanup, 
     func releaseFixture() { scope.close(); didJoin() }
 }
 
+private final class RetirementScopeCustody: SetupMaintenanceRecoveryProcessCustody, Sendable {
+    let native: SetupMaintenanceRecoveryNativeAdapter.Custody
+    private let admissionClosed = DispatchSemaphore(value: 0)
+    let driverRejected = DispatchSemaphore(value: 0)
+    let finalCloses = Mutex(0)
+
+    init(native: SetupMaintenanceRecoveryNativeAdapter.Custody) {
+        self.native = native
+    }
+
+    func validate() throws { try native.validate() }
+    func validateForRecovery() async -> Bool { await native.validateForRecovery() }
+    func joinRecoverySessions() async { await native.joinRecoverySessions() }
+    func observeRecoverySessionsForDisposal() async { await native.observeRecoverySessionsForDisposal() }
+    func retainSupervisorDisposal(_ actual: Task<Void, Never>) { native.retainSupervisorDisposal(actual) }
+    func releaseAfterJoining() { native.releaseAfterJoining() }
+    func closeAfterJoining() async { _ = await closeAfterJoiningResult() }
+    func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+        finalCloses.withLock { $0 += 1 }
+        return await native.closeAfterJoiningResult()
+    }
+
+    func closeAdmission() {
+        native.closeAdmission()
+        admissionClosed.signal()
+        if driverRejected.wait(timeout: .now() + 3) != .success {
+            XCTFail("The recovery driver did not observe the closed admission")
+        }
+    }
+
+    func waitForAdmissionClose() async throws {
+        // The fixture must reach the real scope call even when the supervisor cancels the entry.
+        let closed = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: self.admissionClosed.wait(timeout: .now() + 3) == .success)
+            }
+        }
+        guard closed else {
+            XCTFail("Retirement did not close admission")
+            throw RecoveryScopeTestFailure.timeout
+        }
+    }
+}
+
 final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
     private func runAsync(_ body: @escaping @Sendable () async throws -> Void) throws {
         let done = DispatchSemaphore(value: 0), result = RecoveryScopeCompletion()
@@ -125,6 +169,49 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
             try await ContinuousClock().sleep(for: .milliseconds(1))
         }
     }
+    func testRetirementCancelsBeforeTheOwnerRefusesRecoveryScope() throws {
+        try withScope { h in
+            let native = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown)
+            let custody = RetirementScopeCustody(native: native)
+            let entered = Mutex(false), cancelledAtRejection = Mutex<Bool?>(nil)
+            let attempts = try h.owner.observeMaintenanceRecoveryExecutorOwned()
+            let before = try attempts.countOwned()
+            let supervisor = try SetupMaintenanceRecoverySupervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+                entered.withLock { $0 = true }
+                try await custody.waitForAdmissionClose()
+                defer { custody.driverRejected.signal() }
+                do {
+                    let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
+                    scope.close()
+                    XCTFail("Recovery acquired a scope after retirement closed admission")
+                    throw RecoveryScopeTestFailure.timeout
+                } catch AdministrativeSetupError.unavailable {
+                    try h.processLease.validate()
+                    cancelledAtRejection.withLock { $0 = Task.isCancelled }
+                    throw AdministrativeSetupError.unavailable
+                }
+            }))
+            native.bindSupervisor(supervisor)
+            let request = try Self.retryRequest()
+            let scheduled = await supervisor.schedule(request)
+            XCTAssertTrue(scheduled)
+            try await Self.eventually { entered.withLock { $0 } }
+            await supervisor.retire()
+
+            XCTAssertEqual(cancelledAtRejection.withLock { $0 }, true, "The rejected entry was still running without cancellation")
+            let observation = await supervisor.observation(for: request.key)
+            switch observation {
+            case .cancelled?: break
+            case .failed(.serviceUnavailable)?: XCTFail("Retirement published failed(serviceUnavailable)")
+            default: XCTFail("Retirement did not publish cancelled")
+            }
+            XCTAssertEqual(try attempts.countOwned(), before)
+            XCTAssertEqual(custody.finalCloses.withLock { $0 }, 1)
+            let nextProcess = try h.acquireProcess()
+            nextProcess.close()
+        }
+    }
+
     func testScopePinsStatusAndRefusesBothAdmissionsUntilClose() throws {
         try withScope { h in
             let installer = try h.activity.open(), scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
