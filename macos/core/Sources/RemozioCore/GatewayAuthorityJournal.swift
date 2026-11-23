@@ -554,7 +554,7 @@ final class GatewayAuthorityJournal {
             }
             guard value == count else { throw GatewayAuthorityError.corruptData }
             if value > 0 {
-                let submission = try submissionSchemaVersion() >= 16 ? " UNION ALL SELECT operation,revision FROM main.gateway_submission_outbox_v1" : ""
+                let submission = try AuthorityJournalSchema.featureTier(on: db) >= 16 ? " UNION ALL SELECT operation,revision FROM main.gateway_submission_outbox_v1" : ""
                 try statement("SELECT operation,revision FROM main.gateway_outbox_v1 UNION ALL SELECT operation,revision FROM main.gateway_revocations_v1 UNION ALL SELECT operation,revision FROM main.gateway_reconciled_controls_v1" + submission + " ORDER BY revision DESC LIMIT 1", []) { stmt in
                     guard sqlite3_step(stmt) == SQLITE_ROW, let latest = try envelope(blob(stmt, 0, maximum: 16), identity: identity),
                           latest.revision == value else { throw GatewayAuthorityError.corruptData }
@@ -567,7 +567,7 @@ final class GatewayAuthorityJournal {
     static let abandonmentTable = "gateway_abandoned_grants_v1"
 
     private func abandonmentHistoryInstalled() throws -> Bool {
-        try submissionSchemaVersion() == 18
+        try AuthorityJournalSchema.featureTier(on: db) == 18
     }
 
     private enum AbandonmentResolution: Int32 { case pending, confirmed, superseded }
@@ -646,7 +646,7 @@ final class GatewayAuthorityJournal {
             enrollments: enrollments, wall: wall) == .eligible(proposed) else { throw GatewayAuthorityError.wrongScope }
         if try abandonedGrant(proposed.operationID, registration: proposed.registration) != nil { return }
         if try !abandonmentHistoryInstalled() {
-            let version = try submissionSchemaVersion()
+            let version = try AuthorityJournalSchema.featureTier(on: db)
             guard (15...17).contains(version) else { throw JournalDatabaseError.incompatibleStore }
             if version < 17 { try UpdateSchedulingJournal.createStorage(connection: db, from: version) }
             let result = sqlite3_exec(db, """
@@ -660,9 +660,9 @@ final class GatewayAuthorityJournal {
                     first_unconfirmed_ms BLOB CHECK(first_unconfirmed_ms IS NULL OR
                         (length(first_unconfirmed_ms)=8 AND signature IS NOT NULL))
                 ) STRICT, WITHOUT ROWID;
-                PRAGMA main.user_version=18;
                 """, nil, nil, nil)
             guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+            try AuthorityJournalSchema.setFeatureTier(18, on: db)
         }
         try statement("INSERT INTO main.gateway_abandoned_grants_v1 VALUES(?,?,?,?,NULL,0,NULL)",
             [proposed.operationID, uint(proposed.revision), uint(proposed.originalKind.rawValue), proposed.originalDigest]) { try done($0) }
@@ -700,7 +700,7 @@ final class GatewayAuthorityJournal {
     /// Only a fresh verified gateway head can establish that this ordering barrier has passed.
     func firstNonRegistrationControl(after revision: UInt64, identity: GatewayRegistrationIdentity) throws -> UInt64? {
         guard revision <= (try head(identity)) else { throw GatewayAuthorityError.headMismatch }
-        let submission = try submissionSchemaVersion() >= 16
+        let submission = try AuthorityJournalSchema.featureTier(on: db) >= 16
             ? " UNION ALL SELECT operation,revision FROM main.gateway_submission_outbox_v1 WHERE revision>?" : ""
         var arguments = [uint(revision)]
         if !submission.isEmpty { arguments.append(uint(revision)) }
@@ -1141,13 +1141,12 @@ final class GatewayAuthorityJournal {
     func installSubmissionHistory(identity: GatewayRegistrationIdentity) throws {
         try scope(identity); _ = try head(identity)
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
-        let version = try submissionSchemaVersion()
+        let version = try AuthorityJournalSchema.featureTier(on: db)
         guard (15...18).contains(version) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         guard try CodePolicyJournal(connection: db).read() != nil else { throw GatewayAuthorityError.unconfigured }
         if version == 15 {
             try Self.createSubmissionHistoryStorage(connection: db)
-            let result = sqlite3_exec(db, "PRAGMA main.user_version=16", nil, nil, nil)
-            guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+            try AuthorityJournalSchema.setFeatureTier(16, on: db)
         }
         try statement("SELECT operation,revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 LIMIT 0", []) {
             guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayAuthorityError.corruptData }
@@ -1175,7 +1174,7 @@ final class GatewayAuthorityJournal {
                                  wall: UInt64, now: AuthorityMoment, sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
         try scope(identity); try clock(now); try requireHead(expectedHead, identity: identity)
         guard active else { throw GatewayAuthorityError.unavailableRegistration }
-        guard try (16...18).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try (16...18).contains(AuthorityJournalSchema.featureTier(on: db)) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         guard credential.count == 16 else { throw GatewayAuthorityError.wrongScope }
         let (expiry, overflow) = wall.addingReportingOverflow(policy.candidateLifetimeMillis)
         let (deadline, monoOverflow) = now.milliseconds.addingReportingOverflow(policy.candidateLifetimeMillis)
@@ -1214,7 +1213,7 @@ final class GatewayAuthorityJournal {
                            wall: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
         try clock(now); _ = try head(identity)
         guard active else { throw GatewayAuthorityError.unavailableRegistration }
-        guard try (16...18).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try (16...18).contains(AuthorityJournalSchema.featureTier(on: db)) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         let entries = try submissionEntries(identity)
         guard let entry = entries.first(where: { $0.receipt.control.operationID == operationID }) else { return nil }
         let value = entry.receipt.control
@@ -1260,7 +1259,7 @@ final class GatewayAuthorityJournal {
     }
 
     private func submissionEntry(_ operation: Data, identity: GatewayRegistrationIdentity) throws -> SubmissionEntry? {
-        guard try submissionSchemaVersion() >= 16 else { return nil }
+        guard try AuthorityJournalSchema.featureTier(on: db) >= 16 else { return nil }
         return try statement("SELECT revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 WHERE operation=?", [operation]) { row in
             let rc = sqlite3_step(row)
             if rc == SQLITE_DONE { return nil }
@@ -1284,7 +1283,7 @@ final class GatewayAuthorityJournal {
     }
 
     private func submissionEntries(_ identity: GatewayRegistrationIdentity) throws -> [SubmissionEntry] {
-        guard try submissionSchemaVersion() >= 16 else { return [] }
+        guard try AuthorityJournalSchema.featureTier(on: db) >= 16 else { return [] }
         let operations: [Data] = try statement("SELECT operation FROM main.gateway_submission_outbox_v1 ORDER BY revision", []) { row in
             var result: [Data] = []
             while true {
@@ -1301,16 +1300,10 @@ final class GatewayAuthorityJournal {
         }
     }
 
-    func submissionHistoryInstalled() throws -> Bool { try (16...18).contains(submissionSchemaVersion()) }
+    func submissionHistoryInstalled() throws -> Bool { try (16...18).contains(AuthorityJournalSchema.featureTier(on: db)) }
 
-    private func submissionSchemaVersion() throws -> Int64 {
-        try statement("PRAGMA main.user_version", []) { row in
-            guard sqlite3_step(row) == SQLITE_ROW else { throw JournalDatabaseError.incompatibleStore }
-            return sqlite3_column_int64(row, 0)
-        }
-    }
     private func submissionCountSQL() throws -> String {
-        try submissionSchemaVersion() >= 16 ? "+(SELECT count(*) FROM main.gateway_submission_outbox_v1)" : ""
+        try AuthorityJournalSchema.featureTier(on: db) >= 16 ? "+(SELECT count(*) FROM main.gateway_submission_outbox_v1)" : ""
     }
 
     private func authenticate(phone: Data, epoch: Data, trust: GatewayAuthorityTrust) throws {

@@ -7,7 +7,7 @@ final class CodePolicyJournal {
     init(connection: OpaquePointer) { db = connection }
 
     func read() throws -> AuthorityCodePolicySnapshot? {
-        let version = try schemaVersion()
+        let version = try AuthorityJournalSchema.featureTier(on: db)
         guard (12...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         if version == 12 { return nil }
         return try statement("SELECT id,revision,policy FROM main.authority_code_policy_v1") { row in
@@ -33,8 +33,8 @@ final class CodePolicyJournal {
                 CREATE TABLE main.authority_code_policy_v1(id INTEGER PRIMARY KEY CHECK(id=1),
                     revision BLOB NOT NULL CHECK(length(revision)=16),
                     policy BLOB NOT NULL CHECK(length(policy) BETWEEN 1 AND 8192)) STRICT;
-                PRAGMA main.user_version=13;
                 """)
+            try AuthorityJournalSchema.setFeatureTier(13, on: db)
         }
         let revision = UUID()
         var raw = revision.uuid
@@ -54,13 +54,6 @@ final class CodePolicyJournal {
         return snapshot
     }
 
-    private func schemaVersion() throws -> Int64 {
-        guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
-        return try statement("PRAGMA main.user_version") { row in
-            guard try step(row) == SQLITE_ROW else { throw JournalDatabaseError.incompatibleStore }
-            return sqlite3_column_int64(row, 0)
-        }
-    }
     private func blob(_ row: OpaquePointer, column: Int32, maximum: Int) throws -> Data {
         guard sqlite3_column_type(row, column) == SQLITE_BLOB else { throw AuthorityCodePolicyError.corruptData }
         let length = Int(sqlite3_column_bytes(row, column))

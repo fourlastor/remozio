@@ -199,9 +199,9 @@ public final class JournalDatabase {
         return tables
     }
 
-    fileprivate func storageSchemaVersion(_ token: UUID) throws -> UInt64 {
+    fileprivate func storageFormatVersion(_ token: UUID) throws -> UInt64 {
         _ = try access(token)
-        let version = try integer("PRAGMA user_version")
+        let version = try formatVersion()
         guard (12...18).contains(version) else {
             unavailable = true
             throw JournalDatabaseError.incompatibleStore
@@ -209,8 +209,19 @@ public final class JournalDatabase {
         return UInt64(version)
     }
 
+    fileprivate func featureTier(_ token: UUID) throws -> UInt64 {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        let tier = try AuthorityJournalSchema.featureTier(on: db)
+        guard (12...18).contains(tier) else {
+            unavailable = true
+            throw JournalDatabaseError.incompatibleStore
+        }
+        return UInt64(tier)
+    }
+
     fileprivate func firstUnconfirmedGrantAbandonment(_ token: UUID) throws -> UInt64? {
-        guard try storageSchemaVersion(token) >= 18 else { return nil }
+        guard try featureTier(token) >= 18 else { return nil }
         return try statement("""
             SELECT first_unconfirmed_ms FROM main.gateway_abandoned_grants_v1
             WHERE resolution=0 AND first_unconfirmed_ms IS NOT NULL ORDER BY first_unconfirmed_ms LIMIT 1
@@ -231,7 +242,7 @@ public final class JournalDatabase {
     func initialAuthorityCheckpoint(initial: AuthorityJournalInitialization, databasePath: String) throws -> ContinuityCheckpoint {
         try requireInitializationPath(databasePath)
         return try read { transaction in
-            guard try transaction.storageSchemaVersion == (initial.installCommandReplay ? 15 : 13),
+            guard try transaction.featureTier == (initial.installCommandReplay ? 15 : 13),
                   let boundary = try transaction.epoch(initial.descriptor.epoch), boundary.head == 0, boundary.retainedAfter == 0,
                   try boundary.descriptor.encode(limits: self.descriptorLimits) == initial.descriptor.encode(limits: self.descriptorLimits),
                   try transaction.codePolicy()?.policy == initial.codePolicy else { throw AuthorityInitializationError.invalidBoundary }
@@ -364,7 +375,7 @@ public final class JournalDatabase {
             try GatewayAuthorityJournal.createTrustRestrictionsSchema(db!)
             try EnrollmentJournal.createPairingSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=12")
+            try AuthorityJournalSchema.setFeatureTier(12, on: db!)
             if let initialAuthority {
                 let token = UUID(); active = token
                 defer { active = nil }
@@ -392,21 +403,26 @@ public final class JournalDatabase {
             if version < 10 { try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!) }
             if version < 11 { try GatewayAuthorityJournal.createTrustRestrictionsSchema(db!) }
             try EnrollmentJournal.createPairingSchema(db!)
-            try exec("PRAGMA user_version=12")
+            try AuthorityJournalSchema.setFeatureTier(12, on: db!)
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
     }
 
+    private func formatVersion() throws -> Int64 {
+        guard let db else { throw JournalDatabaseError.unavailable }
+        return try AuthorityJournalSchema.formatVersion(on: db)
+    }
+
     private func requireEmptyStore() throws {
-        guard try integer("PRAGMA application_id") == 0, try integer("PRAGMA user_version") == 0,
+        guard try integer("PRAGMA application_id") == 0, try formatVersion() == 0,
               try integer("SELECT count(*) FROM main.sqlite_schema WHERE name NOT LIKE 'sqlite_%'") == 0 else {
             throw JournalDatabaseError.incompatibleStore
         }
     }
 
     private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
-        let version = try integer("PRAGMA user_version")
+        let version = try formatVersion()
         guard try integer("PRAGMA application_id") == Self.applicationID,
               expectedVersion.map({ version == $0 }) ?? (12...18).contains(version) else {
             throw JournalDatabaseError.incompatibleStore
@@ -516,11 +532,21 @@ public final class JournalTransaction {
         guard !write || writable else { throw JournalDatabaseError.readOnly }
         return try owner.access(token)
     }
-    /// Observes the current protected schema under the live transaction. This does not authorize installation or migration.
-    public var storageSchemaVersion: UInt64 {
+    /// Observes the outer storage format under the live transaction.
+    public var storageSchemaVersion: UInt64 { get throws { try storageFormatVersion } }
+
+    var storageFormatVersion: UInt64 {
         get throws {
             guard let owner else { throw JournalDatabaseError.expiredTransaction }
-            do { return try owner.storageSchemaVersion(token) }
+            do { return try owner.storageFormatVersion(token) }
+            catch { failed = true; throw error }
+        }
+    }
+
+    var featureTier: UInt64 {
+        get throws {
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            do { return try owner.featureTier(token) }
             catch { failed = true; throw error }
         }
     }
@@ -584,7 +610,7 @@ public final class JournalTransaction {
     func retainedUpdateSchedulingIntentForAdmission() throws -> UpdateSchedulingIntent? {
         do {
             _ = try tables()
-            let version = try storageSchemaVersion
+            let version = try featureTier
             if version < 17 { return nil }
             guard let owner else { throw JournalDatabaseError.expiredTransaction }
             return try owner.retainedUpdateSchedulingIntentForAdmission(token)
@@ -1165,7 +1191,7 @@ public final class JournalTransaction {
 
     func stageGatewayGrantAbandonment(_ control: GatewayControlTombstone, wall: UInt64) throws {
         let enrollments = try approvalEnrollments()
-        if try storageSchemaVersion < 15 { try installCommandSubmissionReplay() }
+        if try featureTier < 15 { try installCommandSubmissionReplay() }
         try withGateway(write: true) { try $0.stageGrantAbandonment(control, enrollments: enrollments, wall: wall) }
     }
 

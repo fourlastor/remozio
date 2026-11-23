@@ -1439,7 +1439,7 @@ extension ApprovalRequestCoordinator {
     func refreshUpdateSchedulingOffer(candidate: LiveUpdateSchedulingCandidate,
         verifyHost: (JournalTransaction) throws -> Void) throws -> UpdateSchedulingIntent {
         try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
-        let schema = try read { tx in try verifyHost(tx); return try tx.storageSchemaVersion }
+        let schema = try read { tx in try verifyHost(tx); return try tx.featureTier }
         if schema < 17 { try enableUpdateSchedulingStorage(candidate: candidate, verifyHost: verifyHost) }
         let previous = try read { tx in try verifyHost(tx); return try tx.updateSchedulingIntent() }
         if let previous, previous.snapshot.updateID == candidate.updateID, previous.snapshot.generation == candidate.generation {
@@ -1460,7 +1460,7 @@ extension ApprovalRequestCoordinator {
         }
         try read { tx in
             try verifyHost(tx)
-            guard try tx.storageSchemaVersion >= 17 else { throw UpdateSchedulingJournalError.unavailableSchema }
+            guard try tx.featureTier >= 17 else { throw UpdateSchedulingJournalError.unavailableSchema }
         }
         try candidate.requireCurrent(macID: mac, accountID: account)
     }

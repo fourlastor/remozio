@@ -28,9 +28,8 @@ enum JournalContinuityDigest {
             guard let name = sqlite3_column_text(row, 0) else { throw JournalDatabaseError.incompatibleStore }
             tables.insert(String(cString: name))
         }
-        var version: Int64?
-        try rows(db, "PRAGMA main.user_version") { version = sqlite3_column_int64($0, 0) }
-        guard let version, (12...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
+        let version = try AuthorityJournalSchema.featureTier(on: db)
+        guard (12...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         let authorityTables = Self.authorityTables + (version >= 13 ? ["authority_code_policy_v1"] : [])
             + (version >= 15 ? ["command_submissions_v1"] : [])
             + (version >= 16 ? ["gateway_submission_outbox_v1"] : [])

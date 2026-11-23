@@ -130,7 +130,7 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
                     }
                     cursor = page.nextRequestID
                 } while cursor != nil
-                return Snapshot(checkpoint: before, schemaVersion: try transaction.storageSchemaVersion, totalOutcomes: total,
+                return Snapshot(checkpoint: before, schemaVersion: try transaction.storageFormatVersion, totalOutcomes: total,
                     interruptedAuthorizations: authorized, interruptedDispatches: executing, terminalUnknowns: unknown)
             }
             guard try storage.continuity.read().committed == before else { throw CheckpointedJournal.Failure.boundaryMismatch }
@@ -153,7 +153,7 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
             try verifyCurrent()
             try CheckpointedJournal(journal: storage.journal, continuity: storage.continuity).read { transaction in
                 try Self.requirePolicy(transaction, expected: expectedPolicy)
-                guard try transaction.storageSchemaVersion == snapshot.schemaVersion else { throw JournalDatabaseError.incompatibleStore }
+                guard try transaction.storageFormatVersion == snapshot.schemaVersion else { throw JournalDatabaseError.incompatibleStore }
             }
             guard try storage.continuity.read().committed == snapshot.checkpoint else { throw CheckpointedJournal.Failure.boundaryMismatch }
             try verifyCurrent()

@@ -44,7 +44,7 @@ final class UpdateSchedulingJournal {
     }
 
     func install() throws {
-        let version = try schema()
+        let version = try AuthorityJournalSchema.featureTier(on: db)
         guard (15...18).contains(version) else { throw UpdateSchedulingJournalError.unavailableSchema }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         guard try CodePolicyJournal(connection: db).read() != nil else { throw UpdateSchedulingJournalError.invalidConfiguration }
@@ -67,9 +67,9 @@ final class UpdateSchedulingJournal {
                 trust BLOB NOT NULL CHECK(length(trust)=16), run BLOB NOT NULL CHECK(length(run)=16),
                 started BLOB NOT NULL CHECK(length(started)=8), deadline BLOB NOT NULL CHECK(length(deadline)=8),
                 consumed BLOB CHECK(consumed IS NULL OR length(consumed)=8)) STRICT, WITHOUT ROWID;
-            PRAGMA main.user_version=17;
             """, nil, nil, nil)
         guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+        try AuthorityJournalSchema.setFeatureTier(17, on: connection)
     }
 
     func state() throws -> UpdateSchedulingIntent? {
@@ -255,11 +255,9 @@ final class UpdateSchedulingJournal {
                 run: run, started: started, deadline: deadline, consumed: consumed)
         }
     }
-    private func installed() throws { guard try (17...18).contains(schema()) else { throw UpdateSchedulingJournalError.unavailableSchema } }
-    private func schema() throws -> Int64 {
-        try statement("PRAGMA main.user_version", []) { row in
-            guard sqlite3_step(row) == SQLITE_ROW else { throw JournalDatabaseError.incompatibleStore }
-            return sqlite3_column_int64(row, 0)
+    private func installed() throws {
+        guard try (17...18).contains(AuthorityJournalSchema.featureTier(on: db)) else {
+            throw UpdateSchedulingJournalError.unavailableSchema
         }
     }
     private func clock(_ now: AuthorityMoment) throws {
