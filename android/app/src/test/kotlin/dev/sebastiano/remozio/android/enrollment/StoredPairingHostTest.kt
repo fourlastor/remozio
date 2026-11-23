@@ -87,9 +87,13 @@ class StoredPairingHostTest {
     private class RePairKeys : RePairKeyCleanup {
         val allocated = mutableSetOf<String>()
         val retired = mutableListOf<String>()
+        val retirementAttempts = mutableListOf<String>()
+        var beforeRetire: () -> Unit = {}
         override fun contains(alias: String) = alias in allocated
 
         override fun retire(alias: String, expectedPublicKey: CborValue.Bytes?) {
+            retirementAttempts.add(alias)
+            beforeRetire()
             if (allocated.remove(alias)) retired.add(alias)
         }
     }
@@ -184,7 +188,7 @@ class StoredPairingHostTest {
         assertEquals(CborValue.Unsigned(3u), encoded.values[0u])
     }
 
-    @Test fun rePairAllocationRecoveryReleasesOnlyItsAliasesAndDoesNotRecoverAReceipt() = runBlocking {
+    @Test fun startupReconciliationCleansAnAbandonedReservationWithoutOpeningInventory() = runBlocking {
         val keys = RePairKeys()
         val h = rePairHost(keys)
         val old = record(1)
@@ -196,11 +200,14 @@ class StoredPairingHostTest {
         assertFails { h.recoverable(reservation.recordID) }
         assertFailsWith<RePairAlreadyPending> { h.inspectRePair(envelope(old)) }
         val reopened = rePairHost(keys)
-        reopened.reconcileRePair()
+        reopened.reconcileRePairOnStartup()
         assertEquals(listOf(reservation.alias(EnrollmentKeyRole.TRANSPORT)), keys.retired)
         assertEquals(setOf(unrelated), keys.allocated)
-        assertEquals(old.recordID, reopened.inspectRePair(envelope(old)).enrollment.recordID)
         open().use { assertTrue(it.snapshot().rePairReservations.isEmpty()) }
+        val attempts = keys.retirementAttempts.toList()
+        reopened.reconcileRePairOnStartup()
+        assertEquals(attempts, keys.retirementAttempts)
+        assertEquals(old.recordID, reopened.inspectRePair(envelope(old)).enrollment.recordID)
     }
 
     @Test fun rePairCheckpointFailureRetainsProposalAndRestartDrainsUnsubmittedKeys() = runBlocking {
@@ -222,7 +229,7 @@ class StoredPairingHostTest {
             assertEquals(reservation.keyIDs, pending.keyIDs)
             assertEquals(old.recordID, it.snapshot().entries.single().enrollment.recordID)
         }
-        rePairHost(keys).reconcileRePair()
+        rePairHost(keys).reconcileRePairOnStartup()
         assertEquals(material.keys.map { it.alias }.toSet(), keys.retired.toSet())
     }
 
@@ -243,7 +250,7 @@ class StoredPairingHostTest {
         h.markRePairProof(access)
         h.release(reservation.recordID, access.lease)
         val reopened = rePairHost(keys)
-        reopened.reconcileRePair()
+        reopened.reconcileRePairOnStartup()
         assertTrue(keys.retired.isEmpty())
         assertFailsWith<RePairAlreadyPending> { reopened.inspectRePair(invitation) }
         val emptyReceipt = PairingReceiptRecovery(reopened, { _, _ -> RecoveryWire({ null }) }, Dispatchers.Unconfined)
@@ -270,6 +277,51 @@ class StoredPairingHostTest {
             store.remove(reservation.recordID.copyBytes(), snapshot.revision)
         }
         assertFails { reopened.inspectRePair(invitation) }
+    }
+
+    @Test fun committedRePairSucceedsAndInventoryRemainsReadableWhenKeyCleanupFails() = runBlocking {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val previous = record(1)
+        activatePredecessor(host, previous)
+        host.remove(previous.recordID, 2u)
+        val reservation = host.reserveRePair(envelope(previous), id(30), id(60), List(3) { CborValue.Bytes(id(92 + it)) })
+        val (material, transcript) = proposalFor(reservation)
+        keys.allocated.add(previous.transportKey.alias)
+        keys.allocated.addAll(material.keys.map { it.alias })
+        host.prepareRePairProposal(reservation.recordID, material)
+        host.checkpointRePair(reservation.recordID, transcript)
+        val access = host.markRePairProof(host.prepared(reservation.recordID, transcript))
+
+        keys.beforeRetire = { error("Synthetic key retirement failure") }
+        try {
+            val committed = host.activate(reservation.recordID, receipt(transcript), expected = access)
+            assertEquals(reservation.recordID, committed.entries.single { it.phase == EnrollmentPhase.ACTIVE }.enrollment.recordID)
+        } finally {
+            host.release(reservation.recordID, access.lease)
+            host.finishRePair(reservation.recordID)
+        }
+        assertTrue(keys.retirementAttempts.isNotEmpty())
+        assertTrue(keys.retired.isEmpty())
+
+        val attempts = keys.retirementAttempts.toList()
+        val reader = StoredMacReader(::open, Dispatchers.Unconfined, mutex)
+        val revision = open().use { it.snapshot().revision }
+        repeat(2) {
+            val visible = assertIs<MacInventoryState.Ready>(reader.read()).macs.single()
+            assertEquals(reservation.recordID, visible.recordID)
+            assertEquals(revision, visible.revision)
+            assertFalse(visible.setupIncomplete)
+        }
+        assertEquals(attempts, keys.retirementAttempts)
+        keys.beforeRetire = {}
+        val reopened = rePairHost(keys)
+        reopened.reconcileRePairOnStartup()
+        assertEquals(listOf(previous.transportKey.alias), keys.retired)
+        assertEquals(material.keys.map { it.alias }.toSet(), keys.allocated)
+        val finished = keys.retirementAttempts.toList()
+        reopened.reconcileRePairOnStartup()
+        assertEquals(finished, keys.retirementAttempts)
     }
 
     @Test fun ordinaryPairingAllowsExplicitLocalAbandonmentWithoutReplayingThePendingSetup() = runBlocking {
@@ -505,6 +557,37 @@ class StoredPairingHostTest {
         }.activate(next.recordID, receipt(replacement))
         assertEquals(EnrollmentPhase.REMOVED, result.entries.single { it.enrollment.recordID == old.recordID }.phase)
         assertEquals(EnrollmentPhase.ACTIVE, result.entries.single { it.enrollment.recordID == next.recordID }.phase)
+    }
+
+    @Test fun localRemovalRefusesToStrandAnOrdinaryPreparedReplacement() = runBlocking {
+        val host = host()
+        val previous = record(1)
+        activatePredecessor(host, previous)
+        val next = record(2)
+        val replacement = transcript(next, previous)
+        val prepared = host.prepare(next, replacement, 2u, 1u, previous.recordID)
+        val access = host.prepared(next.recordID, replacement)
+        invalidated.clear()
+        try {
+            assertFailsWith<OrdinaryPairingReplacementPending> {
+                host.remove(previous.recordID, prepared.revision)
+            }
+            assertTrue(access.lease.isCurrent())
+            assertTrue(invalidated.isEmpty())
+            open().use { store ->
+                val retained = store.snapshot()
+                assertEquals(prepared.revision, retained.revision)
+                assertEquals(EnrollmentPhase.ACTIVE, retained.entries.single { it.enrollment.recordID == previous.recordID }.phase)
+                assertEquals(EnrollmentPhase.PREPARED, retained.entries.single { it.enrollment.recordID == next.recordID }.phase)
+            }
+
+            val cancelled = host.remove(next.recordID, prepared.revision)
+            assertFalse(access.lease.isCurrent())
+            val removed = host.remove(previous.recordID, cancelled.revision)
+            assertTrue(removed.entries.all { it.phase == EnrollmentPhase.REMOVED })
+        } finally {
+            host.release(next.recordID, access.lease)
+        }
     }
 
     @Test fun custodyFailurePreventsPreparationAndActivationWithoutClosingConnections() = runBlocking<Unit> {

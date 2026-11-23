@@ -78,6 +78,8 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                         try {
                             if (abandonRePair) app.pairing.abandonAmbiguousRePair(mac.recordID, mac.revision)
                             else app.pairing.remove(mac.recordID, mac.revision)
+                        } catch (_: OrdinaryPairingReplacementPending) {
+                            removalError = R.string.macs_remove_local_pairing_pending
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Exception) {
