@@ -64,6 +64,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if value[0] == 'authority.journal':
                     value[1] = [12, 13, 14, 15, 16]
                     value[2] = [12, 13, 14, 15, 16]
+                    value[3] = {version: target for version, target in value[3].items() if target in value[2]}
             return values
         with patch.object(MANIFEST, 'declarations', side_effect=legacy), \
                 patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
