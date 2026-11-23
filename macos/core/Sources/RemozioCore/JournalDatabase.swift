@@ -213,7 +213,7 @@ public final class JournalDatabase {
         guard try storageSchemaVersion(token) >= 18 else { return nil }
         return try statement("""
             SELECT first_unconfirmed_ms FROM main.gateway_abandoned_grants_v1
-            WHERE confirmed=0 AND first_unconfirmed_ms IS NOT NULL ORDER BY first_unconfirmed_ms LIMIT 1
+            WHERE resolution=0 AND first_unconfirmed_ms IS NOT NULL ORDER BY first_unconfirmed_ms LIMIT 1
             """) { row in
             let result = sqlite3_step(row)
             if result == SQLITE_DONE { return nil }
@@ -453,7 +453,7 @@ public final class JournalDatabase {
                         "SELECT operation,payload,trust,run,started,deadline,consumed FROM main.update_scheduling_operations_v1 LIMIT 0"]
         }
         if version >= 18 {
-            queries.append("SELECT operation,revision,kind,digest,signature,confirmed,first_unconfirmed_ms FROM main.gateway_abandoned_grants_v1 LIMIT 0")
+            queries.append("SELECT operation,revision,kind,digest,signature,resolution,first_unconfirmed_ms FROM main.gateway_abandoned_grants_v1 LIMIT 0")
         }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }

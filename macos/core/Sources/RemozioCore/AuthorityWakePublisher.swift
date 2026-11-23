@@ -377,6 +377,7 @@ public actor AuthorityWakePublisher {
                 try owner.abandonPhonePushGrant(control, provider: push.provider, now: now, wall: push.wallTime())
             }
             do {
+                try withPhoneOwner(revision) { _, _ in }
                 _ = try await channel.abandonGrant(control, signature: signature)
                 gatewayRevocations?.recordGrantHealth(.pending, owner: session)
             } catch GatewayRootChannelError.rejected {

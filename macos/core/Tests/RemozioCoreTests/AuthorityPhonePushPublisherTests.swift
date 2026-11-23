@@ -38,6 +38,7 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
             var recoveryProbes = 0
             var rejectTombstoneProbe = false
             var dropTombstoneReply = false
+            var tombstoneCalls = 0
             var tombstones: [GatewayControlTombstone] = []
             var recoveredBytes: Data?
             var recoveredSignature: Data?
@@ -95,7 +96,11 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                             let value = try await coordinator.recoveryHistoryReply(canonicalQuery: query) { try self.receiptKey.signature(for: $0).rawRepresentation }
                             reply(.command(try GatewayRootCommand.reply([.bytes(value.canonicalPayload), .bytes(value.signature)])))
                         case .abandonGrant(let payload, let signature, let expectedHead):
-                            if state.withLock({ $0.dropTombstoneReply }) { return reply(.command(nil)) }
+                            let drop = state.withLock {
+                                $0.tombstoneCalls += 1
+                                return $0.dropTombstoneReply
+                            }
+                            if drop { return reply(.command(nil)) }
                             let value = try await coordinator.abandonGrant(canonicalPayload: payload, signature: signature,
                                 expectedHead: expectedHead, lease: lease)
                             if value.inserted { state.withLock { $0.tombstones.append(value.receipt.tombstone) } }
@@ -162,7 +167,8 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         let phonePushConfiguration: AuthorityPhonePushPublication
         init(enrollmentCount: Int = 1, maximumPhonesPerTurn: Int = 16, earlier: EarlierControl? = nil, candidateBeforeEarlier: Bool = false,
              enablePhonePush: Bool = true, enableRootGateway: Bool = true, prepareRetirementSchema: Bool = false,
-             phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)? = nil) throws {
+             phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)? = nil,
+             beforePublisherSigns: (@Sendable (Clock) -> Void)? = nil) throws {
             var retained: GatewayAuthorityEnvelope?
             let root = try AuthorityPhonePushRegistrationTests.Harness(configureGateway: enableRootGateway, enrollmentCount: enrollmentCount,
                 gatewayLedgerEnabled: enableRootGateway, gatewaySetup: { tx, r, key, limits, epoch, writer in
@@ -233,7 +239,17 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
             self.coordinator = coordinator
             let key = P256.Signing.PrivateKey(), driver = Driver(coordinator: coordinator, lease: lease, key: key)
             self.driver = driver
-            let configuration = try AuthorityPhonePushPublication(provider: root.provider, gatewayPublicKey: key.publicKey.x963Representation, maximumPhonesPerTurn: maximumPhonesPerTurn, wallTime: { clock.wall() })
+            let registrationProvider: AuthorityPhonePushRegistration
+            if let beforePublisherSigns {
+                let rootKey = root.key
+                registrationProvider = AuthorityPhonePushRegistration(policy: root.provider.policy, signing: { bytes in
+                    beforePublisherSigns(clock)
+                    return try rootKey.signature(for: bytes).rawRepresentation
+                })
+            } else {
+                registrationProvider = root.provider
+            }
+            let configuration = try AuthorityPhonePushPublication(provider: registrationProvider, gatewayPublicKey: key.publicKey.x963Representation, maximumPhonesPerTurn: maximumPhonesPerTurn, wallTime: { clock.wall() })
             phonePushConfiguration = configuration
             revocationState = AuthorityGatewayRevocationState(registration: root.registration)
             publisher = try AuthorityWakePublisher(journal: journal, channel: GatewayRootChannel(driver: driver), registration: root.registration,
@@ -472,6 +488,24 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         try await f.assertGatewayHead(3)
         XCTAssertEqual(f.driver.state.withLock { $0.candidates }, 1)
         XCTAssertEqual(f.revocationState.deliveryStatus(revocation.operationID), .gatewayApplied)
+        await f.close()
+    }
+
+    func testLeaseExpiryDuringTombstoneSigningPreventsSendingIt() async throws {
+        let f = try Fixture(earlier: .phoneRevocation, candidateBeforeEarlier: true, prepareRetirementSchema: true,
+            beforePublisherSigns: { $0.advance(1000) })
+        try await f.publisher.start()
+        do {
+            try await f.publisher.reconcile()
+            XCTFail("Expected the publication lease to expire")
+        } catch {
+            XCTAssertEqual(error as? AuthorityWakePublisherError, .expiredLease)
+        }
+        XCTAssertNotNil(try f.journal.read { try $0.firstUnconfirmedGrantAbandonment() })
+        XCTAssertEqual(f.driver.state.withLock { $0.tombstoneCalls }, 0)
+        XCTAssertTrue(f.driver.state.withLock { $0.closed })
+        try await f.assertGatewayHead(0)
+        try f.root.assertCheckpoint()
         await f.close()
     }
 

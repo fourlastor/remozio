@@ -2000,6 +2000,63 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
     }
 
+    func testSignedOriginalActivationSupersedesThePendingTombstone() throws {
+        let f = try Fixture(), db = try setup(f), grant = try prepare(db)
+        let activation = try consume(db, grant)
+        let registration = try trust().registration
+        _ = try db.write { try $0.acknowledgeGatewayHead(verifiedHead([grant])) }
+        let tombstone = try stageRetirement(db, for: activation)
+        _ = try db.write { tx in
+            try tx.finishGatewayGrantAbandonment(tombstone, wall: 2000, sign: { try key.signature(for: $0).rawRepresentation })
+        }
+        XCTAssertEqual(try db.read { try $0.firstUnconfirmedGrantAbandonment() }, 2000)
+
+        let evidence = try verifiedHead([grant, activation])
+        let inspected = try db.read { try $0.inspectGatewayHead(evidence) }
+        XCTAssertEqual(inspected.disposition, .recorded)
+        XCTAssertEqual(try db.read { try $0.firstUnconfirmedGrantAbandonment() }, 2000)
+        let recorded = try db.write { try $0.acknowledgeGatewayHead(evidence) }
+        XCTAssertEqual(recorded.disposition, .recorded)
+        XCTAssertEqual(recorded.acknowledged?.operationID, activation.operationID)
+        XCTAssertEqual(recorded.acknowledged?.abandonedGrant, false)
+        XCTAssertNil(try db.read { try $0.firstUnconfirmedGrantAbandonment() })
+        XCTAssertNil(try db.read { try $0.signedGatewayGrantAbandonment(tombstone) })
+        try assertRetirementRefusesToSign(tombstone, db: db)
+
+        try db.close()
+        let reopened = try open(f)
+        let retained = try reopened.read { tx in
+            try tx.currentGatewayTokenState(phoneID: id(6), enrollmentEpoch: id(7), registration: registration,
+                registrationActive: true, expectedTrustRevision: tx.approvalTrustSnapshot().revision,
+                nowUnixMillis: 2100, now: moment(1200))
+        }
+        let current = try XCTUnwrap(retained)
+        XCTAssertEqual(current.activation?.operationID, activation.operationID)
+        XCTAssertFalse(current.activationAbandonmentConfirmed)
+        XCTAssertFalse(current.needsRenewal)
+        XCTAssertNil(try reopened.read { try $0.firstUnconfirmedGrantAbandonment() })
+    }
+
+    func testOlderSignedTombstoneDoesNotMutateRetirement() throws {
+        let f = try Fixture(), db = try setup(f), grant = try prepare(db)
+        let tombstone = try stageRetirement(db, for: grant)
+        let signature = try db.write { tx in
+            try tx.finishGatewayGrantAbandonment(tombstone, wall: 2000, sign: { try key.signature(for: $0).rawRepresentation })
+        }
+        let envelope = GatewayAuthorityEnvelope(kind: GatewayControlTombstone.receiptKind, operationID: tombstone.operationID,
+            revision: tombstone.revision, canonicalPayload: try tombstone.encode(), signature: signature, registrationToken: nil)
+        let later = try prepare(db, head: 1, now: 110)
+        let latest = try verifiedHead([envelope, later])
+        _ = try db.write { try $0.acknowledgeGatewayHead(latest) }
+        let older = try verifiedHead([envelope])
+        let before = try db.read { try $0.continuityDigests() }
+        let result = try db.write { try $0.acknowledgeGatewayHead(older) }
+        XCTAssertEqual(result.disposition, .olderThanRecorded)
+        XCTAssertEqual(result.acknowledged?.operationID, later.operationID)
+        XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+        XCTAssertEqual(try db.read { try $0.firstUnconfirmedGrantAbandonment() }, 2000)
+    }
+
     func testFinishGrantAbandonmentDoesNotSignAnAppliedGrant() throws {
         let f = try Fixture(), db = try setup(f), grant = try prepare(db)
         let staged = try stageRetirement(db, for: grant)

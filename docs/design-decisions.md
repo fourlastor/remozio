@@ -32,7 +32,7 @@ A tombstone binds the registration, original revision, kind, operation ID and di
 
 Local phone revocation takes effect independently of gateway delivery. Root retains the delivery intent and reports its status separately. The Mac publisher uses tombstones to close abandoned grant revisions before delivering a later revocation or grant.
 
-The first durable Root retirement upgrades the journal to schema 18 and commits its continuity checkpoint before signing. A Root binary that supports through schema 17 cannot open that journal. Retirement and gateway confirmation use separate protected fields. A verified tombstone advances the known gateway head and marks the original grant as abandoned.
+The first durable Root retirement upgrades the journal to schema 18 and commits its continuity checkpoint before signing. A Root binary that supports through schema 17 cannot open that journal. A verified tombstone advances the known gateway head and marks the original grant as abandoned. If the original signed grant reached the gateway first, its verified receipt supersedes the pending retirement. The receipt preserves the original grant result and does not restore a revoked enrollment.
 
 The main Setup window and paired-phone controls read the same protected intent and publisher observations. A gateway without tombstone support reports that it needs an update when an abandoned grant blocks the next revision. Root retains the start time before the first delivery attempt, so a missing reply leaves an inconclusive status and elapsed time across restart. A later authenticated tombstone receipt confirms delivery. The current gateway protocol does not provide an explicit negative reply. See #889.
 

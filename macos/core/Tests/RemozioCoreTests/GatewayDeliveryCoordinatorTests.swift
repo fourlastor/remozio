@@ -911,12 +911,13 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func close() { endpoint.close() }
     }
 
-    private func signedDelayedRevocation(_ fixture: Fixture, revision: UInt64) throws -> GatewayAuthorityEnvelope {
+    private func signedDelayedRevocation(_ fixture: Fixture, revision: UInt64,
+                                         expiresAtUnixMillis: UInt64 = 2000) throws -> GatewayAuthorityEnvelope {
         let limits = try CBORLimits(maxBytes: 4096, maxDepth: 8, maxItems: 128)
         let binding = try GatewayPhoneEpochBinding(ownerID: id(1), macID: id(2), accountID: id(3),
             gatewayID: id(4), lifecycleEpoch: id(5), phoneID: id(6), enrollmentEpoch: id(7))
         let control = try GatewayPhoneRevocation(binding: binding, revision: revision, operationID: id(90),
-            issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
+            issuedAtUnixMillis: 1000, expiresAtUnixMillis: expiresAtUnixMillis)
         let payload = try control.encode(limits: limits)
         let input = try GatewayRecipientSigningInput.make(wireVersion: 1, kind: .phoneRevocation,
             canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
@@ -1106,6 +1107,46 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(receipt.inserted)
         XCTAssertEqual(receipt.receipt.enrollmentEpoch, id(7))
         XCTAssertEqual(receipt.receipt.signature, original.signature)
+        try await coordinator.shutdown()
+    }
+
+    func testDelayedRecoveryReturnsOriginalReceiptAfterOperationConflict() async throws {
+        let f = try Fixture(), clock = f.clock
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try f.coordinator(Provider([]), validateAuthority: { try lease.validate() })
+        let registration = try f.identity(), rootEpoch = UUID()
+        clock.advance(1001)
+        let time = clock.sample().moment
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 1, observedAtMilliseconds: time.milliseconds, leaseDeadlineMilliseconds: time.milliseconds + 100,
+            enrollments: [], active: true, phoneRouting: false), lease: lease)
+
+        let original = try signedDelayedRevocation(f, revision: 1)
+        let first = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+            signature: original.signature, phoneID: id(6), expectedHead: 0, lease: lease)
+        XCTAssertTrue(first.inserted)
+        let conflicting = try signedDelayedRevocation(f, revision: 1, expiresAtUnixMillis: 1999)
+        do {
+            _ = try await coordinator.recoverPhoneRevocation(canonicalPayload: conflicting.canonicalPayload,
+                signature: conflicting.signature, phoneID: id(6), expectedHead: 0, lease: lease)
+            XCTFail("Accepted a different signed payload for the same operation")
+        } catch {
+            XCTAssertEqual(error as? GatewayDatabaseError, .operationConflict)
+        }
+        let retry = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+            signature: original.signature, phoneID: id(6), expectedHead: 0, lease: lease)
+        XCTAssertFalse(retry.inserted)
+        XCTAssertEqual(retry.receipt.canonicalPayload, original.canonicalPayload)
+        XCTAssertEqual(retry.receipt.signature, original.signature)
+        let key = P256.Signing.PrivateKey()
+        let owner = try GatewayHeadQueryOwner(registration: registration, gatewayPublicKey: key.publicKey.x963Representation,
+            clockEpoch: clock.epoch)
+        let reply = try await coordinator.recoveryHeadReply(canonicalQuery: owner.makeQuery(now: time)) {
+            try key.signature(for: $0).rawRepresentation
+        }
+        let head = try owner.accept(reply, now: time).evidence
+        XCTAssertEqual(head.revision, 1)
+        XCTAssertEqual(head.receipt?.operationID, original.operationID)
         try await coordinator.shutdown()
     }
 
