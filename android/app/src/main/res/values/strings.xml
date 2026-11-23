@@ -451,6 +451,9 @@
     <string name="macs_remove_local">Remove from this phone</string>
     <string name="macs_remove_local_description">Remove %1$s from this phone? To revoke the pairing, open Paired phones on the Mac.</string>
     <string name="macs_remove_local_failed">Could not remove the selected pairing. Check the current list and try again.</string>
+    <string name="macs_abandon_repair">Abandon re-pair on this phone</string>
+    <string name="macs_abandon_repair_description">Discard the pending re-pair and its keys for %1$s? If the Mac completed setup, an extra phone may still appear in Paired phones. Revoke that phone on the Mac.</string>
+    <string name="macs_abandon_repair_failed">Could not finish local re-pair cleanup. Check the current list and try again.</string>
     <string name="pairing_setup_phone">Phone ID: %1$s</string>
     <string name="pairing_setup_compare">Compare all four groups with the code on your Mac. Continue only if every character matches.</string>
     <plurals name="pairing_setup_remaining">

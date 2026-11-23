@@ -47,7 +47,7 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
     val scope = rememberCoroutineScope()
     var removal by remember { mutableStateOf<StoredMac?>(null) }
     var removing by remember { mutableStateOf(false) }
-    var removalFailed by remember { mutableStateOf(false) }
+    var removalError by remember { mutableStateOf<Int?>(null) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var retry by remember { mutableIntStateOf(0) }
     val receiptStates = remember { mutableMapOf<CborValue.Bytes, MutableState<ReceiptCheckState>>() }
@@ -63,36 +63,39 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
         }
     }
     removal?.let { mac ->
+        val abandonRePair = mac.setupIncomplete && mac.canAbandonRePair
+        val title = if (abandonRePair) R.string.macs_abandon_repair else R.string.macs_remove_local
+        val description = if (abandonRePair) R.string.macs_abandon_repair_description else R.string.macs_remove_local_description
         AlertDialog(
             onDismissRequest = { if (!removing) removal = null },
-            title = { Text(stringResource(R.string.macs_remove_local)) },
-            text = { Text(stringResource(R.string.macs_remove_local_description, mac.label)) },
+            title = { Text(stringResource(title)) },
+            text = { Text(stringResource(description, mac.label)) },
             confirmButton = {
                 TextButton(enabled = !removing, onClick = {
                     removing = true
-                    removalFailed = false
+                    removalError = null
                     scope.launch {
                         try {
-                            app.pairing.remove(mac.recordID, mac.revision)
+                            if (abandonRePair) app.pairing.abandonAmbiguousRePair(mac.recordID, mac.revision)
+                            else app.pairing.remove(mac.recordID, mac.revision)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Exception) {
-                            removalFailed = true
+                            removalError = if (abandonRePair) R.string.macs_abandon_repair_failed else R.string.macs_remove_local_failed
                         } finally {
                             removal = null
                             removing = false
                             retry++
                         }
                     }
-                }) { Text(stringResource(R.string.macs_remove_local)) }
+                }) { Text(stringResource(title)) }
             },
             dismissButton = {
                 TextButton(enabled = !removing, onClick = { removal = null }) { Text(stringResource(android.R.string.cancel)) }
             },
         )
     }
-    if (removalFailed) Text(stringResource(R.string.macs_remove_local_failed),
-        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+    removalError?.let { Text(stringResource(it), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
     when (val current = state) {
         MacInventoryState.Loading -> InventoryCard {
             CircularProgressIndicator()
@@ -124,12 +127,16 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                             HorizontalDivider(Modifier.padding(vertical = 8.dp))
                             dev.sebastiano.remozio.android.updates.MacUpdateStatusContent(mac.recordID)
                         }
-                        if (mac.setupIncomplete) PairingReceiptControl(mac,
-                            status = remember(receiptStates, mac.recordID) {
-                                receiptStates.getOrPut(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
-                            },
-                            onChecked = { retry++ })
-                        else {
+                        if (mac.setupIncomplete) {
+                            PairingReceiptControl(mac,
+                                status = remember(receiptStates, mac.recordID) {
+                                    receiptStates.getOrPut(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
+                                },
+                                onChecked = { retry++ })
+                            if (mac.canAbandonRePair) {
+                                TextButton(onClick = { removal = mac }) { Text(stringResource(R.string.macs_abandon_repair)) }
+                            }
+                        } else {
                             TextButton(onClick = { onOpen(mac) }) { Text(stringResource(R.string.commands_open)) }
                             TextButton(onClick = { removal = mac }) { Text(stringResource(R.string.macs_remove_local)) }
                         }

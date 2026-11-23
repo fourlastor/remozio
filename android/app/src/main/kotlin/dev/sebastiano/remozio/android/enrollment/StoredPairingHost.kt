@@ -9,6 +9,7 @@ import dev.remozio.phone.enrollment.EnrollmentKeyReference
 import dev.remozio.phone.enrollment.EnrollmentKeyRole
 import dev.remozio.phone.enrollment.RePairProposalMaterial
 import dev.remozio.phone.enrollment.RePairReservation
+import dev.remozio.phone.enrollment.canAbandonAmbiguousRePair
 import dev.remozio.phone.enrollment.rePairPredecessor
 import java.util.concurrent.atomic.AtomicBoolean
 import dev.remozio.protocol.CborValue
@@ -117,6 +118,9 @@ internal class StoredPairingHost(
     suspend fun finishRePair(recordID: CborValue.Bytes) = withContext(dispatcher) {
         enrollmentAccess.withLock {
             liveRePairs.remove(recordID)
+            val leases = preparedLeases[recordID]
+            leases?.removeAll { !it.isCurrent() }
+            if (leases.isNullOrEmpty()) preparedLeases.remove(recordID)
             checkNotNull(openExisting()).use { store -> reconcileRePairLocked(store) }
         }
     }.also { notifyChange() }
@@ -289,6 +293,24 @@ internal class StoredPairingHost(
 
     private fun references(enrollment: PhoneEnrollment): List<EnrollmentKeyReference> =
         listOf(enrollment.transportKey, enrollment.decisionKey, enrollment.biometricKey)
+
+    suspend fun abandonAmbiguousRePair(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot =
+        withContext(dispatcher) {
+            enrollmentAccess.withLock {
+                checkNotNull(openExisting()).use { store ->
+                    val snapshot = store.snapshot()
+                    require(snapshot.revision == expectedRevision && recordID !in liveRePairs)
+                    require(preparedLeases[recordID].isNullOrEmpty())
+                    val row = snapshot.entries.single { it.enrollment.recordID == recordID }
+                    require(snapshot.canAbandonAmbiguousRePair(row))
+                    invalidateLocked(setOf(recordID))
+                    val next = store.abandonAmbiguousRePair(recordID, expectedRevision)
+                    val removed = next.entries.single { it.enrollment.recordID == recordID }
+                    retireUnreferenced(next, removed)
+                    next
+                }
+            }
+        }
 
     /** Local removal does not claim that the Mac has revoked the phone. */
     suspend fun remove(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot = withContext(dispatcher) {

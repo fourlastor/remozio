@@ -3,6 +3,7 @@ package dev.sebastiano.remozio.android.enrollment
 import dev.remozio.phone.enrollment.EncryptedEnrollmentStore
 import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.phone.enrollment.EnrollmentSnapshot
+import dev.remozio.phone.enrollment.canAbandonAmbiguousRePair
 import dev.remozio.protocol.CborValue
 import java.util.Collections
 import kotlinx.coroutines.CancellationException
@@ -19,6 +20,7 @@ internal class StoredMac(
     val setupIncomplete: Boolean,
     val revision: ULong,
     val rePair: Boolean,
+    val canAbandonRePair: Boolean,
 ) {
     override fun toString() = "StoredMac(redacted)"
 }
@@ -38,11 +40,11 @@ internal fun storedMacs(snapshot: EnrollmentSnapshot): MacInventoryState.Ready =
             (it.phase != EnrollmentPhase.PREPARED || it.rePair?.proofMayHaveBeenSent != false)
     }.map {
         StoredMac(it.enrollment.recordID, it.enrollment.label, it.phase == EnrollmentPhase.PREPARED, snapshot.revision,
-            it.rePair != null)
+            it.rePair != null, snapshot.canAbandonAmbiguousRePair(it))
     },
 )
 
-/** Serializes readers across activities and closes the archive before exposing metadata to Compose. */
+/** Reconciles setup state, then closes the archive before exposing inventory metadata to Compose. */
 internal class StoredMacReader(
     private val open: () -> EncryptedEnrollmentStore?,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,

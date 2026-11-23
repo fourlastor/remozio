@@ -153,6 +153,7 @@ class PairingSetupInteropTest {
         }
     }
 
+    // Uses the archive and transport APIs with software keys. Android's setup owner is covered separately.
     @Test fun rePairRecoversTheLostReceiptOverTheNewKeyAfterArchiveReopen(): Unit = runBlocking {
         Fixture(rePair = true, dropRePairReceipt = true).use { f ->
             fun id(value: Int) = ByteArray(16) { value.toByte() }

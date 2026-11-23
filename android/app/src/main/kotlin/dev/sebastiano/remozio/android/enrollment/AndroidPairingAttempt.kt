@@ -24,11 +24,17 @@ import kotlinx.coroutines.sync.withLock
 
 /** One explicit setup owner. No network input can select a retained record or activate it without its Root receipt. */
 internal class AndroidPairingAttempt(
-    context: Context,
     parent: CoroutineScope,
     private val store: StoredPairingHost,
+    private val application: () -> Context,
+    private val createTransportKey: (Instant, ByteArray) -> CreatedTransportIdentity,
 ) : AutoCloseable {
-    private val app = context.applicationContext
+    constructor(context: Context, parent: CoroutineScope, store: StoredPairingHost) : this(
+        parent, store, { context.applicationContext }, { now, keyID ->
+            AndroidTransportKeyCreation.createForEnrollment(context.applicationContext,
+                now.minusSeconds(300), now.plusSeconds(31_536_000), keyID)
+        },
+    )
     private val job = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
     private val scope = CoroutineScope(job + Dispatchers.IO)
     private val closed = AtomicBoolean(false)
@@ -83,17 +89,17 @@ internal class AndroidPairingAttempt(
             active()
             val now = Instant.now()
             val transportID = keyIDs[EnrollmentKeyRole.TRANSPORT.ordinal].copyBytes()
-            val made = AndroidTransportKeyCreation.createForEnrollment(app, now.minusSeconds(300), now.plusSeconds(31_536_000), transportID)
+            val made = createTransportKey(now, transportID)
             identity = made
             val transport = EnrollmentKeyReference(EnrollmentKeyRole.TRANSPORT, transportID, made.alias, made.publicKey())
             transportKey = transport
             ownedKeys.add(transport)
             active()
-            val decision = AndroidDecisionKeyCreation.createForEnrollment(app, keyIDs[EnrollmentKeyRole.DECISION.ordinal].copyBytes())
+            val decision = AndroidDecisionKeyCreation.createForEnrollment(application(), keyIDs[EnrollmentKeyRole.DECISION.ordinal].copyBytes())
             decisionKey = decision
             ownedKeys.add(decision)
             active()
-            val bio = AndroidBiometricKeyCreation.createForEnrollment(app, keyIDs[EnrollmentKeyRole.BIOMETRIC.ordinal].copyBytes())
+            val bio = AndroidBiometricKeyCreation.createForEnrollment(application(), keyIDs[EnrollmentKeyRole.BIOMETRIC.ordinal].copyBytes())
             biometricKey = bio
             ownedKeys.add(bio)
         }
@@ -106,9 +112,9 @@ internal class AndroidPairingAttempt(
             claim(checkNotNull(biometricKey)), rePair?.predecessor)
         active()
         val opened = authenticatePairingRoutes(scope,
-            androidPairingRoutes(app, selected.macID.copyBytes(), selected.accountID.copyBytes()),
+            androidPairingRoutes(application(), selected.macID.copyBytes(), selected.accountID.copyBytes()),
             arrayOf(checkNotNull(identity).identity.keyManager), selected, proposal,
-            LocalNetworkSettings(app).timeoutSeconds() * 1000L)
+            LocalNetworkSettings(application()).timeoutSeconds() * 1000L)
         channel = opened; active()
         val transcript = opened.awaitTranscript {
             rePairRecordID?.let { store.prepareRePairProposal(it, RePairProposalMaterial(proposal, ownedKeys)) }
@@ -186,17 +192,24 @@ internal class AndroidPairingAttempt(
         withContext(NonCancellable + Dispatchers.IO) {
             channel?.closeAndJoin(); job.join()
             operations.withLock {
-                biometric?.close(); identity?.close()
-                preparedAccess?.let { access -> enrollment?.let { store.release(it.recordID, access.lease) } }
                 val rePairID = rePairRecordID
-                if (rePairID != null) store.finishRePair(rePairID)
-                else if (!prepared) retireOwnedKeys()
-                else if (!proofSubmitted) store.abandonUnsubmitted(checkNotNull(preparedRecord), ::retireOwnedKeys)
-                ownedKeys.clear()
+                try {
+                    biometric?.close()
+                    identity?.close()
+                    preparedAccess?.let { access -> enrollment?.let { store.release(it.recordID, access.lease) } }
+                    if (rePairID == null) {
+                        if (!prepared) retireOwnedKeys()
+                        else if (!proofSubmitted) store.abandonUnsubmitted(checkNotNull(preparedRecord), ::retireOwnedKeys)
+                    }
+                } finally {
+                    if (rePairID != null) store.finishRePair(rePairID)
+                    ownedKeys.clear()
+                }
             }
         }
     }
     private fun retireOwnedKeys() {
+        if (ownedKeys.isEmpty()) return
         val keystore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         for (ref in ownedKeys) {
             val point = keystore.getCertificate(ref.alias)?.publicKey?.encoded?.takeLast(65)?.toByteArray()

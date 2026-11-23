@@ -98,3 +98,11 @@ fun rePairPredecessor(snapshot: EnrollmentSnapshot, envelope: RePairInvitation):
     })
     return previous
 }
+
+/** This choice depends only on the current archive. It says nothing about what Root committed. */
+fun EnrollmentSnapshot.canAbandonAmbiguousRePair(row: StoredPhoneEnrollment): Boolean =
+    row.phase == EnrollmentPhase.PREPARED && row.rePair?.proofMayHaveBeenSent == true && entries.any { ordinary ->
+        ordinary.phase == EnrollmentPhase.ACTIVE && ordinary.rePair == null && ordinary.pairing != null &&
+            ordinary.pairing.replacingRecordID == null && ordinary.enrollment.scope == row.enrollment.scope &&
+            ordinary.enrollment.phoneID != row.enrollment.phoneID
+    }

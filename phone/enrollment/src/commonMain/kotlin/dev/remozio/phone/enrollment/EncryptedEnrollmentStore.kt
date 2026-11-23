@@ -15,6 +15,7 @@ class EnrollmentSnapshot internal constructor(
     val revision: ULong,
     entries: List<StoredPhoneEnrollment>,
     rePairReservations: List<RePairReservation> = emptyList(),
+    internal val usesRePairSchema: Boolean = false,
 ) {
     val entries: List<StoredPhoneEnrollment> = frozenList(entries)
     val rePairReservations: List<RePairReservation> = frozenList(rePairReservations)
@@ -155,6 +156,14 @@ class EncryptedEnrollmentStore private constructor(
         commit(state.entries, state.rePairReservations.filter { it.recordID != recordID })
     }
 
+    /** Explicit local abandonment after an ordinary setup has succeeded in this Mac and account. */
+    fun abandonAmbiguousRePair(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot = locked {
+        checkRevision(expectedRevision)
+        val row = state.entries.single { it.enrollment.recordID == recordID }
+        require(state.canAbandonAmbiguousRePair(row))
+        commit(state.entries.map { if (it === row) it.withPhase(EnrollmentPhase.REMOVED) else it })
+    }
+
     /** Restores only the transcript retained in the authenticated local archive. */
     fun recoverPairing(recordID: ByteArray): PhonePairingAttempt = locked {
         checkAvailable()
@@ -235,7 +244,9 @@ class EncryptedEnrollmentStore private constructor(
     ): EnrollmentSnapshot {
         require(state.revision < ULong.MAX_VALUE)
         validate(rows, reservations, maximumRecords)
-        val candidate = EnrollmentSnapshot(state.revision + 1u, rows, reservations)
+        val usesRePairSchema = state.usesRePairSchema || reservations.isNotEmpty() ||
+            rows.any { it.rePair != null || it.successorRecordID != null }
+        val candidate = EnrollmentSnapshot(state.revision + 1u, rows, reservations, usesRePairSchema)
         val plaintext = encode(candidate, limits)
         val encrypted = try { cipher.encrypt(plaintext) } finally { plaintext.fill(0) }
         try { storage.replace(encrypted) }
@@ -277,7 +288,7 @@ class EncryptedEnrollmentStore private constructor(
                     val reservations = if (schema != 3uL) emptyList() else
                         (fields.getValue(3u) as CborValue.ArrayValue).values.map(EnrollmentEncoding::decodeReservation)
                     validate(rows, reservations, maximumRecords)
-                    EnrollmentSnapshot(revision, rows, reservations)
+                    EnrollmentSnapshot(revision, rows, reservations, schema == 3uL)
                 } finally { plaintext.fill(0) }
                 return EncryptedEnrollmentStore(storage, cipher, maximumRecords, restored)
             } catch (_: Exception) { throw EnrollmentStoreUnavailable() }
@@ -292,7 +303,7 @@ class EncryptedEnrollmentStore private constructor(
             return CborLimits(cipher.maximumPlaintextBytes, 8, records * 100 + 16)
         }
         private fun encode(state: EnrollmentSnapshot, limits: CborLimits): ByteArray {
-            val extended = state.rePairReservations.isNotEmpty() || state.entries.any { it.rePair != null || it.successorRecordID != null }
+            val extended = state.usesRePairSchema
             val schema = if (extended) 3uL else 2uL
             val fields = mutableMapOf<ULong, CborValue>(
                 0uL to CborValue.Unsigned(schema), 1uL to CborValue.Unsigned(state.revision),
