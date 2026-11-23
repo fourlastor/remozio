@@ -120,8 +120,8 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func identity() throws -> GatewayRegistrationIdentity {
             try .init(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5), rootPublicKey: key.publicKey.x963Representation)
         }
-        func enrollment(active: Bool = true, phone: UInt8 = 6) throws -> GatewayPhoneEnrollment {
-            try .init(phoneID: id(phone), epoch: id(7), tag: id(phone, 32), active: active)
+        func enrollment(active: Bool = true, phone: UInt8 = 6, epoch: UInt8 = 7) throws -> GatewayPhoneEnrollment {
+            try .init(phoneID: id(phone), epoch: id(epoch), tag: id(phone, 32), active: active)
         }
         func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil, validateAuthority: @escaping @Sendable () throws -> Void = {}, beforeSend: @escaping @Sendable () throws -> Void = {}) throws -> GatewayDeliveryCoordinator {
             let clock = clock, refreshes = refreshes
@@ -172,20 +172,22 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             _ = try await coordinator.applyRecipient(canonicalPayload: payload, signature: key.signature(for: input).rawRepresentation,
                 wireVersion: 1, kind: .phoneRevocation, phoneID: id(phone))
         }
-        func admit(_ coordinator: GatewayDeliveryCoordinator, n: UInt8 = 1, expires: UInt64 = 11_000, phone: UInt8 = 6, token: String = "synthetic") async throws {
+        func admit(_ coordinator: GatewayDeliveryCoordinator, n: UInt8 = 1, expires: UInt64 = 11_000, phone: UInt8 = 6,
+                   token: String = "synthetic", phoneEpoch: UInt8 = 7) async throws {
             let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
             let candidate = try GatewayTokenCandidate(binding: GatewayTokenBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4),
-                lifecycleEpoch: id(5), phoneID: id(phone), enrollmentEpoch: id(7), candidateID: id(n), tokenDigest: Data(SHA256.hash(data: Data(token.utf8))),
+                lifecycleEpoch: id(5), phoneID: id(phone), enrollmentEpoch: id(phoneEpoch), candidateID: id(n), tokenDigest: Data(SHA256.hash(data: Data(token.utf8))),
                 challenge: id(n, 32), enrollmentTag: id(phone, 32)), revision: UInt64(n), operationID: id(n), issuedAtUnixMillis: 1000, expiresAtUnixMillis: expires)
             let payload = try candidate.encode(limits: limits)
             let input = try GatewayTokenCandidateSigningInput.make(wireVersion: 1, canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
             _ = try await coordinator.admitCandidate(canonicalPayload: payload, signature: key.signature(for: input).rawRepresentation,
                 wireVersion: 1, registrationToken: token, phoneID: id(phone))
         }
-        func activate(_ coordinator: GatewayDeliveryCoordinator, n: UInt8 = 1, phone: UInt8 = 6, token: String = "synthetic") async throws {
+        func activate(_ coordinator: GatewayDeliveryCoordinator, n: UInt8 = 1, phone: UInt8 = 6,
+                      token: String = "synthetic", phoneEpoch: UInt8 = 7) async throws {
             let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
             let binding = try GatewayTokenBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4),
-                lifecycleEpoch: id(5), phoneID: id(phone), enrollmentEpoch: id(7), candidateID: id(n),
+                lifecycleEpoch: id(5), phoneID: id(phone), enrollmentEpoch: id(phoneEpoch), candidateID: id(n),
                 tokenDigest: Data(SHA256.hash(data: Data(token.utf8))), challenge: id(n, 32), enrollmentTag: id(phone, 32))
             let value = try GatewayMappingActivation(binding: binding, revision: UInt64(n) + 1, operationID: id(n + 100),
                 issuedAtUnixMillis: 1000, expiresAtUnixMillis: 11_000)
@@ -907,6 +909,169 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             }
         }
         func close() { endpoint.close() }
+    }
+
+    private func signedDelayedRevocation(_ fixture: Fixture, revision: UInt64) throws -> GatewayAuthorityEnvelope {
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 8, maxItems: 128)
+        let binding = try GatewayPhoneEpochBinding(ownerID: id(1), macID: id(2), accountID: id(3),
+            gatewayID: id(4), lifecycleEpoch: id(5), phoneID: id(6), enrollmentEpoch: id(7))
+        let control = try GatewayPhoneRevocation(binding: binding, revision: revision, operationID: id(90),
+            issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
+        let payload = try control.encode(limits: limits)
+        let input = try GatewayRecipientSigningInput.make(wireVersion: 1, kind: .phoneRevocation,
+            canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
+        return GatewayAuthorityEnvelope(kind: 3, operationID: control.operationID, revision: revision,
+            canonicalPayload: payload, signature: try fixture.key.signature(for: input).rawRepresentation, registrationToken: nil)
+    }
+
+    func testGatewayRootChannelRecoversExpiredPhoneRevocationAndKeepsNextRegistrationInOrder() async throws {
+        let f = try Fixture(), provider = Provider([]), clock = f.clock, key = P256.Signing.PrivateKey()
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try f.coordinator(provider, wakePolicy: wakePolicy(), validateAuthority: { try lease.validate() })
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 8, maxItems: 128)
+        let receipts = try GatewayReceiptSigner(bytes: DeterministicCBOR.encode(.map([0: .unsigned(1),
+            1: .text("remozio-gateway-receipt-key"), 2: .bytes(key.x963Representation)]), limits: limits),
+            expectedPublicKey: key.publicKey.x963Representation)
+        let dispatcher = GatewayRootDispatcher(coordinator: coordinator, lease: lease, receipts: receipts, retryInterval: 10)
+        let endpoint = try GatewayXPCEndpoint(verify: {}, budget: AuthorityXPCWorkBudget(), invalidate: { lease.retire() },
+            synchronize: { try await dispatcher.synchronize($0) }, execute: { try await dispatcher.execute($0) })
+        let channel = GatewayRootChannel(driver: RootEndpointDriver(endpoint))
+        let registration = try f.identity(), rootEpoch = UUID()
+        try await channel.start()
+        try await channel.synchronize(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch, sequence: 1,
+            observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 1100, enrollments: [f.enrollment(), f.enrollment(phone: 8)],
+            active: true, phoneRouting: true))
+        try await f.admit(coordinator)
+        try await f.activate(coordinator)
+        let original = try signedDelayedRevocation(f, revision: 3)
+        clock.advance(1001)
+        let time = clock.sample().moment
+        try await channel.synchronize(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch, sequence: 2,
+            observedAtMilliseconds: time.milliseconds, leaseDeadlineMilliseconds: time.milliseconds + 1000,
+            enrollments: [f.enrollment(active: false), f.enrollment(phone: 8)], active: true, phoneRouting: true))
+        let supported = try await channel.supportsPhoneRevocationRecovery(registration: registration)
+        XCTAssertTrue(supported)
+        let first = try await channel.recoverPhoneRevocation(original, registration: registration, expectedHead: 2)
+        XCTAssertTrue(first.inserted)
+        XCTAssertEqual(first.receipt.canonicalPayload, original.canonicalPayload)
+        XCTAssertEqual(first.receipt.signature, original.signature)
+        try await f.admit(coordinator, n: 4, phone: 8)
+        try await f.activate(coordinator, n: 4, phone: 8)
+        let retry = try await channel.recoverPhoneRevocation(original, registration: registration, expectedHead: 2)
+        XCTAssertFalse(retry.inserted)
+        XCTAssertEqual(retry.receipt.signature, original.signature)
+        let owner = try GatewayHeadQueryOwner(registration: registration, gatewayPublicKey: key.publicKey.x963Representation,
+            clockEpoch: clock.epoch)
+        let signedHead = try await channel.head(query: owner.makeQuery(now: time))
+        XCTAssertEqual(try owner.accept(signedHead, now: time).evidence.revision, 5)
+        let signedPage = try await channel.history(query: owner.makeHistoryQuery(afterRevision: 2, throughRevision: 3, now: time))
+        let page = try owner.acceptHistory(signedPage, now: time).page
+        XCTAssertEqual(page.records.count, 1)
+        XCTAssertEqual(page.records.first?.canonicalPayload, original.canonicalPayload)
+        XCTAssertEqual(page.records.first?.signature, original.signature)
+        await channel.close()
+        try await coordinator.shutdown()
+    }
+
+    func testRecoveryRejectsUnsynchronizedOrExpiredLeaseAndActiveSignedEpoch() async throws {
+        let f = try Fixture(), provider = Provider([]), clock = f.clock
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try f.coordinator(provider, validateAuthority: { try lease.validate() })
+        let original = try signedDelayedRevocation(f, revision: 1)
+        do {
+            _ = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+                signature: original.signature, phoneID: id(6), expectedHead: 0, lease: lease)
+            XCTFail("Recovery before sync")
+        } catch { XCTAssertEqual(error as? GatewayServiceError, .unavailable) }
+        let registration = try f.identity(), rootEpoch = UUID()
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 1, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200,
+            enrollments: [f.enrollment()], active: true, phoneRouting: true), lease: lease)
+        do {
+            _ = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+                signature: original.signature, phoneID: id(6), expectedHead: 0, lease: lease)
+            XCTFail("Recovery while the signed epoch is active")
+        } catch { XCTAssertEqual(error as? GatewayDatabaseError, .wrongScope) }
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 2, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200,
+            enrollments: [], active: true, phoneRouting: true), lease: lease)
+        clock.advance(100)
+        do {
+            _ = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+                signature: original.signature, phoneID: id(6), expectedHead: 0, lease: lease)
+            XCTFail("Recovery after lease expiry")
+        } catch { XCTAssertEqual(error as? GatewayServiceError, .unavailable) }
+        let key = P256.Signing.PrivateKey(), time = clock.sample().moment
+        let owner = try GatewayHeadQueryOwner(registration: registration, gatewayPublicKey: key.publicKey.x963Representation,
+            clockEpoch: clock.epoch)
+        let head = try await coordinator.recoveryHeadReply(canonicalQuery: owner.makeQuery(now: time)) {
+            try key.signature(for: $0).rawRepresentation
+        }
+        XCTAssertEqual(try owner.accept(head, now: time).evidence.revision, 0)
+        try await coordinator.shutdown()
+    }
+
+    func testDelayedRecoveryOfOmittedPhoneRequiresFreshCompleteSnapshot() async throws {
+        let f = try Fixture(), clock = f.clock
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try f.coordinator(Provider([]), validateAuthority: { try lease.validate() })
+        let registration = try f.identity(), rootEpoch = UUID()
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 1, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200,
+            enrollments: [f.enrollment()], active: true, phoneRouting: true), lease: lease)
+        try await f.admit(coordinator)
+        try await f.activate(coordinator)
+        let original = try signedDelayedRevocation(f, revision: 3)
+        clock.advance(1001)
+        let time = clock.sample().moment
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 2, observedAtMilliseconds: time.milliseconds, leaseDeadlineMilliseconds: time.milliseconds + 100,
+            enrollments: [], active: true, phoneRouting: true), lease: lease)
+        let receipt = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+            signature: original.signature, phoneID: id(6), expectedHead: 2, lease: lease)
+        XCTAssertTrue(receipt.inserted)
+        XCTAssertEqual(receipt.receipt.enrollmentEpoch, id(7))
+        XCTAssertEqual(receipt.receipt.signature, original.signature)
+        try await coordinator.shutdown()
+    }
+
+    func testDelayedRecoveryAfterRepairAllowsNewEpochMappingOnSamePhone() async throws {
+        let f = try Fixture(), clock = f.clock
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try f.coordinator(Provider([]), validateAuthority: { try lease.validate() })
+        let registration = try f.identity(), rootEpoch = UUID()
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 1, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200,
+            enrollments: [f.enrollment()], active: true, phoneRouting: true), lease: lease)
+        try await f.admit(coordinator)
+        try await f.activate(coordinator)
+        let original = try signedDelayedRevocation(f, revision: 3)
+        clock.advance(1001)
+        let time = clock.sample().moment
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 2, observedAtMilliseconds: time.milliseconds, leaseDeadlineMilliseconds: time.milliseconds + 100,
+            enrollments: [f.enrollment(epoch: 8)], active: true, phoneRouting: true), lease: lease)
+        let receipt = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+            signature: original.signature, phoneID: id(6), expectedHead: 2, lease: lease)
+        XCTAssertTrue(receipt.inserted)
+        XCTAssertEqual(receipt.receipt.enrollmentEpoch, id(7))
+        try await f.admit(coordinator, n: 4, phoneEpoch: 8)
+        try await f.activate(coordinator, n: 4, phoneEpoch: 8)
+        let retry = try await coordinator.recoverPhoneRevocation(canonicalPayload: original.canonicalPayload,
+            signature: original.signature, phoneID: id(6), expectedHead: 2, lease: lease)
+        XCTAssertFalse(retry.inserted)
+        let pinned = P256.Signing.PrivateKey()
+        let owner = try GatewayHeadQueryOwner(registration: registration, gatewayPublicKey: pinned.publicKey.x963Representation,
+            clockEpoch: clock.epoch)
+        let reply = try await coordinator.recoveryHeadReply(canonicalQuery: owner.makeQuery(now: time)) {
+            try pinned.signature(for: $0).rawRepresentation
+        }
+        let head = try owner.accept(reply, now: time).evidence
+        XCTAssertEqual(head.revision, 5)
+        guard case .recipient(let activation) = head.receipt else { return XCTFail("Expected a new activation receipt") }
+        XCTAssertEqual(activation.kind, .activation)
+        XCTAssertEqual(activation.enrollmentEpoch, id(8))
+        try await coordinator.shutdown()
     }
 
     func testRetainedRootPublicationThroughHintRuntimeStartsActualGatewayAndWithdrawsForgottenRequest() async throws {

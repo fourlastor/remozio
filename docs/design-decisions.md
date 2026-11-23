@@ -22,6 +22,12 @@ The following protections remain required:
 
 The [journal experiment](experiments/macos-authority-journal.md) still demonstrates a real limitation: a matching old database and checkpoint are indistinguishable locally. The accepted boundary does not turn that observation into successful rollback detection. It also does not authorize an unprivileged caller to restore arbitrary files.
 
+## Delayed gateway phone revocation
+
+A signed phone revocation can only remove privileges for the enrollment epoch in the control. The gateway can recover that original control after its delivery deadline. It checks the same registration, the unchanged Root signature and a fresh lease on the authenticated Root connection. The authenticated Root connection supplies a complete snapshot for the current lease. Recovery refuses an epoch that the snapshot lists as active. The snapshot can omit a revoked phone or list a replacement epoch. Recovery requires a current snapshot in both cases.
+
+The receiver applies the next revision in one transaction. An exact retry returns its retained receipt. Candidate, activation and submission controls keep their existing expiry rules. Recovering a revocation does not renew a token or affect a replacement enrollment.
+
 ## Command execution by pathname
 
 Execute the captured command by pathname after a final executable identity/content and working-directory recheck. Preserve the captured argv, deterministic environment, caller lifetime and input-source contract. Do not add an implicit shell.

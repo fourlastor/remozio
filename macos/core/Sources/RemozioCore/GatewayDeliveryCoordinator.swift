@@ -209,18 +209,46 @@ public actor GatewayDeliveryCoordinator {
         let time = try current()
         let result = try database.applyRecipient(canonicalPayload: canonicalPayload, signature: signature, wireVersion: wireVersion,
             kind: kind, trust: trust(phoneID), nowUnixMillis: time.wall, now: time.moment)
-        if result.inserted && kind == .phoneRevocation {
+        finishRecipientApplication(result)
+        return result
+    }
+
+    func phoneRevocationRecoveryRegistration(lease: GatewayAuthorityLease) throws -> GatewayRegistrationIdentity {
+        try running()
+        return try lease.withCurrentLease {
+            _ = try current()
+            return identity
+        }
+    }
+
+    func recoverPhoneRevocation(canonicalPayload: Data, signature: Data, phoneID: Data, expectedHead: UInt64,
+                                lease: GatewayAuthorityLease) throws -> GatewayRecipientApplication {
+        try running()
+        let result = try lease.withCurrentLease {
+            let time = try current()
+            guard active else { throw GatewayDatabaseError.wrongScope }
+            // The synchronized Root snapshot is complete for this live lease. A missing phone or a newer epoch
+            // leaves no current authorization for the exact epoch in the original signed revocation.
+            return try database.recoverPhoneRevocation(canonicalPayload: canonicalPayload, signature: signature,
+                registration: identity, phoneID: phoneID, enrollment: enrollments[phoneID], expectedHead: expectedHead,
+                nowUnixMillis: time.wall, now: time.moment)
+        }
+        finishRecipientApplication(result)
+        return result
+    }
+
+    private func finishRecipientApplication(_ result: GatewayRecipientApplication) {
+        if result.inserted && result.receipt.kind == .phoneRevocation {
             for flight in flights.values where flight.phone == result.receipt.phoneID && flight.enrollmentEpoch == result.receipt.enrollmentEpoch {
                 flight.task.cancel()
             }
             for (id, entry) in wakes where entry.delivery.recipient.phoneID == result.receipt.phoneID &&
                 entry.delivery.recipient.enrollmentEpoch == result.receipt.enrollmentEpoch { withdrawWake(id) }
         }
-        if result.inserted && kind == .activation {
+        if result.inserted && result.receipt.kind == .activation {
             schedulingRetryAt.removeValue(forKey: WakeScope(phone: result.receipt.phoneID, epoch: result.receipt.enrollmentEpoch))
         }
         pumpWakeScheduling()
-        return result
     }
 
     /// Registered root callers only; the service host must authenticate the channel before calling.

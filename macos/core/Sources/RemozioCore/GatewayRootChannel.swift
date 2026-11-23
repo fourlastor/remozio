@@ -58,6 +58,8 @@ public actor GatewayRootChannel {
     private let lifetime = GatewayRootLifetime()
     private var state = State.new
     private var peerVersion: UInt64?
+    private var synchronizedRegistration: GatewayRegistrationIdentity?
+    private var revocationRecoveryRegistration: GatewayRegistrationIdentity?
     private var pending: (id: UUID, continuation: CheckedContinuation<GatewayRootResponse, any Error>)?
     private var timer: Task<Void, Never>?
     public init(serviceName: String, gatewayPolicy: XPCPeerPolicy, timeoutMilliseconds: UInt64 = 5000) throws {
@@ -95,8 +97,36 @@ public actor GatewayRootChannel {
         guard case .synchronized(let accepted) = try await perform(.synchronize(snapshot.canonicalBytes)) else {
             close(); throw GatewayRootChannelError.invalidMessage
         }
-        guard accepted else { throw GatewayRootChannelError.rejected }
+        guard accepted else {
+            synchronizedRegistration = nil
+            revocationRecoveryRegistration = nil
+            throw GatewayRootChannelError.rejected
+        }
+        synchronizedRegistration = snapshot.registration
+        if revocationRecoveryRegistration != snapshot.registration { revocationRecoveryRegistration = nil }
     }
+
+    /// The authenticated peer proves the capability for its currently synchronized registration.
+    func supportsPhoneRevocationRecovery(registration: GatewayRegistrationIdentity) async throws -> Bool {
+        guard synchronizedRegistration == registration else { throw GatewayRootChannelError.invalidMessage }
+        revocationRecoveryRegistration = nil
+        let fields: [CBORValue]
+        do { fields = try await command(.head(GatewayRootCommand.phoneRevocationRecoveryProbe)) }
+        catch GatewayRootChannelError.rejected { return false }
+        guard state == .open, synchronizedRegistration == registration, fields.count == 3,
+              fields[1] == .unsigned(1), case .bytes(let encoded) = fields[2],
+              (try? GatewayRegistrationIdentity.decode(encoded)) == registration else {
+            close(); throw GatewayRootChannelError.invalidMessage
+        }
+        revocationRecoveryRegistration = registration
+        return true
+    }
+
+    func requirePhoneRevocationRecovery(registration: GatewayRegistrationIdentity) throws {
+        guard state == .open, revocationRecoveryRegistration == registration,
+              synchronizedRegistration == registration else { throw GatewayRootChannelError.unsupportedVersion }
+    }
+
     /// Registration creates no provider work. Only a separately authenticated transport wake can start it.
     public func registerWake(_ delivery: PhoneRequestDelivery) async throws {
         try await requireAcceptance(.registerWake(delivery))
