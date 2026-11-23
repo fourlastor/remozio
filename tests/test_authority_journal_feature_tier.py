@@ -25,9 +25,9 @@ VERSION_SQL = re.compile(
     rf"""\b(PRAGMA\s+(?:{SQL_SCHEMA}\s*\.\s*)?['"`\[]?user_version\b|pragma_user_version\b)""",
     re.IGNORECASE,
 )
-LEGACY_TIER_API = re.compile(r"\b(storageSchemaVersion|submissionSchemaVersion)\b")
+LEGACY_TIER_API = re.compile(r"\b(?:storageSchemaVersion\b|submissionSchemaVersion\s*(?=\())")
 PHYSICAL_ACCESSOR = re.compile(r"\bstorageFormatVersion\b")
-PHYSICAL_READER = re.compile(r"\bformatVersion\b")
+PHYSICAL_READER = re.compile(r"\b(?:AuthorityJournalSchema\s*\.\s*formatVersion\b|formatVersion\s*\(\s*on\s*:)")
 COMPATIBILITY_ACCESSOR = "public var storageSchemaVersion: UInt64 { get throws { try storageFormatVersion } }"
 PHYSICAL_ACCESSOR_IMPLEMENTATION = (
     COMPATIBILITY_ACCESSOR,
@@ -104,5 +104,7 @@ class AuthorityJournalFeatureTierGuardTest(unittest.TestCase):
                 self.assertTrue(bypasses_resolver(filename, 'try exec("PRAGMA main.user_version=18")'))
         self.assertFalse(bypasses_resolver("JournalDatabase.swift", COMPATIBILITY_ACCESSOR))
         self.assertTrue(bypasses_resolver("JournalDatabase.swift", "try tx.storageFormatVersion >= 16"))
+        self.assertFalse(bypasses_resolver("CommandAdmissionResult.swift", "let version = submissionSchemaVersion"))
+        self.assertFalse(bypasses_resolver("AuthorityCodePolicy.swift", "let version = Self.formatVersion"))
         self.assertFalse(bypasses_resolver("AuthorityJournalCutoverInspection.swift",
             "guard try transaction.storageFormatVersion == snapshot.schemaVersion else { return }"))
