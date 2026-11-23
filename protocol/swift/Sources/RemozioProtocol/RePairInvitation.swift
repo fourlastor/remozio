@@ -39,7 +39,8 @@ public struct RePairInvitation: Sendable, CustomStringConvertible {
         guard scope[0] == .bytes(invitation.macID), scope[1] == .bytes(invitation.accountID) else {
             throw PairingInvitationError.invalidInvitation
         }
-        let result = try Self(invitation: invitation, predecessor: PairingReplacement(phoneID: phoneID, epoch: epoch))
+        let predecessor = try PairingReplacement(phoneID: phoneID, epoch: epoch)
+        let result = Self(invitation: invitation, predecessor: predecessor)
         guard try result.encode() == bytes else { throw PairingInvitationError.invalidInvitation }
         return result
     }

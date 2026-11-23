@@ -364,6 +364,7 @@ struct PairedPhonesSheet: View {
     @State private var showingConfirmation = false
     @State private var busy = false
     @State private var notice: String?
+    @State private var refreshError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -418,6 +419,7 @@ struct PairedPhonesSheet: View {
             }
             if busy { ProgressView().controlSize(.small).accessibilityLabel("Checking paired phones") }
             if let notice { Text(notice).fixedSize(horizontal: false, vertical: true) }
+            if let refreshError { Text(refreshError).fixedSize(horizontal: false, vertical: true) }
             HStack {
                 if let unconfirmed {
                     Button("Check revocation status") { run { await reconcile(unconfirmed) } }
@@ -478,14 +480,15 @@ struct PairedPhonesSheet: View {
     private func refresh() async {
         do {
             let active = try await connect()
-            do { snapshot = try await active.pairedPhonesForRePair() }
-            catch {
-                let legacy = try await connect()
-                snapshot = try await legacy.pairedPhones()
-            }
+            snapshot = try await active.pairedPhonesForRePair()
+            refreshError = nil
+        } catch is CancellationError {
+            return
         } catch {
             snapshot = nil
-            if notice == nil { announce(String(localized: "Paired phones are unavailable.")) }
+            let message = String(localized: "Paired phones are unavailable.")
+            refreshError = message
+            AccessibilityNotification.Announcement(message).post()
         }
     }
 
