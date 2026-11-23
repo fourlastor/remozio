@@ -59,6 +59,13 @@ final class AuthorityMaintenanceIncarnationProbeTests: XCTestCase, @unchecked Se
             let q = try Probe(accountID: account, challenge: Data(repeating: challenge, count: 16))
             return try raw(q.encoded).map { try .decode($0, expected: q) }
         }
+        func waitForProbeCleanup(file: StaticString = #filePath, line: UInt = #line) {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while endpoint.pendingOperations() != 0, ContinuousClock.now < deadline {
+                usleep(1000)
+            }
+            XCTAssertEqual(endpoint.pendingOperations(), 0, "The probe task did not finish after replying", file: file, line: line)
+        }
         func requireUntouched(file: StaticString = #filePath, line: UInt = #line) throws {
             XCTAssertEqual(checks.withLock { $0 }, 0, file: file, line: line); XCTAssertEqual(captures.withLock { $0 }, 0, file: file, line: line)
             XCTAssertEqual(acquisitions.withLock { $0 }, 0, file: file, line: line); XCTAssertEqual(handshakes.withLock { $0 }, 0, file: file, line: line)
@@ -78,7 +85,8 @@ final class AuthorityMaintenanceIncarnationProbeTests: XCTestCase, @unchecked Se
         let connection = try f.admission.openConnection(attemptID: data(2), revision: data(3))
         XCTAssertEqual(connection.binding.incarnation, first.incarnation); connection.close()
         XCTAssertEqual(try f.admission.refusalBinding(accountID: Self.account, attemptID: data(2), revision: data(3)).incarnation, first.incarnation)
-        XCTAssertEqual(f.endpoint.pendingOperations(), 0); XCTAssertTrue(f.budget.acquire()); f.budget.release()
+        f.waitForProbeCleanup()
+        XCTAssertTrue(f.budget.acquire()); f.budget.release()
         XCTAssertEqual(f.invalidations.withLock { $0 }, 0)
     }
     func testProbeBeforeHelloClosesWithoutReadingAnything() throws {
@@ -92,7 +100,8 @@ final class AuthorityMaintenanceIncarnationProbeTests: XCTestCase, @unchecked Se
         XCTAssertNil(try f.probe(account: data(2)))
         XCTAssertEqual(f.invalidations.withLock { $0 }, 1); try f.requireUntouched()
         XCTAssertNil(try f.raw(Probe(accountID: Self.account, challenge: data(6)).encoded))
-        XCTAssertEqual(f.endpoint.pendingOperations(), 0); XCTAssertTrue(f.budget.acquire()); f.budget.release()
+        f.waitForProbeCleanup()
+        XCTAssertTrue(f.budget.acquire()); f.budget.release()
     }
     func testOffStackInvocationIsRejectedBeforeDecoding() throws {
         let admission = try AuthorityMaintenancePairingAdmission(accountID: Self.account, incarnation: Self.epoch)
