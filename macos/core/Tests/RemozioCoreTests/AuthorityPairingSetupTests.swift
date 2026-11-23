@@ -382,6 +382,27 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let status = try await channel.revokePhone(selection, authorization: authorization)
         XCTAssertEqual(status, .gatewayPending)
 
+        let afterRevocation = try await channel.pairedPhonesForRePair()
+        XCTAssertTrue(afterRevocation.phones.isEmpty)
+        XCTAssertEqual(afterRevocation.rePairablePhones, [selection.phone])
+        let eligible = try XCTUnwrap(afterRevocation.rePairSelection(for: selection.phone))
+        let accepted = try await channel.canRePair(eligible)
+        let stale = try await channel.canRePair(selection)
+        XCTAssertTrue(accepted)
+        XCTAssertFalse(stale)
+        let missing = PairedPhoneSelection(macID: eligible.macID, accountID: eligible.accountID, revision: eligible.revision,
+            phone: DeliveryRecipient(phoneID: predecessor.phoneID, enrollmentEpoch: Data(repeating: 99, count: 16)))
+        let acceptedMissing = try await channel.canRePair(missing)
+        XCTAssertFalse(acceptedMissing)
+        let restricted = try f.journal.read {
+            try PairingEnrollmentAttempt.revokedPredecessors($0.approvalEnrollments(), restrictions: [predecessor.phoneID])
+        }
+        XCTAssertTrue(restricted.isEmpty)
+        let crossed = PairedPhoneSelection(macID: Data(repeating: 99, count: 16), accountID: eligible.accountID,
+            revision: eligible.revision, phone: eligible.phone)
+        do { _ = try await channel.canRePair(crossed); XCTFail("Accepted a foreign Mac") }
+        catch { XCTAssertEqual(error as? AuthorityPairingChannelError, .wrongAccount) }
+
         let staged = try await channel.stage(proposal, authorization: authorization)
         try proposal.validate(staged)
         let proof = try biometric.signature(for: staged.signingInput(purpose: .phoneBiometric)).rawRepresentation
@@ -393,6 +414,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(old.approval.active)
         XCTAssertEqual(old.gatewayRevocation?.progress, .pending)
         XCTAssertEqual(retained.first { $0.approval.active }?.epoch, staged.phone.scope.enrollmentEpoch)
+        let afterCommit = try await channel.pairedPhonesForRePair()
+        XCTAssertTrue(afterCommit.rePairablePhones.isEmpty)
         let trust = try f.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024) }
         let peer = try XCTUnwrap(trust.peers.first)
         let recovered = try f.journal.withRequests { requests in

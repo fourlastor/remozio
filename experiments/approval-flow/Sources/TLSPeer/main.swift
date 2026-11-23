@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback fixtures only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -143,7 +143,9 @@ if setup.pairing == true {
     let invitation = try PairingInvitation(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
         label: "Synthetic pairing fixture", authorityPublicKey: authority.publicKey.x963Representation,
         transportPublicKey: transport, minimumEnvelopeVersion: 1)
-    let invitationText = try invitation.exportText()
+    let rePair = try setup.rePair == true ? RePairInvitation(invitation: invitation,
+        predecessor: PairingReplacement(phoneID: Data(repeating: 3, count: 16), epoch: Data(repeating: 10, count: 16))) : nil
+    let invitationText = try rePair?.exportText() ?? invitation.exportText()
     let pairing = try PairingSetupListener(identity: identity, invitation: invitation, binding: .loopback,
         maximumConnections: setup.maximumConnections ?? 2, handshakeTimeoutMilliseconds: 4000,
         setupTimeoutMilliseconds: 10000, event: { event in
@@ -156,6 +158,7 @@ if setup.pairing == true {
             }
         }, handler: { channel in
             let proposal = try await channel.proposal()
+            guard rePair?.matches(proposal) ?? (proposal.replacement == nil) else { throw ProbeError.invalidInput }
             if setup.holdPairingStage == true {
                 while !(await channel.isClosed) { try await Task.sleep(for: .milliseconds(10)) }
                 return

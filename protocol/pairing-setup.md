@@ -76,6 +76,17 @@ Each row contains a 16-byte key ID and a valid 65-byte P-256 point, in transport
 All three IDs and points must differ. Proposal limits are 66,000 bytes, depth 3, and 24 items.
 The proposal must use the phone role. The setup channel checks the invitation scope and exact returned phone claims.
 Version 1 adds an enrollment and retains its original encoding. It requires a phone ID that has no retained enrollment.
+A Mac can export a re-pair invitation for an eligible retained predecessor. The `remozio-repair:v1:` text
+contains unpadded base64url for deterministic CBOR `[1, invitationBytes, [macID, accountID, phoneID, epoch]]`.
+The CBOR is at most 640 bytes. Each ID and the epoch are 16 bytes. The Mac and account must match the
+embedded canonical ordinary invitation. The envelope carries the selection and existing pins. The setup
+exchange authenticates the Mac and authorizes the exact transcript after comparison and biometric proof.
+
+The Mac binds the listener to its own retained selection. It admits only a proposal for that predecessor
+and a different epoch of the same phone. An ordinary invitation admits only the ordinary proposal.
+A replacement export waits for the prior listener and candidates to drain. A submitted commit settles
+before the app releases the old generation. The signed receipt stays available after the listener closes.
+
 The re-pair proposal uses version 2 and adds field 4, an array containing the predecessor phone ID and epoch.
 Both are 16-byte strings. The phone offer must retain that phone ID and specify a different epoch.
 Reject version 2 without field 4, version 1 with field 4, and any mismatch between the proposal and the returned transcript.

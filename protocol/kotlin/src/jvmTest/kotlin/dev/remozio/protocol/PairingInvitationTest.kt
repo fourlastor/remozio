@@ -27,6 +27,30 @@ class PairingInvitationTest {
             assertEquals("PairingInvitation(redacted)", invitation.toString())
         }
     }
+    @Test fun sharedRePairInvitationWrapsTheExactOrdinaryBytes() {
+        for (value in vectors().getValue("rePairValid").jsonArray) {
+            val row = value.jsonObject
+            val text = row.getValue("text").jsonPrimitive.content
+            val rePair = RePairInvitation.importText(text)
+            assertContentEquals(bytes(row), rePair.encode())
+            assertContentEquals(hex(row.getValue("ordinaryHex").jsonPrimitive.content), rePair.invitation.encode())
+            assertEquals(text, RePairInvitation.decode(bytes(row)).exportText())
+            assertContentEquals(ByteArray(16) { 3 }, rePair.predecessor.phoneID.copyBytes())
+            assertContentEquals(ByteArray(16) { 10 }, rePair.predecessor.epoch.copyBytes())
+            assertFails { PairingInvitation.importText(text) }
+        }
+    }
+    @Test fun rePairInvitationRefusesMalformedAndOversizedInputs() {
+        for (value in vectors().getValue("rePairInvalid").jsonArray) {
+            val row = value.jsonObject
+            assertFails(row.getValue("name").jsonPrimitive.content) { RePairInvitation.decode(bytes(row)) }
+        }
+        val text = vectors().getValue("rePairValid").jsonArray.first().jsonObject.getValue("text").jsonPrimitive.content
+        for (bad in listOf(text + "=", text + "\n", text.replace(":v1:", ":v2:"), "remozio-repair:v1:" + "A".repeat(900))) {
+            assertFails { RePairInvitation.importText(bad) }
+        }
+        assertFails { RePairInvitation.decode(ByteArray(641)) }
+    }
     @Test fun malformedAndOversizedInvitationsFail() {
         for (value in vectors().getValue("invalid").jsonArray) {
             val row = value.jsonObject

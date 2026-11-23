@@ -73,6 +73,7 @@ public actor TransportPairingSetupOwner {
     private let verifyAccount: @Sendable () throws -> Void
     private let lifetime = PairingControlLifetime()
     private var invitation: PairingInvitation?
+    private var rePair: RePairInvitation?
     private var ingress: (any TransportPairingIngress)?
     private var port: UInt16?
     private var opening: CheckedContinuation<UInt16, any Error>?
@@ -100,10 +101,18 @@ public actor TransportPairingSetupOwner {
     }
     deinit { openingTimer?.cancel(); lifetime.close() }
     public func begin(_ invitation: PairingInvitation) async throws -> UInt16 {
+        try await begin(invitation, rePair: nil)
+    }
+
+    public func begin(rePair: RePairInvitation) async throws -> UInt16 {
+        try await begin(rePair.invitation, rePair: rePair)
+    }
+
+    private func begin(_ invitation: PairingInvitation, rePair: RePairInvitation?) async throws -> UInt16 {
         try active()
         guard !started, invitation.macID == configuration.macID, invitation.accountID == configuration.accountID,
               invitation.minimumEnvelopeVersion == 1 else { throw TransportPairingControlError.invalidMessage }
-        started = true; self.invitation = invitation
+        started = true; self.invitation = invitation; self.rePair = rePair
         do {
             let listener = try factory(invitation, { [weak self] event in Task { await self?.changed(event) } },
                 { [weak self] peer in guard let self else { peer.abort(); return }; try await self.accept(peer) })
@@ -171,7 +180,7 @@ public actor TransportPairingSetupOwner {
         let tasks = Array(readers.values)
         for task in tasks { task.cancel(); await task.value }
         await listener?.closeAndWait()
-        readers.removeAll(); invitation = nil; port = nil
+        readers.removeAll(); invitation = nil; rePair = nil; port = nil
     }
     private func active() throws {
         try verifyAccount(); try Task.checkCancellation()
@@ -204,6 +213,7 @@ public actor TransportPairingSetupOwner {
             }
             let proposal = try await peer.proposal(); try active()
             guard entries.count < configuration.maximumCandidates,
+                  (rePair?.matches(proposal) ?? (proposal.replacement == nil)),
                   proposal.phone.scope.macID == invitation.macID, proposal.phone.scope.accountID == invitation.accountID else {
                 throw TransportPairingControlError.invalidMessage
             }

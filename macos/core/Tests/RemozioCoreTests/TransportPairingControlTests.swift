@@ -13,23 +13,25 @@ struct TransportPairingFixture {
     let proposal: PairingPhoneProposal
     let transcript: PairingTranscript
     let invitation: PairingInvitation
-    init(timeout: UInt64 = 5000) throws {
+    init(timeout: UInt64 = 5000, rePair: Bool = false) throws {
         configuration = try .init(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             ownerUID: 501, transportUID: 20002, serviceName: "dev.remozio.fixture.pairing", teamID: "ABCDE12345",
             appIdentifier: "dev.sebastiano.remozio.macos", appHashes: [Data(repeating: 1, count: 20)],
             transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: 2, count: 20)], timeoutMilliseconds: timeout)
         let scope = try ChannelScope(macID: configuration.macID, accountID: configuration.accountID,
             phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
+        let replacement = try rePair ? PairingReplacement(phoneID: scope.phoneID, epoch: Data(repeating: 10, count: 16)) : nil
         let phone = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 5, count: 32), envelopeVersions: [1], requests: [], auditVersions: [])
         let mac = try ChannelOffer(role: .mac, scope: scope, nonce: Data(repeating: 6, count: 32), envelopeVersions: [1], requests: [], auditVersions: [])
         proposal = try .init(phone: phone, transportKey: .init(keyID: Data(repeating: 7, count: 16), publicKey: transport.publicKey.x963Representation),
             decisionKey: .init(keyID: Data(repeating: 8, count: 16), publicKey: decision.publicKey.x963Representation),
-            biometricKey: .init(keyID: Data(repeating: 9, count: 16), publicKey: biometric.publicKey.x963Representation))
+            biometricKey: .init(keyID: Data(repeating: 9, count: 16), publicKey: biometric.publicKey.x963Representation),
+            replacement: replacement)
         transcript = try .init(setupID: Data(repeating: 10, count: 16), challenge: Data(repeating: 11, count: 32), phone: phone, mac: mac,
             minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: authority.publicKey.x963Representation,
             macTransportKey: macTransport.publicKey.x963Representation, transportKey: proposal.transportKey,
             decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey, enrollmentTag: Data(repeating: 12, count: 32),
-            replacement: nil, expectedTrustRevision: Data(repeating: 13, count: 16), issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
+            replacement: replacement, expectedTrustRevision: Data(repeating: 13, count: 16), issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
         invitation = try .init(macID: configuration.macID, accountID: configuration.accountID, label: "Fixture",
             authorityPublicKey: authority.publicKey.x963Representation, transportPublicKey: macTransport.publicKey.x963Representation, minimumEnvelopeVersion: 1)
     }
@@ -196,6 +198,37 @@ final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
         let sent = await peer.receipts; XCTAssertEqual(sent, [receipt])
         await owner.closeAndWait(); await client.close()
     }
+    func testRePairListenerRejectsOrdinaryAndForeignPredecessorCandidates() async throws {
+        let f = try TransportPairingFixture(rePair: true)
+        let predecessor = try XCTUnwrap(f.proposal.replacement)
+        let ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)
+        let driver = PairingControlLocalDriver(owner: owner)
+        let client = TransportPairingChannel(configuration: f.configuration, driver: driver)
+        _ = try await client.start(rePair: RePairInvitation(invitation: f.invitation, predecessor: predecessor))
+
+        let ordinary = try PairingPhoneProposal(phone: f.proposal.phone, transportKey: f.proposal.transportKey,
+            decisionKey: f.proposal.decisionKey, biometricKey: f.proposal.biometricKey)
+        let foreign = try PairingPhoneProposal(phone: f.proposal.phone, transportKey: f.proposal.transportKey,
+            decisionKey: f.proposal.decisionKey, biometricKey: f.proposal.biometricKey,
+            replacement: PairingReplacement(phoneID: predecessor.phoneID, epoch: Data(repeating: 11, count: 16)))
+        for proposal in [ordinary, foreign] {
+            let rejected = PairingControlPeerFixture(proposal)
+            ingress.accept(rejected)
+            try await until { await rejected.isClosed }
+        }
+        let empty = try await client.current()
+        XCTAssertTrue(empty.candidates.isEmpty)
+        let peer = PairingControlPeerFixture(f.proposal, proof: try f.proof())
+        ingress.accept(peer)
+        let selected = try await candidate(client)
+        try await client.stage(candidateID: selected.id, transcript: f.transcript)
+        try await until { try await client.current().candidates.first?.phase == .proofReady }
+        let receipt = try f.receipt()
+        try await client.deliverReceipt(candidateID: selected.id, signature: receipt)
+        let sent = await peer.receipts
+        XCTAssertEqual(sent, [receipt])
+        try await client.stop()
+    }
     func testLostReceiptReplyClosesWithoutRepeatingTheSubmission() async throws {
         let f = try TransportPairingFixture(timeout: 100), ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)
         let driver = PairingControlLocalDriver(owner: owner), client = TransportPairingChannel(configuration: f.configuration, driver: driver)
@@ -246,6 +279,35 @@ final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
         try await peer.release(f.proof()); await first.value; await second.value
         XCTAssertEqual(complete.withLock { $0 }, 2)
         do { _ = try await owner.snapshot(); XCTFail() } catch {}
+    }
+    func testRePairStopAcknowledgesOnlyAfterTheOldProofReaderDrains() async throws {
+        let f = try TransportPairingFixture(rePair: true)
+        let predecessor = try XCTUnwrap(f.proposal.replacement)
+        let ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)
+        let driver = PairingControlLocalDriver(owner: owner)
+        let client = TransportPairingChannel(configuration: f.configuration, driver: driver)
+        _ = try await client.start(rePair: RePairInvitation(invitation: f.invitation, predecessor: predecessor))
+        let peer = PairingControlPeerFixture(f.proposal, holdAfterAbort: true)
+        ingress.accept(peer)
+        let selected = try await candidate(client)
+        try await client.stage(candidateID: selected.id, transcript: f.transcript)
+        try await until { await peer.reading }
+        let complete = Mutex(false)
+        let stop = Task { @Sendable in
+            try await client.stop()
+            complete.withLock { $0 = true }
+        }
+        do {
+            try await until { await peer.isClosed }
+            XCTAssertFalse(complete.withLock { $0 })
+        } catch {
+            await peer.release(Data(count: 64))
+            _ = try? await stop.value
+            throw error
+        }
+        await peer.release(Data(count: 64))
+        try await stop.value
+        XCTAssertTrue(complete.withLock { $0 })
     }
     func testPeerExpiryRemovesTheCandidateAndCannotReopenTheOwner() async throws {
         let f = try TransportPairingFixture(), ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)

@@ -296,3 +296,8 @@
 "Setup reported that repair is required. Refresh for the current status." = "Setup reported that repair is required. Refresh for the current status.";
 "Setup reported that Restore did not finish. Refresh for the current status." = "Setup reported that Restore did not finish. Refresh for the current status.";
 "Setup recovery…" = "Setup recovery…";
+"Re-pair phone %@" = "Re-pair phone %@";
+"Open the retained Mac in Remozio on your phone and choose Re-pair." = "Open the retained Mac in Remozio on your phone and choose Re-pair.";
+"Re-pair…" = "Re-pair…";
+"Revoked phones" = "Revoked phones";
+"Enrollment %@" = "Enrollment %@";

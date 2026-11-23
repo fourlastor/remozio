@@ -149,6 +149,20 @@ public actor AuthorityPairingChannel {
             macID: macID, accountID: accountID)
     }
 
+    public func pairedPhonesForRePair() async throws -> PairedPhoneSnapshot {
+        try await requirePhoneManagement()
+        return try PairedPhoneSnapshot.decode(bytes(await perform(.managePhone(.listForRePair, Data(), Data()))),
+            macID: macID, accountID: accountID, includeRePair: true)
+    }
+
+    public func canRePair(_ selection: PairedPhoneSelection) async throws -> Bool {
+        try requireScope(selection)
+        try await requirePhoneManagement()
+        let value = try bytes(await perform(.managePhone(.validateRePair, selection.encode(), Data())))
+        guard value == Data([0]) || value == Data([1]) else { close(); throw AuthorityPairingChannelError.invalidMessage }
+        return value == Data([1])
+    }
+
     public func gatewayRevocationStatus() async throws -> GatewayRevocationStatus {
         try await pairedPhones().gatewayRevocationStatus
     }

@@ -20,7 +20,8 @@ struct PairingPresentation {
     var notice: String?
     init() {}
     init(_ snapshot: MacPairingSessionSnapshot) {
-        phase = snapshot.phase; invitationText = try? snapshot.invitation?.exportText()
+        phase = snapshot.phase
+        invitationText = try? (snapshot.rePairInvitation?.exportText() ?? snapshot.invitation?.exportText())
         phones = snapshot.candidates.filter { $0.phase == .proposed }.map {
             .init(id: $0.id, suffix: $0.proposal.phone.scope.phoneID.suffix(4).map { String(format: "%02X", $0) }.joined())
         }
@@ -39,23 +40,43 @@ final class MacPairingControls {
     @ObservationIgnored private var jobs: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var cleanup: Task<Void, Never>?
     @ObservationIgnored private var polling: Task<MacPairingSessionSnapshot, Error>?
+    @ObservationIgnored private var rePairStart: UUID?
+    @ObservationIgnored private var predecessor: DeliveryRecipient?
+    @ObservationIgnored private var unresolved = Set<DeliveryRecipient>()
     deinit { polling?.cancel(); for job in jobs.values { job.cancel() }; session?.abort() }
 
-    func start() {
+    func startRePair(_ selection: PairedPhoneSelection) async {
+        if session != nil { stop() }
+        let request = UUID()
+        rePairStart = request
+        await cleanup?.value
+        guard !Task.isCancelled, rePairStart == request else { return }
+        rePairStart = nil
+        start(predecessor: selection)
+    }
+
+    func start(predecessor selection: PairedPhoneSelection? = nil) {
         guard session == nil, !closing else { return }
+        if let selection, unresolved.contains(selection.phone) {
+            presentation = PairingPresentation()
+            presentation.phase = .outcomeUnknown
+            return
+        }
+        predecessor = selection?.phone
         presentation = PairingPresentation(); presentation.phase = .connecting
         let id = UUID(); generation = id
         do {
             let base = "/Library/Application Support/Remozio/"
             let root = try AuthorityPresenceClientConfiguration.load(path: base + "presence-client-\(getuid()).cbor")
             let transport = try TransportPairingControlConfiguration.load(path: base + "pairing-client-\(getuid()).cbor")
-            let next = try MacPairingSession(rootConfiguration: root, transportConfiguration: transport)
+            let next = try MacPairingSession(rootConfiguration: root, transportConfiguration: transport,
+                predecessor: selection)
             session = next
             launch { [weak self] in
                 do {
                     let value = try await next.start(label: String(localized: "This Mac"))
                     self?.accept(value, id: id)
-                    while !Task.isCancelled {
+                    while !Task.isCancelled, self?.generation == id {
                         if self?.working == true {
                             try await Task.sleep(for: .milliseconds(500))
                             continue
@@ -72,7 +93,8 @@ final class MacPairingControls {
                         }
                         self?.polling = nil
                         self?.accept(current, id: id)
-                        if current.phase == .waitingForBiometric, current.phoneProofAvailable, self?.working == false {
+                        if current.phase == .waitingForBiometric, current.phoneProofAvailable,
+                           self?.generation == id, self?.working == false {
                             self?.working = true
                             do { self?.accept(try await next.commit(), id: id) }
                             catch { self?.accept(await next.snapshot(), id: id) }
@@ -120,17 +142,27 @@ final class MacPairingControls {
         }
     }
     func stop() {
+        rePairStart = nil
         guard !closing else { return }
-        generation = nil; session?.abort(); closing = true
-        let owned = Array(jobs.values), session = session, refresh = polling
-        refresh?.cancel()
-        for job in owned { job.cancel() }
+        generation = nil; closing = true
+        presentation = PairingPresentation()
+        let owned = Array(jobs.values), session = session, refresh = polling, predecessor = predecessor
+        if predecessor == nil {
+            session?.abort()
+            refresh?.cancel()
+            for job in owned { job.cancel() }
+        }
         cleanup = Task { [weak self] in
-            await session?.close()
+            if let predecessor, let session {
+                if !(await session.closeForRePair()) { self?.unresolved.insert(predecessor) }
+            } else {
+                await session?.close()
+            }
             _ = try? await refresh?.value
             for job in owned { await job.value }
             guard let self else { return }
-            self.session = nil; self.polling = nil; self.jobs.removeAll(); self.working = false; self.closing = false; self.cleanup = nil
+            self.session = nil; self.predecessor = nil; self.polling = nil; self.jobs.removeAll()
+            self.working = false; self.closing = false; self.cleanup = nil
         }
     }
     private func accept(_ snapshot: MacPairingSessionSnapshot, id: UUID) {
@@ -152,15 +184,34 @@ struct PairingSheet: View {
             .onDisappear { controls.stop() }
     }
 }
+struct RePairSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let controls: MacPairingControls
+    let selection: PairedPhoneSelection
+    let identifier: String
+
+    var body: some View {
+        PairingSheetContent(state: controls.presentation, working: controls.working,
+            onSelect: controls.select, onConfirm: controls.confirm, onClose: { controls.stop(); dismiss() },
+            rePairIdentifier: identifier)
+            .task { await controls.startRePair(selection) }
+            .onDisappear { controls.stop() }
+    }
+}
+
 struct PairingSheetContent: View {
     let state: PairingPresentation
     let working: Bool
     let onSelect: (Data) -> Void
     let onConfirm: () -> Void
     let onClose: () -> Void
+    var rePairIdentifier: String? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Pair a phone").font(.title2).accessibilityAddTraits(.isHeader)
+            Group {
+                if let rePairIdentifier { Text("Re-pair phone \(rePairIdentifier)") }
+                else { Text("Pair a phone") }
+            }.font(.title2).accessibilityAddTraits(.isHeader)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     content
@@ -185,7 +236,10 @@ struct PairingSheetContent: View {
         case .idle, .connecting:
             ProgressView("Connecting to this Mac’s services…")
         case .waitingForPhone:
-            Text("Open Remozio on your phone and choose Pair a Mac.").font(.headline)
+            Group {
+                if rePairIdentifier != nil { Text("Open the retained Mac in Remozio on your phone and choose Re-pair.") }
+                else { Text("Open Remozio on your phone and choose Pair a Mac.") }
+            }.font(.headline)
             Text("Keep the phone and Mac on the same network for this setup.").foregroundStyle(.primary)
             if let text = state.invitationText {
                 if let image = qr(text) {
@@ -196,7 +250,15 @@ struct PairingSheetContent: View {
                 Text("Use the copied text if you cannot scan this screen.").font(.callout).foregroundStyle(.primary)
             }
             ForEach(state.phones) { phone in
-                Button { onSelect(phone.id) } label: { HStack { Image(systemName: "iphone"); Text("Pair phone \(phone.suffix)"); Spacer(); Image(systemName: "chevron.right") } }
+                Button { onSelect(phone.id) } label: {
+                    HStack {
+                        Image(systemName: "iphone")
+                        if let rePairIdentifier { Text("Re-pair phone \(rePairIdentifier)") }
+                        else { Text("Pair phone \(phone.suffix)") }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                }
                     .disabled(working)
             }
             if state.phones.isEmpty { Text("Waiting for your phone…").foregroundStyle(.primary) }
@@ -282,7 +344,15 @@ struct PairedPhonesSheet: View {
         let identifier: String
     }
 
+    private struct RePairRequest: Identifiable {
+        let id = UUID()
+        let selection: PairedPhoneSelection
+        let identifier: String
+    }
+
+    let rePairControls: MacPairingControls
     @Environment(\.dismiss) private var dismiss
+    @State private var rePairRequest: RePairRequest?
     @State private var channel: AuthorityPairingChannel?
     @State private var snapshot: PairedPhoneSnapshot?
     @State private var confirmation: Confirmation?
@@ -301,7 +371,7 @@ struct PairedPhonesSheet: View {
                 case .gatewayUnavailable: Text("You can revoke a phone on this Mac. Gateway delivery may be delayed.")
                 }
                 GatewayRevocationWarning(status: snapshot.gatewayRevocationStatus)
-                if snapshot.phones.isEmpty { Text("No phones are paired with this Mac.") }
+                if snapshot.phones.isEmpty && snapshot.rePairablePhones.isEmpty { Text("No phones are paired with this Mac.") }
                 else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
@@ -316,6 +386,24 @@ struct PairedPhonesSheet: View {
                                         showingConfirmation = true
                                     }
                                     .accessibilityLabel(Text("Revoke phone \(id)"))
+                                    .disabled(busy)
+                                }
+                            }
+                            if !snapshot.rePairablePhones.isEmpty { Text("Revoked phones").font(.headline) }
+                            ForEach(snapshot.rePairablePhones, id: \.self) { phone in
+                                let identifier = displayID(phone, among: snapshot.rePairablePhones)
+                                let epoch = phone.enrollmentEpoch.suffix(4).map { String(format: "%02X", $0) }.joined()
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text("Phone \(identifier)")
+                                        Text("Enrollment \(epoch)").font(.caption)
+                                    }
+                                    Spacer()
+                                    Button("Re-pair…") {
+                                        guard let selection = snapshot.rePairSelection(for: phone) else { return }
+                                        rePairRequest = RePairRequest(selection: selection, identifier: identifier)
+                                    }
+                                    .accessibilityLabel(Text("Re-pair phone \(identifier)"))
                                     .disabled(busy)
                                 }
                             }
@@ -346,6 +434,9 @@ struct PairedPhonesSheet: View {
             busy = false
         }
         .onDisappear { channel?.abort() }
+        .sheet(item: $rePairRequest, onDismiss: { run { await refresh() } }) { request in
+            RePairSheet(controls: rePairControls, selection: request.selection, identifier: request.identifier)
+        }
         .alert("Revoke this phone?", isPresented: $showingConfirmation, presenting: confirmation) { item in
             Button("Cancel", role: .cancel) {}
             Button("Revoke", role: .destructive) { run { await revoke(item.selection) } }
@@ -382,7 +473,11 @@ struct PairedPhonesSheet: View {
     private func refresh() async {
         do {
             let active = try await connect()
-            snapshot = try await active.pairedPhones()
+            do { snapshot = try await active.pairedPhonesForRePair() }
+            catch {
+                let legacy = try await connect()
+                snapshot = try await legacy.pairedPhones()
+            }
         } catch {
             snapshot = nil
             if notice == nil { announce(String(localized: "Paired phones are unavailable.")) }

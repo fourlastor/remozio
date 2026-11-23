@@ -60,8 +60,12 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
     }
     func beginSetup(_ invitation: Data, reply: @escaping @Sendable (UInt64) -> Void) {
         launch(failed: { reply(0) }) { owner in
-            guard invitation.count <= 512 else { throw TransportPairingControlError.invalidMessage }
-            let port = try await owner.begin(PairingInvitation.decode(invitation))
+            let port: UInt16
+            if let ordinary = try? PairingInvitation.decode(invitation) {
+                port = try await owner.begin(ordinary)
+            } else {
+                port = try await owner.begin(rePair: RePairInvitation.decode(invitation))
+            }
             return { reply(UInt64(port)) }
         }
     }

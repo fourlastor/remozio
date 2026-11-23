@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Synchronization
 import XCTest
 import RemozioProtocol
 @testable import RemozioCore
@@ -11,6 +12,11 @@ private actor MacPairingRootFixture: MacPairingRootControl {
     var stages = 0
     var commits = 0
     var loseCommitReply = false
+    var allowedToRePair = true
+    var heldCommit: AsyncStream<Void>?
+    func canRePair(_ selection: PairedPhoneSelection) -> Bool { allowedToRePair }
+    func rejectRePair() { allowedToRePair = false }
+    func holdCommit(_ signal: AsyncStream<Void>) { heldCommit = signal }
     init(_ fixture: TransportPairingFixture) { self.fixture = fixture }
     func start() -> AuthorityPairingContext {
         started = true
@@ -22,10 +28,11 @@ private actor MacPairingRootFixture: MacPairingRootControl {
         XCTAssertTrue(started); XCTAssertEqual(authorization.count, MemoryLayout<AuthorizationExternalForm>.size)
         try proposal.validate(fixture.transcript); stages += 1; return fixture.transcript
     }
-    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data) throws -> Data {
+    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data) async throws -> Data {
         XCTAssertEqual(try fixture.transcript.digest(), confirmedDigest)
         XCTAssertTrue(try fixture.transcript.verify(signature: biometricProof, publicKey: fixture.transcript.biometricKey.publicKey, purpose: .phoneBiometric))
         commits += 1
+        if let heldCommit { for await _ in heldCommit {} }
         if loseCommitReply { throw MacPairingSessionError.closed }
         return try fixture.receipt()
     }
@@ -41,6 +48,15 @@ private actor MacPairingTransportFixture: MacPairingTransportControl {
     var disappear = false
     var receipts = 0
     var loseReceiptReply = false
+    var rePairStarts = 0
+    var stops = 0
+    func start(rePair: RePairInvitation) throws -> UInt16 {
+        XCTAssertEqual(rePair.predecessor, fixture.proposal.replacement)
+        XCTAssertEqual(try rePair.invitation.encode(), try fixture.invitation.encode())
+        rePairStarts += 1
+        return 4321
+    }
+    func stop() { stops += 1 }
     init(_ fixture: TransportPairingFixture) { self.fixture = fixture }
     func start(invitation: PairingInvitation) throws -> UInt16 { XCTAssertEqual(try invitation.encode(), try fixture.invitation.encode()); return 4321 }
     func current() throws -> TransportPairingSnapshot {
@@ -94,10 +110,17 @@ final class MacPairingSessionTests: XCTestCase {
         let admin: MacPairingAdministratorFixture
         let clock = MacPairingClockFixture()
         let session: MacPairingSession
-        init() throws {
-            fixture = try .init(); root = .init(fixture); transport = .init(fixture); admin = .init(root)
+        init(rePair: Bool = false) throws {
+            let fixture = try TransportPairingFixture(rePair: rePair)
+            self.fixture = fixture
+            root = .init(fixture); transport = .init(fixture); admin = .init(root)
+            let predecessor = try fixture.proposal.replacement.map { replacement in
+                PairedPhoneSelection(macID: fixture.configuration.macID, accountID: fixture.configuration.accountID,
+                    revision: try GatewayHostSnapshot.uuid(fixture.transcript.expectedTrustRevision),
+                    phone: DeliveryRecipient(phoneID: replacement.phoneID, enrollmentEpoch: replacement.epoch))
+            }
             let clock = clock
-            session = .init(root: root, transport: transport, administrator: admin,
+            session = .init(root: root, transport: transport, administrator: admin, predecessor: predecessor,
                 unixMilliseconds: { 1000 }, elapsedMilliseconds: { clock.now() })
         }
         func start() async throws {
@@ -118,6 +141,70 @@ final class MacPairingSessionTests: XCTestCase {
         let commits = await o.root.commits, receipts = await o.transport.receipts
         XCTAssertEqual(commits, 1); XCTAssertEqual(receipts, 1); await o.session.close()
     }
+    func testRePairRevalidatesSelectionBeforePublishingAndStaging() async throws {
+        let denied = try Owner(rePair: true)
+        await denied.root.rejectRePair()
+        do { try await denied.start(); XCTFail("Published a stale selection") }
+        catch { XCTAssertTrue(error is MacPairingSessionError) }
+        let starts = await denied.transport.rePairStarts
+        XCTAssertEqual(starts, 0)
+
+        let stale = try Owner(rePair: true)
+        try await stale.start()
+        let snapshot = await stale.session.snapshot()
+        XCTAssertEqual(snapshot.rePairInvitation?.predecessor, stale.fixture.proposal.replacement)
+        await stale.root.rejectRePair()
+        do { try await stale.select(); XCTFail("Staged a stale selection") }
+        catch { XCTAssertTrue(error is MacPairingSessionError) }
+        let stages = await stale.root.stages
+        XCTAssertEqual(stages, 0)
+    }
+
+    func testRePairCloseWaitsForSubmittedCommitAndPreservesReceipt() async throws {
+        let o = try Owner(rePair: true)
+        let release = AsyncStream<Void>.makeStream()
+        defer { release.continuation.finish() }
+        await o.root.holdCommit(release.stream)
+        try await o.start()
+        try await o.prepareProof()
+        let commit = Task { @Sendable in try await o.session.commit() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while await o.root.commits == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let commits = await o.root.commits
+        XCTAssertEqual(commits, 1)
+        let closed = Mutex(false)
+        let close = Task { @Sendable in
+            let known = await o.session.closeForRePair()
+            closed.withLock { $0 = true }
+            return known
+        }
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertFalse(closed.withLock { $0 })
+        let stops = await o.transport.stops
+        XCTAssertEqual(stops, 0)
+        release.continuation.finish()
+        let state = try await commit.value
+        let current = await close.value
+        XCTAssertTrue(current)
+        XCTAssertEqual(state.phase, .receiptSent)
+        let receipts = await o.transport.receipts
+        let finalStops = await o.transport.stops
+        XCTAssertEqual(receipts, 1)
+        XCTAssertEqual(finalStops, 1)
+    }
+
+    func testRePairCloseRefusesAReplacementAfterAnUnknownCommit() async throws {
+        let o = try Owner(rePair: true)
+        try await o.start()
+        try await o.prepareProof()
+        await o.root.loseReply()
+        do { _ = try await o.session.commit(); XCTFail("Received an unavailable receipt") } catch {}
+        let known = await o.session.closeForRePair()
+        XCTAssertFalse(known)
+    }
+
     func testProofDoesNotReplaceExplicitHumanConfirmation() async throws {
         let o = try Owner(); try await o.start(); try await o.select()
         try await o.transport.showProof(o.fixture.proof()); _ = try await o.session.current()

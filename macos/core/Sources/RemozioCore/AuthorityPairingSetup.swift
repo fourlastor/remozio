@@ -182,7 +182,7 @@ final class AuthorityPairingSetupAccess: Sendable {
         }
         return try commitPairing(attempt, proof, random(16), authorize, { tx in try self.requireCurrent(tx) })
     }
-    func pairedPhones() throws -> PairedPhoneSnapshot {
+    func pairedPhones(includeRePair: Bool = false) throws -> PairedPhoneSnapshot {
         try journal.read { tx in
             try self.requireCurrent(tx)
             let trust = try tx.requestDeliveryTrust()
@@ -197,8 +197,21 @@ final class AuthorityPairingSetupAccess: Sendable {
                 ? .grantAbandonmentInconclusive : liveHealth
             return PairedPhoneSnapshot(macID: self.macID, accountID: self.accountID, revision: trust.approval.revision,
                 phones: trust.enrollments.filter { $0.approval.active }.map(DeliveryRecipient.init),
+                rePairablePhones: includeRePair ? PairingEnrollmentAttempt.revokedPredecessors(trust.enrollments,
+                    restrictions: try tx.approvalTrustRestrictions()) : [],
                 revocationAvailability: availability, gatewayRevocationHealth: health,
                 gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil)
+        }
+    }
+
+    func canRePair(_ selection: PairedPhoneSelection) throws -> Bool {
+        try requireSameScope(selection)
+        return try journal.read { tx in
+            try self.requireCurrent(tx)
+            let trust = try tx.requestDeliveryTrust()
+            guard selection.revision == trust.approval.revision else { return false }
+            return try PairingEnrollmentAttempt.revokedPredecessors(trust.enrollments,
+                restrictions: tx.approvalTrustRestrictions()).contains(selection.phone)
         }
     }
 
