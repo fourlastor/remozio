@@ -26,12 +26,10 @@ class PairingSetupChannelCommonTest {
         1u, 1u, vector.macAuthorityKey.copyBytes(), vector.macTransportKey.copyBytes(),
         proposal.transportKey, proposal.decisionKey, proposal.biometricKey, ByteArray(32) { 12 }, null, ByteArray(16) { 13 }, 1000u, 2000u)
     private val transcriptFrame: ByteArray get() = PairingSetupFrame.Transcript(transcript).encode()
-    private val invitation: PairingInvitation get() {
-        val scope = ((DeterministicCbor.decode(transcript.phone.encode(), CborLimits(65_536, 5, 5_000)) as CborValue.Fields)
-            .values.getValue(2u) as CborValue.ArrayValue).values.map { (it as CborValue.Bytes).copyBytes() }
-        return PairingInvitation(scope[0], scope[1], "Fixture", transcript.macAuthorityKey.copyBytes(),
-            transcript.macTransportKey.copyBytes(), 1u)
-    }
+    private val phoneScope = ((DeterministicCbor.decode(proposal.phone.encode(), CborLimits(65_536, 5, 5_000)) as CborValue.Fields)
+        .values.getValue(2u) as CborValue.ArrayValue).values.map { (it as CborValue.Bytes).copyBytes() }
+    private val invitation: PairingInvitation get() = PairingInvitation(phoneScope[0], phoneScope[1], "Fixture",
+        transcript.macAuthorityKey.copyBytes(), transcript.macTransportKey.copyBytes(), 1u)
 
     private class Stream(initial: List<ByteArray>) : PairingByteStream {
         val sent = mutableListOf<ByteArray>()
@@ -60,11 +58,9 @@ class PairingSetupChannelCommonTest {
     @Test fun rePairDoesNotWriteAProposalWhenTheDurableCheckpointFails() = runBlocking {
         val stream = Stream(listOf(wire(frame("hello"))))
         val parent = SupervisorJob()
-        val phone = proposal.phone.scope.value.values[2] as CborValue.Bytes
-        val epoch = proposal.phone.scope.value.values[3] as CborValue.Bytes
-        val predecessor = epoch.copyBytes().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val predecessor = phoneScope[3].copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
         val rePair = PairingPhoneProposal(proposal.phone, proposal.transportKey, proposal.decisionKey, proposal.biometricKey,
-            PairingReplacement(phone.copyBytes(), predecessor))
+            PairingReplacement(phoneScope[2], predecessor))
         val channel = PairingSetupChannel.authenticate(CoroutineScope(parent), stream, invitation, rePair)
         try {
             assertFailsWith<IllegalStateException> { channel.awaitTranscript { error("Archive write failed") } }
