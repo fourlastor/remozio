@@ -225,7 +225,7 @@ class StoredPairingHostTest {
         assertEquals(material.keys.map { it.alias }.toSet(), keys.retired.toSet())
     }
 
-    @Test fun rePairProofMarkerSurvivesRestartAndReceiptRetiresTheExactRemovedPredecessor() = runBlocking {
+    @Test fun rePairProofMarkerSurvivesRestartAndReceiptRetiresTheExactRemovedPredecessor(): Unit = runBlocking {
         val keys = RePairKeys()
         val h = rePairHost(keys)
         val old = record(1)
