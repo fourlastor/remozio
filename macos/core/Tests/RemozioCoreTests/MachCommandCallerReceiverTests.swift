@@ -2272,12 +2272,19 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             if let authority { return try authority.read { try $0.commandSubmissionReservation(submissionID: submissionID) } }
             return try db.read { try $0.commandSubmissionReservation(submissionID: submissionID) }
         }
+        var journalPath: String { root.appendingPathComponent("store/journal.sqlite").path }
+
         func sql(_ statement: String, continuity: Bool = false) throws {
+            try Self.sql(statement, at: continuity ? root.appendingPathComponent("continuity/continuity.sqlite").path : journalPath)
+        }
+
+        static func sql(_ statement: String, at path: String) throws {
             var connection: OpaquePointer?
-            guard sqlite3_open(root.appendingPathComponent(continuity ? "continuity/continuity.sqlite" : "store/journal.sqlite").path, &connection) == SQLITE_OK,
-                  let connection else { throw MachCommandCallerError.unavailable }
-            defer { sqlite3_close(connection) }
-            guard sqlite3_exec(connection, statement, nil, nil, nil) == SQLITE_OK else { throw MachCommandCallerError.unavailable }
+            let opened = sqlite3_open(path, &connection)
+            defer { if let connection { _ = sqlite3_close(connection) } }
+            guard opened == SQLITE_OK, let connection else { throw JournalDatabaseError.storage(opened) }
+            let executed = sqlite3_exec(connection, statement, nil, nil, nil)
+            guard executed == SQLITE_OK else { throw JournalDatabaseError.storage(executed) }
         }
     }
     private func admitCommand(_ command: RetainedCommandCapture, fixture: CommandRequestFixture,
@@ -5097,13 +5104,14 @@ extension MachCommandCallerReceiverTests {
             usleep(1000)
         }
     }
-    // Issue #600: this test once failed with a thrown FileManager removal error for a
-    // non-canonical temporary path, which no direct step here should raise. Name the step
-    // and record the file state so the next CI failure identifies the thrower.
+    // Record the failing operation before fixture teardown runs.
     private func diagnosedStep<T>(_ step: String, marker: URL, _ body: () throws -> T) throws -> T {
         do { return try body() } catch {
             let ns = error as NSError
             var lines = ["#600 diagnostics: step '\(step)' threw \(ns.domain) \(ns.code): \(ns.localizedDescription)"]
+            if case .storage(let code)? = error as? JournalDatabaseError {
+                lines.append("  SQLite result: \(code)")
+            }
             if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
                 lines.append("  underlying: \(underlying.domain) \(underlying.code)")
             }
@@ -5213,7 +5221,12 @@ extension MachCommandCallerReceiverTests {
     }
     func testNativeDispatchStorageFailureBeforeCommitNeverReleasesAndReportsUnknown() throws {
         let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: marker) }
+        defer {
+            if Darwin.unlink(marker.path) != 0 {
+                let code = errno
+                XCTAssertEqual(code, ENOENT, "Could not remove the dispatch marker")
+            }
+        }
         let test = try diagnosedStep("fixture", marker: marker) {
             try nativeDispatchFixture(path: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)])
         }
@@ -5224,7 +5237,13 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
         XCTAssertEqual(test.authority.activeCommandCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
-        try diagnosedStep("drop trigger", marker: marker) { try test.fixture.sql("DROP TRIGGER fail_dispatch") }
+        let journalPath = test.fixture.journalPath
+        try diagnosedStep("drop trigger", marker: marker) {
+            // The owner retries the terminal write until this fixture removes the trigger.
+            try test.authority.withRequests { _ in
+                try CommandRequestFixture.sql("DROP TRIGGER fail_dispatch", at: journalPath)
+            }
+        }
         try diagnosedStep("await cleanup", marker: marker) { try awaitDispatchCleanup(test.authority) }
         let id = test.request.requestID
         let outcome = try diagnosedStep("historical outcome", marker: marker) {
