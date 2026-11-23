@@ -17,6 +17,7 @@ import dev.remozio.protocol.PairingProofPurpose
 import dev.remozio.protocol.PairingTranscript
 import dev.remozio.protocol.RePairInvitation
 import java.security.KeyStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -121,12 +122,24 @@ internal class StoredPairingHost(
             val leases = preparedLeases[recordID]
             leases?.removeAll { !it.isCurrent() }
             if (leases.isNullOrEmpty()) preparedLeases.remove(recordID)
-            checkNotNull(openExisting()).use { store -> reconcileRePairLocked(store) }
+            reconcileRePairBestEffort { checkNotNull(openExisting()).use { reconcileRePairLocked(it) } }
         }
     }.also { notifyChange() }
 
-    suspend fun reconcileRePair() = withContext(dispatcher) {
-        enrollmentAccess.withLock { openExisting()?.use { reconcileRePairLocked(it) } }
+    suspend fun reconcileRePairOnStartup() = withContext(dispatcher) {
+        enrollmentAccess.withLock {
+            reconcileRePairBestEffort { openExisting()?.use { reconcileRePairLocked(it) } }
+        }
+    }
+
+    private inline fun reconcileRePairBestEffort(cleanup: () -> Unit) {
+        try {
+            cleanup()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Retain the archive evidence so startup or setup can retry incomplete cleanup.
+        }
     }
 
     private fun reconcileRePairLocked(store: EncryptedEnrollmentStore) {
@@ -157,7 +170,9 @@ internal class StoredPairingHost(
         val retained = snapshot.entries.filter { it !== row && it.phase != EnrollmentPhase.REMOVED }
             .flatMap { references(it.enrollment) }.mapTo(mutableSetOf()) { it.alias }
         for (key in references(row.enrollment)) {
-            if (key.alias !in retained) rePairKeys.retire(key.alias, key.publicKey)
+            if (key.alias !in retained && rePairKeys.contains(key.alias)) {
+                rePairKeys.retire(key.alias, key.publicKey)
+            }
         }
     }
 
@@ -251,8 +266,7 @@ internal class StoredPairingHost(
                 }.map { it.enrollment.recordID }.toSet()
                 invalidatePreparedLocked(affected + retired)
                 invalidateLocked(affected + retired)
-                // The receipt wire still owns the candidate's transport. Reconciliation only retires removed keys.
-                reconcileRePairLocked(store)
+                reconcileRePairBestEffort { reconcileRePairLocked(store) }
                 committed
             }
         }
@@ -316,8 +330,14 @@ internal class StoredPairingHost(
     suspend fun remove(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot = withContext(dispatcher) {
         enrollmentAccess.withLock {
             checkNotNull(openExisting()).use { store ->
-                require(store.snapshot().revision == expectedRevision)
-                require(store.snapshot().entries.any { it.enrollment.recordID == recordID })
+                val snapshot = store.snapshot()
+                require(snapshot.revision == expectedRevision)
+                val row = snapshot.entries.single { it.enrollment.recordID == recordID }
+                if (row.phase == EnrollmentPhase.ACTIVE && snapshot.entries.any {
+                        it.phase == EnrollmentPhase.PREPARED && it.rePair == null && it.pairing?.replacingRecordID == recordID
+                    }) {
+                    throw OrdinaryPairingReplacementPending()
+                }
                 invalidatePreparedLocked(setOf(recordID))
                 invalidateLocked(setOf(recordID))
                 store.remove(recordID.copyBytes(), expectedRevision)
@@ -334,6 +354,8 @@ internal class PreparedPairingLease : AutoCloseable {
     override fun close() { active.set(false) }
 }
 internal class PreparedPairingAccess(val record: StoredPhoneEnrollment, val lease: PreparedPairingLease)
+
+internal class OrdinaryPairingReplacementPending : IllegalStateException("This pairing has a pending replacement")
 
 internal class RePairAlreadyPending : IllegalStateException("This Mac has a pending re-pair attempt")
 

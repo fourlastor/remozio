@@ -44,18 +44,16 @@ internal fun storedMacs(snapshot: EnrollmentSnapshot): MacInventoryState.Ready =
     },
 )
 
-/** Reconciles setup state, then closes the archive before exposing inventory metadata to Compose. */
+/** Closes the read-only archive before exposing inventory metadata to Compose. */
 internal class StoredMacReader(
     private val open: () -> EncryptedEnrollmentStore?,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val enrollmentAccess: Mutex = Mutex(),
-    private val reconcile: suspend () -> Unit = {},
 ) {
     private val mutex = Mutex()
     suspend fun read(): MacInventoryState = mutex.withLock {
         try {
             withContext(dispatcher) {
-                reconcile()
                 enrollmentAccess.withLock {
                     open()?.use { storedMacs(it.snapshot()) } ?: MacInventoryState.Ready(emptyList())
                 }
