@@ -20,14 +20,14 @@ public struct PairingKey: Sendable, CustomStringConvertible {
     public var description: String { "PairingKey(redacted)" }
 }
 
-public struct PairingReplacement: Sendable, CustomStringConvertible {
+public struct PairingReplacement: Sendable, Equatable, CustomStringConvertible {
     public let phoneID: Data
     public let epoch: Data
     public init(phoneID: Data, epoch: Data) throws {
         try pairingCheck(phoneID.count == 16 && epoch.count == 16)
         self.phoneID = phoneID; self.epoch = epoch
     }
-    fileprivate var value: CBORValue { .array([.bytes(phoneID), .bytes(epoch)]) }
+    var value: CBORValue { .array([.bytes(phoneID), .bytes(epoch)]) }
     public var description: String { "PairingReplacement(redacted)" }
 }
 

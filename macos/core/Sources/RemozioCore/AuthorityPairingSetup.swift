@@ -122,8 +122,15 @@ final class AuthorityPairingSetupAccess: Sendable {
     /// The proposal supplies phone claims only. Root chooses fresh setup identity, challenge, tag, nonce and expiry.
     /// The app and phone must compare the returned transcript before producing the biometric proof.
     func stage(_ proposalBytes: Data) throws -> PairingEnrollmentAttempt {
-        let proposal = try PairingTranscript.decode(proposalBytes)
-        guard proposal.replacement == nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
+        let proposal: PairingPhoneProposal
+        if let legacy = try? PairingTranscript.decode(proposalBytes) {
+            guard legacy.replacement == nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
+            proposal = try PairingPhoneProposal(phone: legacy.phone, transportKey: legacy.transportKey,
+                decisionKey: legacy.decisionKey, biometricKey: legacy.biometricKey)
+        } else {
+            proposal = try PairingPhoneProposal.decode(proposalBytes)
+            guard proposal.replacement != nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
+        }
         let scope = proposal.phone.scope
         guard scope.macID == macID, scope.accountID == accountID else { throw AuthorityPairingSetupError.wrongScope }
         let started = try now(), wall = try unixMilliseconds()
@@ -155,12 +162,15 @@ final class AuthorityPairingSetupAccess: Sendable {
                     local: [1], peer: proposal.phone.envelopeVersions, trustedMinimum: self.minimumEnvelopeVersion),
                 macAuthorityKey: self.authorityPublicKey, macTransportKey: self.configuration.transportPublicKey,
                 transportKey: proposal.transportKey, decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey,
-                enrollmentTag: self.random(32), replacement: nil, expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) },
+                enrollmentTag: self.random(32), replacement: proposal.replacement, expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) },
                 issuedAtUnixMillis: wall, expiresAtUnixMillis: expiry.partialValue)
-            return try PairingEnrollmentAttempt(transcript: transcript, trusted: trust, authorizedReplacement: nil,
+            let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trust,
+                replacement: proposal.replacement.map(PairingEnrollmentAttempt.Replacement.requireRevoked) ?? .none,
                 authorityPublicKey: self.authorityPublicKey, transportPublicKey: self.configuration.transportPublicKey,
                 minimumEnvelopeVersion: self.minimumEnvelopeVersion, started: started, startedAtUnixMillis: wall,
                 deadlineMilliseconds: deadline.partialValue)
+            try attempt.validateEnrollmentHistory(tx)
+            return attempt
         }
     }
 

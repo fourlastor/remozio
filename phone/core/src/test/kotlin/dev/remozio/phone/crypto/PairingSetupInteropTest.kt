@@ -71,12 +71,13 @@ class PairingSetupInteropTest {
                 directory.toFile().deleteRecursively(); throw failure
             }
         }
-        fun proposal(invite: PairingInvitation = invitation, transport: KeyPair = phone.keyPair): PairingPhoneProposal {
+        fun proposal(invite: PairingInvitation = invitation, transport: KeyPair = phone.keyPair,
+                     replacement: PairingReplacement? = null): PairingPhoneProposal {
             val offer = ChannelOffer(ChannelRole.PHONE, ChannelScope(invite.macID.copyBytes(), invite.accountID.copyBytes(),
                 ByteArray(16) { 3 }, ByteArray(16) { 4 }), ByteArray(32).also(java.security.SecureRandom()::nextBytes),
                 setOf(1u), emptyList(), emptySet())
             return PairingPhoneProposal(offer, PairingKey(ByteArray(16) { 5 }, point(transport)),
-                PairingKey(ByteArray(16) { 6 }, point(decision)), PairingKey(ByteArray(16) { 7 }, point(biometric)))
+                PairingKey(ByteArray(16) { 6 }, point(decision)), PairingKey(ByteArray(16) { 7 }, point(biometric)), replacement)
         }
         suspend fun open(parent: CoroutineScope): EncryptedRecordTransport = DirectTCPConnector().connect(parent,
             InetSocketAddress(InetAddress.getByAddress(byteArrayOf(127,0,0,1)), port))
@@ -105,6 +106,24 @@ class PairingSetupInteropTest {
             } finally { channel?.closeAndJoin(); owner.cancelAndJoin() }
         }
     }
+    @Test fun rePairProposalRoundTripsThePredecessorInASignedNativeReceipt(): Unit = runBlocking {
+        Fixture().use { f ->
+            val owner = SupervisorJob(); val scope = CoroutineScope(owner)
+            var channel: PairingSetupChannel? = null
+            try {
+                val replacement = PairingReplacement(ByteArray(16) { 3 }, ByteArray(16) { 10 })
+                channel = withTimeout(15000) {
+                    PairingSetupChannel.connect(scope, f.open(scope), f.keys, f.invitation, f.proposal(replacement = replacement))
+                }
+                val transcript = channel.transcript
+                assertEquals(replacement.phoneID, transcript.replacement?.phoneID)
+                assertEquals(replacement.epoch, transcript.replacement?.epoch)
+                val receipt = withTimeout(5000) { channel.submitProof(transcript.digest(), f.proof(transcript)) }
+                assertTrue(transcript.verify(receipt, f.invitation.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
+            } finally { channel?.closeAndJoin(); owner.cancelAndJoin() }
+        }
+    }
+
     @Test fun nativeSetupRejectsATransportClaimThatDiffersFromTheTLSClient(): Unit = runBlocking {
         Fixture().use { f ->
             val owner = SupervisorJob(); val scope = CoroutineScope(owner)

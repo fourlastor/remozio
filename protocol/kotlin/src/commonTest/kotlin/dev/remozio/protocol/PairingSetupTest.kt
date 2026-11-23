@@ -17,6 +17,36 @@ class PairingSetupTest {
         }
         assertEquals("PairingPhoneProposal(redacted)", proposal.toString())
     }
+    @Test fun rePairProposalBindsTheExactPredecessor() {
+        val vectors = vectors()
+        val rePair = vectors.getValue("rePair").jsonObject
+        fun fixture(key: String) = hex(rePair.getValue(key).jsonPrimitive.content)
+        val v1 = PairingPhoneProposal.decode(hex(vectors.getValue("proposal").jsonPrimitive.content))
+        val transcript = PairingTranscript.decode(fixture("transcript"))
+        val replacement = requireNotNull(transcript.replacement)
+        val proposal = PairingPhoneProposal(v1.phone, v1.transportKey, v1.decisionKey, v1.biometricKey, replacement)
+        assertContentEquals(fixture("proposal"), proposal.encode())
+        PairingPhoneProposal.decode(fixture("proposal")).validate(transcript)
+        assertContentEquals(fixture("frame"), PairingSetupFrame.Proposal(proposal).encode())
+        assertContentEquals(fixture("frame"), PairingSetupFrame.decode(fixture("frame")).encode())
+        assertContentEquals(fixture("digest"), transcript.digest())
+        assertFails { v1.validate(transcript) }
+        assertFails { proposal.validate(PairingTranscript.decode(hex(vectors.getValue("transcript").jsonPrimitive.content))) }
+
+        val wrongEpoch = PairingReplacement(replacement.phoneID.copyBytes(), ByteArray(16) { 91 })
+        assertFails {
+            PairingPhoneProposal(v1.phone, v1.transportKey, v1.decisionKey, v1.biometricKey, wrongEpoch).validate(transcript)
+        }
+        val currentEpoch = (v1.phone.scope.value.values[3] as CborValue.Bytes).copyBytes()
+        val invalidTargets = listOf(
+            PairingReplacement(ByteArray(16) { 92 }, replacement.epoch.copyBytes()),
+            PairingReplacement(replacement.phoneID.copyBytes(), currentEpoch),
+        )
+        for (target in invalidTargets) {
+            assertFails { PairingPhoneProposal(v1.phone, v1.transportKey, v1.decisionKey, v1.biometricKey, target) }
+        }
+    }
+
     @Test fun unknownVersionsFieldsKindsAndAuthorityConfusionFail() {
         val v = vectors()
         for (row in v.getValue("invalidProposals").jsonArray) assertFails(row.jsonObject.getValue("name").jsonPrimitive.content) {
