@@ -55,7 +55,8 @@ class EnrollmentCipherJvmTest {
     @Test fun activationStaysHiddenFromJava() {
         val activations = EncryptedEnrollmentStore::class.java.declaredMethods
             .filter { it.name.startsWith("activate") && !it.name.endsWith("\$default") }
-        assertEquals(setOf("activate", "activateRePair"), activations.map { it.name.substringBefore('$') }.toSet())
+        val sourceNames = activations.map { it.name.substringBefore('$').substringBefore('-') }
+        assertEquals(listOf("activate", "activateRePair"), sourceNames.sorted())
         assertTrue(activations.all { it.isSynthetic })
     }
 
