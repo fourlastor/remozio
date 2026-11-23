@@ -53,6 +53,13 @@ public struct GatewayAuthorityEnvelope: Sendable, CustomStringConvertible, Custo
 public struct GatewayAcknowledgment: Equatable, Sendable {
     public let revision: UInt64
     public let operationID: Data?
+    public let abandonedGrant: Bool
+}
+
+enum GatewayGrantRetirement: Sendable, Equatable {
+    case none
+    case expiresBeforeRetirement
+    case eligible(GatewayControlTombstone)
 }
 
 public enum GatewayAcknowledgmentDisposition: Sendable, Equatable {
@@ -101,6 +108,7 @@ struct GatewayCurrentTokenState: Sendable, CustomStringConvertible, CustomDebugS
     let candidate: GatewayAuthorityEnvelope
     let activation: GatewayAuthorityEnvelope?
     let candidateExpired: Bool
+    let activationAbandonmentConfirmed: Bool
     var needsRenewal: Bool { activation == nil && candidateExpired }
     var description: String { "GatewayCurrentTokenState(redacted)" }
     var debugDescription: String { description }
@@ -194,12 +202,14 @@ final class GatewayAuthorityJournal {
             return result(.conflictingLocalHistory)
         }
         var missing = history.records[...]
+        var retainedBoundary: GatewayControlReceipt?
         if local > 0 {
             guard let boundary = missing.first, boundary.revision == local,
                   let retained = try envelope(boundary.operationID, identity: identity) else { return result(.conflictingLocalHistory) }
-            guard retained.revision == local, Self.matchesRetainedControl(boundary, retained: retained) else {
+            guard retained.revision == local, try matchesRetainedControl(boundary, retained: retained, identity: identity) else {
                 return result(.conflictingLocalHistory)
             }
+            retainedBoundary = boundary
             missing = missing.dropFirst()
         }
         var submissionCredentials = Set<Data>()
@@ -290,6 +300,7 @@ final class GatewayAuthorityJournal {
         }
         // Retain desired token material, but retire every old candidate and proof in the same transaction.
         try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16)", []) { try done($0) }
+        if let retainedBoundary { try resolveGrantAbandonment(retainedBoundary, registration: identity) }
         try advance(from: local, to: history.head.evidence.revision)
         guard try acknowledge(history.head).disposition == .recorded else { throw GatewayAuthorityError.corruptData }
         return result(.reconciled)
@@ -433,12 +444,14 @@ final class GatewayAuthorityJournal {
             let revision = try unsigned(blob($0, 0, maximum: 8))
             let operation = sqlite3_column_type($0, 1) == SQLITE_NULL ? nil : try blob($0, 1, maximum: 16)
             guard revision <= local, (revision == 0) == (operation == nil) else { throw GatewayAuthorityError.corruptData }
+            var abandoned = false
             if let operation {
                 guard let retained = try envelope(operation, identity: identity), retained.revision == revision else {
                     throw GatewayAuthorityError.corruptData
                 }
+                abandoned = try abandonedGrant(operation, registration: identity)?.resolution == .confirmed
             }
-            return GatewayAcknowledgment(revision: revision, operationID: operation)
+            return GatewayAcknowledgment(revision: revision, operationID: operation, abandonedGrant: abandoned)
         }
     }
 
@@ -450,22 +463,29 @@ final class GatewayAuthorityJournal {
             GatewayAcknowledgmentResult(disposition: disposition, acknowledged: value,
                 localRevision: local, reportedRevision: evidence.revision)
         }
+        var abandoned = false
         if let receipt = evidence.receipt {
             guard let retained = try envelope(receipt.operationID, identity: identity) else {
                 return result(.missingLocalHistory, previous)
             }
-            guard retained.revision == evidence.revision, Self.matchesRetainedControl(receipt, retained: retained) else {
+            guard retained.revision == evidence.revision, try matchesRetainedControl(receipt, retained: retained, identity: identity) else {
                 return result(.conflictingLocalHistory, previous)
             }
+            if case .tombstone = receipt { abandoned = true }
         } else if evidence.revision != 0 { throw GatewayAuthorityError.corruptData }
         // Check receipt consistency before treating an old response as harmless reordering.
         if let previous {
             if evidence.revision < previous.revision { return result(.olderThanRecorded, previous) }
-            if evidence.revision == previous.revision { return result(.alreadyRecorded, previous) }
+            if evidence.revision == previous.revision {
+                return result(.alreadyRecorded, GatewayAcknowledgment(revision: previous.revision,
+                    operationID: previous.operationID, abandonedGrant: abandoned))
+            }
         }
         guard evidence.revision <= local else { return result(.missingLocalHistory, previous) }
-        let value = GatewayAcknowledgment(revision: evidence.revision, operationID: evidence.receipt?.operationID)
+        let value = GatewayAcknowledgment(revision: evidence.revision, operationID: evidence.receipt?.operationID,
+            abandonedGrant: abandoned)
         if !record { return result(.recorded, value) }
+        if let receipt = evidence.receipt { try resolveGrantAbandonment(receipt, registration: identity) }
         try statement("""
             INSERT INTO main.gateway_acknowledgment_v1 VALUES(1,?,?)
             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,operation=excluded.operation
@@ -473,14 +493,33 @@ final class GatewayAuthorityJournal {
         return result(.recorded, value)
     }
 
-    private static func matchesRetainedControl(_ receipt: GatewayControlReceipt, retained: GatewayAuthorityEnvelope) -> Bool {
+    private func matchesRetainedControl(_ receipt: GatewayControlReceipt, retained: GatewayAuthorityEnvelope,
+                                        identity: GatewayRegistrationIdentity) throws -> Bool {
         guard receipt.operationID == retained.operationID, receipt.revision == retained.revision else { return false }
+        let retirement = try abandonedGrant(retained.operationID, registration: identity)
         if case .tombstone(let evidence) = receipt {
-            return evidence.tombstone.originalKind.rawValue == retained.kind
+            return retirement?.isRetired == true && retirement?.control == evidence.tombstone
+                && retirement?.signature == evidence.signature && evidence.tombstone.originalKind.rawValue == retained.kind
                 && evidence.tombstone.originalDigest == GatewayControlTombstone.digest(
                     payload: retained.canonicalPayload, signature: retained.signature)
         }
-        return receipt.kind == retained.kind && receipt.canonicalPayload == retained.canonicalPayload
+        guard retirement?.resolution != .confirmed, receipt.kind == retained.kind,
+              receipt.canonicalPayload == retained.canonicalPayload else { return false }
+        return retirement == nil || receipt.signature == retained.signature
+    }
+
+    // Call only after the signed receipt has matched the exact retained control.
+    private func resolveGrantAbandonment(_ receipt: GatewayControlReceipt, registration: GatewayRegistrationIdentity) throws {
+        guard let retirement = try abandonedGrant(receipt.operationID, registration: registration),
+              retirement.resolution == .pending else { return }
+        let resolution: AbandonmentResolution
+        if case .tombstone = receipt { resolution = .confirmed }
+        else { resolution = .superseded }
+        try statement("UPDATE main.gateway_abandoned_grants_v1 SET resolution=\(resolution.rawValue) WHERE operation=? AND resolution=0",
+            [receipt.operationID]) { row in
+            try done(row)
+            guard sqlite3_changes(db) == 1 else { throw GatewayAuthorityError.corruptData }
+        }
     }
 
     func configure(_ identity: GatewayRegistrationIdentity) throws {
@@ -523,6 +562,138 @@ final class GatewayAuthorityJournal {
             }
             return value
         }
+    }
+
+    static let abandonmentTable = "gateway_abandoned_grants_v1"
+
+    private func abandonmentHistoryInstalled() throws -> Bool {
+        try submissionSchemaVersion() == 18
+    }
+
+    private enum AbandonmentResolution: Int32 { case pending, confirmed, superseded }
+
+    private struct AbandonedGrant {
+        let control: GatewayControlTombstone
+        let signature: Data?
+        let resolution: AbandonmentResolution
+        var isRetired: Bool { resolution != .superseded }
+    }
+
+    private func abandonedGrant(_ operation: Data, registration: GatewayRegistrationIdentity) throws -> AbandonedGrant? {
+        guard try abandonmentHistoryInstalled() else { return nil }
+        return try statement("SELECT revision,kind,digest,signature,resolution FROM main.gateway_abandoned_grants_v1 WHERE operation=?", [operation]) {
+            let result = sqlite3_step($0)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW, let kind = GatewayControlTombstone.GrantKind(rawValue: try unsigned(blob($0, 1, maximum: 8))) else {
+                throw GatewayAuthorityError.corruptData
+            }
+            let control = try GatewayControlTombstone(registration: registration, revision: unsigned(blob($0, 0, maximum: 8)),
+                originalKind: kind, operationID: operation, originalDigest: blob($0, 2, maximum: 32))
+            let signature = sqlite3_column_type($0, 3) == SQLITE_NULL ? nil : try blob($0, 3, maximum: 64)
+            if let signature {
+                do { _ = try GatewayControlTombstone.authenticate(control.encode(), signature: signature, registration: registration) }
+                catch { throw GatewayAuthorityError.corruptData }
+            }
+            guard let resolution = AbandonmentResolution(rawValue: sqlite3_column_int($0, 4)),
+                  resolution != .confirmed || signature != nil else { throw GatewayAuthorityError.corruptData }
+            return AbandonedGrant(control: control, signature: signature, resolution: resolution)
+        }
+    }
+
+    private func grant(at revision: UInt64, registration: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
+        let operation = try statement("SELECT operation FROM main.gateway_outbox_v1 WHERE revision=?", [uint(revision)]) { row -> Data? in
+            let result = sqlite3_step(row)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            return try blob(row, 0, maximum: 16)
+        }
+        guard let operation else { return nil }
+        guard let value = try envelope(operation, identity: registration), value.revision == revision,
+              GatewayControlTombstone.GrantKind(rawValue: value.kind) != nil else { throw GatewayAuthorityError.corruptData }
+        return value
+    }
+
+    func grantRetirement(at revision: UInt64, registration: GatewayRegistrationIdentity,
+                         enrollments: [StoredApprovalEnrollment], wall: UInt64) throws -> GatewayGrantRetirement {
+        guard revision <= (try head(registration)), revision > (try acknowledgment(registration)?.revision ?? 0),
+              let original = try grant(at: revision, registration: registration),
+              let kind = GatewayControlTombstone.GrantKind(rawValue: original.kind) else { return .none }
+        let digest = GatewayControlTombstone.digest(payload: original.canonicalPayload, signature: original.signature)
+        let control = try GatewayControlTombstone(registration: registration, revision: revision, originalKind: kind,
+            operationID: original.operationID, originalDigest: digest)
+        if let retained = try abandonedGrant(original.operationID, registration: registration) {
+            guard retained.control == control else { throw GatewayAuthorityError.corruptData }
+            return retained.isRetired ? .eligible(control) : .none
+        }
+        let binding: GatewayTokenBinding, expiry: UInt64
+        switch kind {
+        case .candidate:
+            let value = try storedCandidate(original.canonicalPayload)
+            binding = value.binding; expiry = value.expiresAtUnixMillis
+        case .activation:
+            let value = try storedActivation(original.canonicalPayload)
+            binding = value.binding; expiry = value.expiresAtUnixMillis
+        }
+        guard let enrolled = enrollments.first(where: { $0.approval.phoneID == binding.phoneID && $0.epoch == binding.enrollmentEpoch }),
+              enrolled.notificationTag == binding.enrollmentTag else { return .none }
+        if !enrolled.approval.active || wall >= expiry { return .eligible(control) }
+        if let desired = try desiredCandidate(binding.phoneID), desired != binding.candidateID { return .expiresBeforeRetirement }
+        return .none
+    }
+
+    func stageGrantAbandonment(_ proposed: GatewayControlTombstone, enrollments: [StoredApprovalEnrollment], wall: UInt64) throws {
+        guard try grantRetirement(at: proposed.revision, registration: proposed.registration,
+            enrollments: enrollments, wall: wall) == .eligible(proposed) else { throw GatewayAuthorityError.wrongScope }
+        if try abandonedGrant(proposed.operationID, registration: proposed.registration) != nil { return }
+        if try !abandonmentHistoryInstalled() {
+            let version = try submissionSchemaVersion()
+            guard (15...17).contains(version) else { throw JournalDatabaseError.incompatibleStore }
+            if version < 17 { try UpdateSchedulingJournal.createStorage(connection: db, from: version) }
+            let result = sqlite3_exec(db, """
+                CREATE TABLE main.gateway_abandoned_grants_v1 (
+                    operation BLOB PRIMARY KEY REFERENCES gateway_outbox_v1(operation),
+                    revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8),
+                    kind BLOB NOT NULL CHECK(length(kind)=8),
+                    digest BLOB NOT NULL CHECK(length(digest)=32),
+                    signature BLOB CHECK(signature IS NULL OR length(signature)=64),
+                    resolution INTEGER NOT NULL CHECK(resolution IN (0,1,2) AND (resolution!=1 OR signature IS NOT NULL)),
+                    first_unconfirmed_ms BLOB CHECK(first_unconfirmed_ms IS NULL OR
+                        (length(first_unconfirmed_ms)=8 AND signature IS NOT NULL))
+                ) STRICT, WITHOUT ROWID;
+                PRAGMA main.user_version=18;
+                """, nil, nil, nil)
+            guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+        }
+        try statement("INSERT INTO main.gateway_abandoned_grants_v1 VALUES(?,?,?,?,NULL,0,NULL)",
+            [proposed.operationID, uint(proposed.revision), uint(proposed.originalKind.rawValue), proposed.originalDigest]) { try done($0) }
+    }
+
+    func signedGrantAbandonment(_ proposed: GatewayControlTombstone) throws -> Data? {
+        guard let retained = try abandonedGrant(proposed.operationID, registration: proposed.registration),
+              retained.control == proposed, retained.isRetired else { return nil }
+        return retained.signature
+    }
+
+    func finishGrantAbandonment(_ proposed: GatewayControlTombstone, wall: UInt64, sign: (Data) throws -> Data) throws -> Data {
+        guard proposed.revision > (try acknowledgment(proposed.registration)?.revision ?? 0),
+              let original = try grant(at: proposed.revision, registration: proposed.registration),
+              GatewayControlTombstone.GrantKind(rawValue: original.kind) == proposed.originalKind,
+              original.operationID == proposed.operationID,
+              GatewayControlTombstone.digest(payload: original.canonicalPayload, signature: original.signature) == proposed.originalDigest,
+              let retained = try abandonedGrant(proposed.operationID, registration: proposed.registration),
+              retained.control == proposed, retained.resolution == .pending else { throw GatewayAuthorityError.wrongScope }
+        if let signature = retained.signature { return signature }
+        let payload = try proposed.encode()
+        let signature = try sign(GatewayControlTombstone.signingInput(payload))
+        _ = try GatewayControlTombstone.authenticate(payload, signature: signature, registration: proposed.registration)
+        // Once signed, the next network effect may succeed even if its reply is lost.
+        try statement("""
+            UPDATE main.gateway_abandoned_grants_v1 SET signature=?,first_unconfirmed_ms=?
+            WHERE operation=? AND resolution=0 AND signature IS NULL
+            """, [signature, uint(wall), proposed.operationID]) {
+            try done($0); guard sqlite3_changes(db) == 1 else { throw GatewayAuthorityError.corruptData }
+        }
+        return signature
     }
 
     /// A registration publisher cannot skip another retained control, even after that control expires.
@@ -635,7 +806,7 @@ final class GatewayAuthorityJournal {
             guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }
             return sqlite3_column_int64($0, 0) != 0
         }
-        if recovered { return nil }
+        if try recovered || abandonedGrant(operationID, registration: trust.registration)?.isRetired == true { return nil }
         guard envelope.kind != 3 else { throw GatewayAuthorityError.wrongScope }
         let candidateID: Data
         if envelope.kind == 1 { candidateID = try storedCandidate(envelope.canonicalPayload).binding.candidateID }
@@ -691,6 +862,27 @@ final class GatewayAuthorityJournal {
         guard try latestRevocation(trust: trust)?.envelope.operationID == operationID else { throw GatewayAuthorityError.superseded }
         guard entry.run == uuid(run), entry.started <= now.milliseconds, now.milliseconds < entry.deadline,
               entry.value.issuedAtUnixMillis <= wall, wall < entry.value.expiresAtUnixMillis else { throw GatewayAuthorityError.expired }
+        return entry.envelope
+    }
+
+    func localRevocation(for phone: DeliveryRecipient, registration: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
+        _ = try head(registration)
+        return try latestRevocation(phone: phone.phoneID, epoch: phone.enrollmentEpoch, identity: registration)?.envelope
+    }
+
+    func localRevocation(at revision: UInt64, registration: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
+        guard revision <= (try head(registration)) else { throw GatewayAuthorityError.headMismatch }
+        let operation = try statement("SELECT operation FROM main.gateway_revocations_v1 WHERE revision=?", [uint(revision)]) { row -> Data? in
+            let result = sqlite3_step(row)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            return try blob(row, 0, maximum: 16)
+        }
+        guard let operation else { return nil }
+        guard let entry = try revocation(operation, identity: registration), entry.value.revision == revision else {
+            throw GatewayAuthorityError.corruptData
+        }
+        // Recovery reuses the durable signed record, including its original lifetime and operation identity.
         return entry.envelope
     }
 
@@ -751,9 +943,11 @@ final class GatewayAuthorityJournal {
             guard try blob($0, 7, maximum: 16) == id else { throw GatewayAuthorityError.superseded }
             let sameRun = try blob($0, 3, maximum: 16) == uuid(run)
             let started = try unsigned(blob($0, 4, maximum: 8)), deadline = try unsigned(blob($0, 5, maximum: 8))
-            let liveMoment = sameRun && started <= now.milliseconds && now.milliseconds < deadline
+            let candidateOperation = try blob($0, 2, maximum: 16)
+            let candidateRetired = try abandonedGrant(candidateOperation, registration: trust.registration)?.isRetired == true
+            let liveMoment = sameRun && !candidateRetired && started <= now.milliseconds && now.milliseconds < deadline
             if !allowExpired && !liveMoment { throw GatewayAuthorityError.expired }
-            guard let entry = try envelope(blob($0, 2, maximum: 16), identity: trust.registration), entry.kind == 1,
+            guard let entry = try envelope(candidateOperation, identity: trust.registration), entry.kind == 1,
                   let token = entry.registrationToken else { throw GatewayAuthorityError.corruptData }
             let value = try storedCandidate(entry.canonicalPayload)
             guard value.binding.candidateID == id, value.binding.phoneID == trust.enrollment.phoneID,
@@ -776,8 +970,11 @@ final class GatewayAuthorityJournal {
                 return entry
             }
             guard activation?.operationID == consumed else { throw GatewayAuthorityError.corruptData }
-            return Retained(value: value, consumed: consumed, state: GatewayCurrentTokenState(candidate: entry, activation: activation,
-                candidateExpired: !liveMoment || !liveWall))
+            let activationAbandonment = try activation.flatMap { try abandonedGrant($0.operationID, registration: trust.registration) }
+            let retired = candidateRetired || activationAbandonment?.isRetired == true
+            return Retained(value: value, consumed: consumed, state: GatewayCurrentTokenState(candidate: entry,
+                activation: retired ? nil : activation, candidateExpired: retired || !liveMoment || !liveWall,
+                activationAbandonmentConfirmed: activationAbandonment?.resolution == .confirmed && !candidateRetired))
         }
     }
 
@@ -945,7 +1142,7 @@ final class GatewayAuthorityJournal {
         try scope(identity); _ = try head(identity)
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         let version = try submissionSchemaVersion()
-        guard version == 15 || version == 16 || version == 17 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard (15...18).contains(version) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         guard try CodePolicyJournal(connection: db).read() != nil else { throw GatewayAuthorityError.unconfigured }
         if version == 15 {
             try Self.createSubmissionHistoryStorage(connection: db)
@@ -978,7 +1175,7 @@ final class GatewayAuthorityJournal {
                                  wall: UInt64, now: AuthorityMoment, sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
         try scope(identity); try clock(now); try requireHead(expectedHead, identity: identity)
         guard active else { throw GatewayAuthorityError.unavailableRegistration }
-        guard try (16...17).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try (16...18).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         guard credential.count == 16 else { throw GatewayAuthorityError.wrongScope }
         let (expiry, overflow) = wall.addingReportingOverflow(policy.candidateLifetimeMillis)
         let (deadline, monoOverflow) = now.milliseconds.addingReportingOverflow(policy.candidateLifetimeMillis)
@@ -1017,7 +1214,7 @@ final class GatewayAuthorityJournal {
                            wall: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
         try clock(now); _ = try head(identity)
         guard active else { throw GatewayAuthorityError.unavailableRegistration }
-        guard try (16...17).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try (16...18).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         let entries = try submissionEntries(identity)
         guard let entry = entries.first(where: { $0.receipt.control.operationID == operationID }) else { return nil }
         let value = entry.receipt.control
@@ -1104,7 +1301,7 @@ final class GatewayAuthorityJournal {
         }
     }
 
-    func submissionHistoryInstalled() throws -> Bool { try (16...17).contains(submissionSchemaVersion()) }
+    func submissionHistoryInstalled() throws -> Bool { try (16...18).contains(submissionSchemaVersion()) }
 
     private func submissionSchemaVersion() throws -> Int64 {
         try statement("PRAGMA main.user_version", []) { row in

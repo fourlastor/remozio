@@ -7,21 +7,37 @@ public enum EnrollmentJournalError: Error, Equatable {
     case unconfigured, alreadyConfigured, invalidState, staleRevision, unavailableEnrollment, reusedIdentity, capacityExceeded, corruptData, gatewayRequired, recoveryRequired
 }
 
+enum GatewayRevocationProgress: UInt64, Codable, Sendable {
+    case pending = 1, blocked = 2, applied = 3
+}
+
+struct GatewayRevocationIntent: Sendable {
+    let registration: GatewayRegistrationIdentity
+    let progress: GatewayRevocationProgress
+}
+
 /// Protected setup input. The host must verify administrator authorization and the phone enrollment proof first.
 public struct StoredApprovalEnrollment: Sendable {
     public let epoch: Data
     public let notificationTag: Data
     public let identityPublicKey: Data
     public let approval: ApprovalEnrollment
+    let gatewayRevocation: GatewayRevocationIntent?
     public init(epoch: Data, notificationTag: Data, identityPublicKey: Data, approval: ApprovalEnrollment) throws {
+        try self.init(epoch: epoch, notificationTag: notificationTag, identityPublicKey: identityPublicKey,
+            approval: approval, gatewayRevocation: nil)
+    }
+    fileprivate init(epoch: Data, notificationTag: Data, identityPublicKey: Data, approval: ApprovalEnrollment,
+                     gatewayRevocation: GatewayRevocationIntent?) throws {
         guard epoch.count == 16, notificationTag.count == 32, approval.keys.count == 2,
+              gatewayRevocation == nil || !approval.active,
               Set(approval.keys.map(\.keyClass)).count == 2,
               Set(approval.keys.map(\.publicKey)).count == 2,
               ([identityPublicKey] + approval.keys.map(\.publicKey)).allSatisfy({
                   $0.count == 65 && (try? P256.Signing.PublicKey(x963Representation: $0)) != nil
               }) else { throw EnrollmentJournalError.invalidState }
         try EnrollmentEncoding.validate(approval.capabilities)
-        self.epoch = epoch; self.notificationTag = notificationTag; self.identityPublicKey = identityPublicKey; self.approval = approval
+        self.epoch = epoch; self.notificationTag = notificationTag; self.identityPublicKey = identityPublicKey; self.approval = approval; self.gatewayRevocation = gatewayRevocation
     }
 }
 
@@ -46,9 +62,14 @@ private enum EnrollmentEncoding {
     }
     struct Policy: Codable { let version: Int; let contracts: [Contract]; let allowed: [Contract] }
     struct Key: Codable { let id: Data; let kind: String; let publicKey: Data }
+    struct Revocation: Codable {
+        let registration: Data
+        let progress: GatewayRevocationProgress
+    }
     struct Phone: Codable {
         let version: Int; let phone: Data; let epoch: Data; let tag: Data; let identity: Data
         let contracts: [Contract]; let keys: [Key]
+        let gatewayRevocation: Revocation?
     }
     static let maximumBytes = 32768
     static func validate(_ capabilities: ContractCapabilities) throws {
@@ -92,7 +113,9 @@ private enum EnrollmentEncoding {
         try encode(Phone(version: 1, phone: value.approval.phoneID, epoch: value.epoch, tag: value.notificationTag,
             identity: value.identityPublicKey, contracts: contracts(value.approval.capabilities), keys: value.approval.keys.map {
                 Key(id: $0.id, kind: $0.keyClass.rawValue, publicKey: $0.publicKey)
-            }.sorted { $0.id.lexicographicallyPrecedes($1.id) }))
+            }.sorted { $0.id.lexicographicallyPrecedes($1.id) }, gatewayRevocation: try value.gatewayRevocation.map {
+                Revocation(registration: try $0.registration.encode(), progress: $0.progress)
+            }))
     }
     static func phone(_ data: Data, active: Bool) throws -> StoredApprovalEnrollment {
         do {
@@ -102,7 +125,9 @@ private enum EnrollmentEncoding {
                 approval: ApprovalEnrollment(phoneID: value.phone, active: active, capabilities: capabilities(value.contracts), keys: value.keys.map {
                     guard let kind = ApprovalKeyClass(rawValue: $0.kind) else { throw EnrollmentJournalError.corruptData }
                     return try EnrolledApprovalKey(id: $0.id, keyClass: kind, publicKey: $0.publicKey)
-                }))
+                }), gatewayRevocation: try value.gatewayRevocation.map {
+                    try GatewayRevocationIntent(registration: GatewayRegistrationIdentity.decode($0.registration), progress: $0.progress)
+                })
         } catch { throw EnrollmentJournalError.corruptData }
     }
 }
@@ -285,6 +310,11 @@ final class EnrollmentJournal {
                 guard active == 0 || active == 1 else { throw EnrollmentJournalError.corruptData }
                 let value = try EnrollmentEncoding.phone(blob($0, 3), active: active == 1)
                 guard try blob($0, 0) == value.approval.phoneID, try blob($0, 1) == value.epoch else { throw EnrollmentJournalError.corruptData }
+                if let intent = value.gatewayRevocation {
+                    guard intent.registration.macID == mac, intent.registration.accountID == account else {
+                        throw EnrollmentJournalError.corruptData
+                    }
+                }
                 values.append(value)
             }
         }
@@ -312,15 +342,49 @@ final class EnrollmentJournal {
         return try advance(expected)
     }
 
-    func revoke(phone: Data, epoch: Data, expected: UUID) throws -> (StoredApprovalEnrollment, UUID) {
+    func revoke(phone: Data, epoch: Data, expected: UUID,
+                gatewayIntent: GatewayRegistrationIdentity? = nil) throws -> (StoredApprovalEnrollment, UUID) {
         try require(expected)
         guard let old = try all().first(where: { $0.approval.phoneID == phone && $0.epoch == epoch }), old.approval.active else {
             throw EnrollmentJournalError.unavailableEnrollment
         }
-        try statement("UPDATE main.approval_enrollments_v1 SET active=0 WHERE phone=? AND epoch=? AND active=1", [phone, epoch]) {
+        let intent = gatewayIntent.map { GatewayRevocationIntent(registration: $0, progress: .pending) }
+        let updated = try inactive(old, intent: intent)
+        try statement("UPDATE main.approval_enrollments_v1 SET active=0,body=? WHERE phone=? AND epoch=? AND active=1",
+                      [EnrollmentEncoding.encode(updated), phone, epoch]) {
             try done($0); guard sqlite3_changes(db) == 1 else { throw EnrollmentJournalError.staleRevision }
         }
         return (old, try advance(expected))
+    }
+
+    func gatewayRegistration() throws -> GatewayRegistrationIdentity? {
+        try statement("SELECT identity FROM main.gateway_authority_v1 WHERE id=1", []) {
+            let result = sqlite3_step($0)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            let identity = try GatewayRegistrationIdentity.decode(blob($0, 0))
+            guard identity.macID == mac, identity.accountID == account else { throw EnrollmentJournalError.corruptData }
+            return identity
+        }
+    }
+
+    func updateGatewayRevocation(_ phone: DeliveryRecipient, registration: GatewayRegistrationIdentity,
+                                 progress: GatewayRevocationProgress) throws {
+        guard let row = try all().first(where: { DeliveryRecipient($0) == phone }),
+              row.gatewayRevocation?.registration == registration else { throw EnrollmentJournalError.unavailableEnrollment }
+        guard row.gatewayRevocation?.progress != .applied, row.gatewayRevocation?.progress != progress else { return }
+        let updated = try inactive(row, intent: GatewayRevocationIntent(registration: registration, progress: progress))
+        try statement("UPDATE main.approval_enrollments_v1 SET body=? WHERE phone=? AND epoch=? AND active=0",
+                      [EnrollmentEncoding.encode(updated), phone.phoneID, phone.enrollmentEpoch]) {
+            try done($0); guard sqlite3_changes(db) == 1 else { throw EnrollmentJournalError.unavailableEnrollment }
+        }
+    }
+
+    private func inactive(_ row: StoredApprovalEnrollment, intent: GatewayRevocationIntent?) throws -> StoredApprovalEnrollment {
+        let approval = try ApprovalEnrollment(phoneID: row.approval.phoneID, active: false,
+            capabilities: row.approval.capabilities, keys: row.approval.keys)
+        return try StoredApprovalEnrollment(epoch: row.epoch, notificationTag: row.notificationTag,
+            identityPublicKey: row.identityPublicKey, approval: approval, gatewayRevocation: intent)
     }
     func restrictRecovered(phone: Data, epoch: Data, expected: UUID, evidenceChanged: Bool) throws -> UUID {
         try require(expected)

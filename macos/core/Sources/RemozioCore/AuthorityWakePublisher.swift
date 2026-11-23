@@ -15,7 +15,9 @@ private struct WakePublicationSample: Sendable {
 private struct PhonePushPublicationWork: Sendable {
     let enrollment: StoredApprovalEnrollment
     let state: GatewayCurrentTokenState
-    var revision: UInt64 { state.activation?.revision ?? state.candidate.revision }
+    func nextRevision(after head: UInt64) -> UInt64 {
+        state.candidate.revision > head ? state.candidate.revision : (state.activation?.revision ?? state.candidate.revision)
+    }
 }
 
 /// Owns one Root control channel and one transient wake incarnation. No network await holds the journal lock.
@@ -33,7 +35,13 @@ public actor AuthorityWakePublisher {
     private let phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)?
     private var phonePushConfigurationDigest: Data?
     public private(set) var phonePushDiagnostic: AuthorityPhonePushPublicationDiagnostic
+    private let gatewayRevocations: AuthorityGatewayRevocationState?
+    private var revocationRecoverySupported: Bool?
+    private var grantTombstonesSupported: Bool?
+    private var grantTombstoneRetryAt: UInt64 = 0
+    private var revocationCapabilityRetryAt: UInt64 = 0
     private var phoneCursor = 0
+    private var revocationCursor = 0
     private var probeOperations: [Data: Data] = [:]
     public nonisolated let hintFeed: AuthorityWakeHintFeed
     private var state = State.new
@@ -51,10 +59,15 @@ public actor AuthorityWakePublisher {
                 receiptTime: @escaping @Sendable () -> UInt64? = { nil },
                 ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)? = nil,
                 phonePush: AuthorityPhonePushPublication? = nil,
-                phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)? = nil) throws {
+                phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)? = nil,
+                gatewayRevocations: AuthorityGatewayRevocationState? = nil) throws {
         guard (1...60_000).contains(leaseMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
         guard phonePush == nil || phonePush?.provider.policy.registration == registration else { throw AuthorityWakePublisherError.wrongAuthority }
+        guard gatewayRevocations == nil || gatewayRevocations?.registration == registration else {
+            throw AuthorityWakePublisherError.wrongAuthority
+        }
         self.phonePush = phonePush; self.phonePushSource = phonePushSource
+        self.gatewayRevocations = gatewayRevocations
         phonePushDiagnostic = phonePush == nil ? .disabled : .notStarted
         self.journal = journal; self.channel = channel; self.registration = registration
         self.leaseMilliseconds = leaseMilliseconds; self.clock = clock; self.routing = ownerRouting ?? { _, _ in try routing() }; self.receiptTime = receiptTime
@@ -80,6 +93,7 @@ public actor AuthorityWakePublisher {
             phonePushConfigurationDigest = configurationDigest; return false
         }
         phonePush = publication; phonePushConfigurationDigest = configurationDigest; phonePushDiagnostic = .notStarted
+        gatewayRevocations?.setPushEnabled(true, owner: session)
         return true
     }
 
@@ -88,6 +102,7 @@ public actor AuthorityWakePublisher {
         state = .opening
         do {
             try journal.withRequests { try $0.beginWakePublicationSession(session) }
+            gatewayRevocations?.begin(session, pushEnabled: phonePush != nil)
             _ = try sample()
             try await channel.start()
             guard state == .opening else { throw AuthorityWakePublisherError.closed }
@@ -106,6 +121,7 @@ public actor AuthorityWakePublisher {
             if next == nil { phonePushDiagnostic = .disabled }
             else if phonePush == nil { phonePushDiagnostic = .notStarted }
             phonePush = next
+            gatewayRevocations?.setPushEnabled(next != nil, owner: session)
         }
         busy = true
         hintFeed.pause()
@@ -183,6 +199,7 @@ public actor AuthorityWakePublisher {
     public func close() async {
         guard state != .closed else { return }
         state = .closed; lease = nil; phonePushDiagnostic = .closed
+        gatewayRevocations?.close(session)
         hintFeed.close()
         // The gateway's connection lease owns cleanup if withdrawal cannot complete during shutdown.
         try? journal.withRequests { $0.endWakePublicationSession(session) }
@@ -219,9 +236,7 @@ public actor AuthorityWakePublisher {
         let (next, sequenceOverflow) = sequence.addingReportingOverflow(1)
         let (deadline, clockOverflow) = current.now.milliseconds.addingReportingOverflow(leaseMilliseconds)
         guard !sequenceOverflow, !clockOverflow else { throw AuthorityWakePublisherError.invalidClock }
-        let enrollments = try current.trust.enrollments.map {
-            try GatewayPhoneEnrollment(phoneID: $0.approval.phoneID, epoch: $0.epoch, tag: $0.notificationTag, active: $0.approval.active)
-        }
+        let enrollments = try Self.gatewaySnapshotEnrollments(current.trust.enrollments)
         let snapshot = try GatewayHostSnapshot(registration: registration, rootEpoch: current.now.epoch,
             sequence: next, observedAtMilliseconds: current.now.milliseconds, leaseDeadlineMilliseconds: deadline,
             enrollments: enrollments, active: true, phoneRouting: current.routing.destination == .phones)
@@ -229,8 +244,45 @@ public actor AuthorityWakePublisher {
         try await channel.synchronize(snapshot)
         try requireOpen()
         lease = (deadline, current.trust.approval.revision, snapshot.phoneRouting)
-        _ = try liveSample()
+        let afterSync = try liveSample()
+        if let gatewayRevocations, phonePush != nil {
+            if revocationRecoverySupported != true, afterSync.now.milliseconds >= revocationCapabilityRetryAt {
+                let supported = try await channel.supportsPhoneRevocationRecovery(registration: registration)
+                revocationRecoverySupported = supported
+                if !supported {
+                    let (retryAt, overflow) = afterSync.now.milliseconds.addingReportingOverflow(30_000)
+                    revocationCapabilityRetryAt = overflow ? UInt64.max : retryAt
+                }
+            }
+            let live = try liveSample()
+            if let supported = revocationRecoverySupported, live.trust.approval.revision == current.trust.approval.revision {
+                gatewayRevocations.publishCapability(supported, now: live.now, deadline: deadline, owner: session)
+            }
+            if grantTombstonesSupported != true, live.now.milliseconds >= grantTombstoneRetryAt {
+                let supported = try await channel.supportsGrantTombstones(registration: registration)
+                grantTombstonesSupported = supported
+                if !supported {
+                    let (retryAt, overflow) = live.now.milliseconds.addingReportingOverflow(30_000)
+                    grantTombstoneRetryAt = overflow ? UInt64.max : retryAt
+                }
+            }
+        }
     }
+
+    static func gatewaySnapshotEnrollments(_ retained: [StoredApprovalEnrollment]) throws -> [GatewayPhoneEnrollment] {
+        var byPhone: [Data: GatewayPhoneEnrollment] = [:]
+        for enrollment in retained {
+            let phoneID = enrollment.approval.phoneID
+            if let prior = byPhone[phoneID] {
+                guard !(prior.active && enrollment.approval.active) else { throw GatewayServiceError.invalidMessage }
+                guard enrollment.approval.active else { continue }
+            }
+            byPhone[phoneID] = try GatewayPhoneEnrollment(phoneID: phoneID, epoch: enrollment.epoch,
+                tag: enrollment.notificationTag, active: enrollment.approval.active)
+        }
+        return Array(byPhone.values)
+    }
+
     private func withPhoneOwner<Value: Sendable>(_ expectedRevision: UUID, _ body: @Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> Value) throws -> Value {
         try requireOpen()
         let expectedEpoch = epoch, deadline = lease?.deadline
@@ -283,23 +335,64 @@ public actor AuthorityWakePublisher {
     private func reconcilePhonePush() async throws -> Bool {
         guard let push = phonePush else { return true }
         let first = try liveSample(), revision = first.trust.approval.revision
-        guard first.trust.enrollments.contains(where: { $0.approval.active }) else {
+        guard !first.trust.enrollments.isEmpty else {
+            gatewayRevocations?.recordGrantHealth(.clear, owner: session)
             phoneCursor = 0; probeOperations = [:]; return true
         }
         let headOwner = try GatewayHeadQueryOwner(registration: registration, gatewayPublicKey: push.gatewayPublicKey,
             clockEpoch: first.now.epoch, lifetimeMillis: min(5000, leaseMilliseconds))
         let reply = try await channel.head(query: headOwner.makeQuery(now: first.now))
         let current = try liveSample(), head = try headOwner.accept(reply, now: current.now)
+        if gatewayRevocations != nil {
+            try await observeRevocation(head: head, headOwner: headOwner, current: current, revision: revision)
+        }
         let acknowledgment = try withPhoneOwner(revision) { owner, now in
             try owner.acknowledgePhonePushHead(push.provider, head: head, expectedTrustRevision: revision, now: now)
         }
-        guard acknowledgment.disposition == .recorded || acknowledgment.disposition == .alreadyRecorded else { return false }
+        guard acknowledgment.disposition == .recorded || acknowledgment.disposition == .alreadyRecorded else {
+            if acknowledgment.disposition == .conflictingLocalHistory {
+                gatewayRevocations?.recordGrantHealth(.blocked, owner: session)
+            }
+            return false
+        }
+        if try withPhoneOwner(revision, { owner, now in
+            try owner.prepareManagedPhoneRevocation(push.provider, now: now, wall: push.wallTime())
+        }) { return false }
+        let retirement = try withPhoneOwner(revision) { owner, now in
+            try owner.phonePushGrantRetirement(push.provider, after: head.evidence.revision, now: now, wall: push.wallTime())
+        }
+        switch retirement {
+        case .none:
+            gatewayRevocations?.recordGrantHealth(.clear, owner: session)
+        case .expiresBeforeRetirement:
+            gatewayRevocations?.recordGrantHealth(.waitingForGrantExpiry, owner: session)
+            return false
+        case .eligible(let control):
+            guard grantTombstonesSupported == true else {
+                let health: GatewayRevocationHealth = grantTombstonesSupported == false ? .gatewayUpdateNeeded : .pending
+                gatewayRevocations?.recordGrantHealth(health, owner: session)
+                return false
+            }
+            let signature = try withPhoneOwner(revision) { owner, now in
+                try owner.abandonPhonePushGrant(control, provider: push.provider, now: now, wall: push.wallTime())
+            }
+            do {
+                try withPhoneOwner(revision) { _, _ in }
+                _ = try await channel.abandonGrant(control, signature: signature)
+                gatewayRevocations?.recordGrantHealth(.pending, owner: session)
+            } catch GatewayRootChannelError.rejected {
+                // The gateway can commit before losing its reply. A nil reply is not a refusal.
+                gatewayRevocations?.recordGrantHealth(.grantAbandonmentInconclusive, owner: session)
+            }
+            // Another signed head is required before moving on to the next control.
+            return false
+        }
         let enrollments = current.trust.enrollments.filter { $0.approval.active }
         let phones = Set(enrollments.map { $0.approval.phoneID })
         probeOperations = probeOperations.filter { phones.contains($0.key) }
-        guard !enrollments.isEmpty else { phoneCursor = 0; return true }
-        let count = min(push.maximumPhonesPerTurn, enrollments.count), start = phoneCursor % enrollments.count
-        defer { phoneCursor = (start + count) % enrollments.count }
+        let count = min(push.maximumPhonesPerTurn, enrollments.count)
+        let start = enrollments.isEmpty ? 0 : phoneCursor % enrollments.count
+        defer { phoneCursor = enrollments.isEmpty ? 0 : (start + count) % enrollments.count }
         let retained = try withPhoneOwner(revision) { owner, now in
             let wall = try push.wallTime()
             return try enrollments.compactMap { enrollment -> PhonePushPublicationWork? in
@@ -312,31 +405,134 @@ public actor AuthorityWakePublisher {
             try owner.phonePushPublicationBarrier(push.provider, after: head.evidence.revision, now: now)
         }
         let work = Dictionary(uniqueKeysWithValues: retained.map { ($0.enrollment.approval.phoneID, $0) })
-        let pendingControls = retained.filter { !$0.state.needsRenewal && $0.revision > head.evidence.revision }.sorted { $0.revision < $1.revision }
+        let signedHead = head.evidence.revision
+        let pendingControls = retained.filter { !$0.state.needsRenewal && $0.nextRevision(after: signedHead) > signedHead }
+            .sorted { $0.nextRevision(after: signedHead) < $1.nextRevision(after: signedHead) }
         var selected = pendingControls.prefix(count).map(\.enrollment)
         // New controls follow the shared revision order. Remaining slots poll existing mappings in cursor order.
         for index in 0..<count where selected.count < count {
             let enrollment = enrollments[(start + index) % enrollments.count]
             if !selected.contains(where: { $0.approval.phoneID == enrollment.approval.phoneID }) { selected.append(enrollment) }
         }
-        selected.sort { (work[$0.approval.phoneID]?.revision ?? UInt64.max) < (work[$1.approval.phoneID]?.revision ?? UInt64.max) }
+        selected.sort {
+            (work[$0.approval.phoneID]?.nextRevision(after: signedHead) ?? UInt64.max)
+                < (work[$1.approval.phoneID]?.nextRevision(after: signedHead) ?? UInt64.max)
+        }
         var confirmedHead = head.evidence.revision, completed = true
         for enrollment in selected {
-            // Expired probes wait for a fresh authenticated phone exchange. A timer must not fill retained history with renewals.
-            guard let item = work[enrollment.approval.phoneID], !item.state.needsRenewal else { continue }
-            if let otherControl, item.revision > otherControl {
+            guard let item = work[enrollment.approval.phoneID] else { continue }
+            // Expired probes still wait for a fresh authenticated phone exchange.
+            if item.state.needsRenewal {
+                guard item.state.activationAbandonmentConfirmed else { continue }
+                do {
+                    let observation = try await mappingState(item.state, revision: revision)
+                    if observation.activation == nil {
+                        try repairMissing(observation, state: item.state, enrollment: enrollment, revision: revision)
+                    }
+                } catch GatewayRootChannelError.rejected { completed = false }
+                continue
+            }
+            let next = item.nextRevision(after: confirmedHead)
+            if let otherControl, next > otherControl {
                 completed = false; continue
             }
-            if let barrier = pendingControls.first(where: { $0.revision > confirmedHead }), item.revision > barrier.revision {
+            if next > confirmedHead, next - confirmedHead != 1 {
                 completed = false; continue
             }
             do {
-                if let appliedRevision = try await publishPhoneState(item.state, enrollment: enrollment, revision: revision) {
+                if let appliedRevision = try await publishPhoneState(item.state, enrollment: enrollment, revision: revision, head: confirmedHead) {
                     confirmedHead = max(confirmedHead, appliedRevision)
                 }
             } catch GatewayRootChannelError.rejected { completed = false }
         }
+        if let otherControl, let envelope = try withPhoneOwner(revision, { owner, now in
+            try owner.localPhonePushRevocation(push.provider, revision: otherControl, now: now)
+        }) {
+            let earlier = pendingControls.contains { item in
+                let pending = item.nextRevision(after: signedHead)
+                return pending > signedHead && pending < otherControl
+            }
+            try await recoverRevocation(envelope, signedHead: head.evidence.revision, earlier: earlier, revision: revision)
+            return false
+        }
         return completed
+    }
+
+    private func recoverRevocation(_ envelope: GatewayAuthorityEnvelope, signedHead: UInt64, earlier: Bool,
+                                   revision: UUID) async throws {
+        let operation = envelope.operationID
+        let target = try revocationRecipient(envelope)
+        guard let gatewayRevocations else { return }
+        if earlier {
+            gatewayRevocations.record(.gatewayPending, for: operation, owner: session)
+            return
+        }
+        guard revocationRecoverySupported == true, signedHead == envelope.revision - 1 else {
+            if revocationRecoverySupported == true {
+                try withPhoneOwner(revision) { [registration] owner, _ in
+                    try owner.recordManagedPhoneRevocation(target, registration: registration, progress: .blocked)
+                }
+            }
+            gatewayRevocations.record(.gatewayBlocked, for: operation, owner: session)
+            return
+        }
+        gatewayRevocations.record(.gatewayPending, for: operation, owner: session)
+        do {
+            _ = try await channel.recoverPhoneRevocation(envelope, registration: registration, expectedHead: signedHead)
+            try withPhoneOwner(revision) { _, _ in }
+            // The next turn verifies an independent gateway signature before reporting delivery.
+        } catch GatewayRootChannelError.rejected {
+            // The gateway may have committed before the reply was lost. Recheck its signed head on the next turn.
+        }
+    }
+
+    private func revocationRecipient(_ envelope: GatewayAuthorityEnvelope) throws -> DeliveryRecipient {
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 8, maxItems: 128)
+        let control = try GatewayPhoneRevocation.decode(envelope.canonicalPayload, limits: limits)
+        return DeliveryRecipient(phoneID: control.binding.phoneID, enrollmentEpoch: control.binding.enrollmentEpoch)
+    }
+
+    private func observeRevocation(head: VerifiedGatewayHead, headOwner: GatewayHeadQueryOwner,
+                                   current: WakePublicationSample, revision: UUID) async throws {
+        guard let push = phonePush, let gatewayRevocations, head.evidence.revision > 0 else { return }
+        let headRevision = head.evidence.revision
+        let inactive = current.trust.enrollments.filter { !$0.approval.active }
+        guard !inactive.isEmpty else { return }
+        let index = revocationCursor % inactive.count
+        revocationCursor = (index + 1) % inactive.count
+        let phone = DeliveryRecipient(inactive[index])
+        let envelope: GatewayAuthorityEnvelope? = try withPhoneOwner(revision) { owner, now in
+            if let exact = try owner.localPhonePushRevocation(push.provider, revision: headRevision, now: now),
+               gatewayRevocations.deliveryStatus(exact.operationID) != .gatewayApplied {
+                return exact
+            }
+            return try owner.localPhonePushRevocation(push.provider, phone: phone, now: now)
+        }
+        guard let envelope, envelope.revision <= headRevision,
+              gatewayRevocations.deliveryStatus(envelope.operationID) != .gatewayApplied else { return }
+        let receipt: GatewayControlReceipt?
+        if envelope.revision == headRevision {
+            receipt = head.evidence.receipt
+        } else {
+            let query = try headOwner.makeHistoryQuery(afterRevision: envelope.revision - 1,
+                throughRevision: envelope.revision, maximumRecords: 1, now: current.now)
+            do {
+                let reply = try await channel.history(query: query)
+                receipt = try headOwner.acceptHistory(reply, now: liveSample().now).page.records.first
+            } catch GatewayRootChannelError.rejected { return }
+        }
+        // An empty page may reflect incomplete retained history. Only a conflicting receipt proves a mismatch.
+        guard let receipt else {
+            gatewayRevocations.record(.gatewayInconclusive, for: envelope.operationID, owner: session)
+            return
+        }
+        let matches = receipt.kind == envelope.kind && receipt.operationID == envelope.operationID
+            && receipt.canonicalPayload == envelope.canonicalPayload && receipt.signature == envelope.signature
+        let target = try revocationRecipient(envelope)
+        try withPhoneOwner(revision) { [registration] owner, _ in
+            try owner.recordManagedPhoneRevocation(target, registration: registration, progress: matches ? .applied : .blocked)
+        }
+        gatewayRevocations.record(matches ? .gatewayApplied : .gatewayBlocked, for: envelope.operationID, owner: session)
     }
     private func confirmsMapping(_ observation: VerifiedGatewayMappingState, activation: GatewayAuthorityEnvelope) throws -> Bool {
         guard let mapped = observation.activation else { return false }
@@ -345,8 +541,12 @@ public actor AuthorityWakePublisher {
         return true
     }
     private func publishPhoneState(_ state: GatewayCurrentTokenState, enrollment: StoredApprovalEnrollment,
-                                   revision: UUID) async throws -> UInt64? {
+                                   revision: UUID, head: UInt64) async throws -> UInt64? {
         if let activation = state.activation {
+            if state.candidate.revision > head {
+                _ = try await channel.applyTokenCandidate(state.candidate, registration: registration)
+                return state.candidate.revision
+            }
             let observed = try await mappingState(state, revision: revision)
             guard try samePhoneState(state, enrollment: enrollment, revision: revision) else { return nil }
             if try confirmsMapping(observed, activation: activation) { return activation.revision }

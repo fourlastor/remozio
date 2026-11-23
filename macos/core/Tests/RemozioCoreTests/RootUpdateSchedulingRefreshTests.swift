@@ -37,6 +37,16 @@ final class RootUpdateSchedulingRefreshTests: XCTestCase {
         XCTAssertEqual(try f.data.store.read(), before)
         XCTAssertEqual(try f.status().requestedAction, .deferUpdate)
     }
+    func testSchema18RefreshPreservesAcceptedOfferWithoutAWrite() throws {
+        let f = try RootUpdateSchedulingFixture(retireExpiredGrant: true)
+        XCTAssertEqual(try f.data.db.read { try $0.storageSchemaVersion }, 18)
+        let accepted = try f.consume(f.control()), before = try f.data.store.read()
+        XCTAssertEqual(try refresh(f), accepted)
+        XCTAssertEqual(try refresh(f), accepted)
+        XCTAssertEqual(try f.data.store.read(), before)
+        XCTAssertEqual(try f.status().requestedAction, .deferUpdate)
+    }
+
     func testRefusedHostCannotMigrateOrPublishAnOffer() throws {
         let f = try RootUpdateSchedulingFixture(startupOffer: false, gatewayEnabled: false), before = try f.data.store.read()
         XCTAssertThrowsError(try refresh(f, verify: { _ in throw Failed() }))

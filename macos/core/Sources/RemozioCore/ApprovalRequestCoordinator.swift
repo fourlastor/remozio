@@ -225,6 +225,22 @@ public final class ApprovalRequestCoordinator {
         _ = try read { _ in true }
     }
 
+    func revokePairedPhone(_ selection: PairedPhoneSelection, eventID: Data,
+                           verifyHost: (JournalTransaction) throws -> Void, recheckAdministrator: () throws -> Void) throws -> PhoneRevocationStatus {
+        guard selection.macID == mac, selection.accountID == account else { throw AuthorityPairingSetupError.wrongScope }
+        let current = try read { tx in
+            try verifyHost(tx)
+            return try tx.approvalTrustSnapshot().revision
+        }
+        guard current == selection.revision else { return .staleSelection }
+        return try write { tx in
+            try verifyHost(tx)
+            try recheckAdministrator()
+            return try tx.revokeManagedPhone(selection.phone, expectedTrustRevision: selection.revision,
+                eventID: eventID, writer: writer, expectedAuditHead: head(tx))
+        }
+    }
+
     /// Local setup only. The host rechecks administrator consent inside the checkpointed commit.
     /// A signing failure after commit is ambiguous; recover the retained receipt instead of enrolling again.
     func commitPairing(_ attempt: PairingEnrollmentAttempt, biometricProof: Data, authorityPublicKey: Data,
@@ -1166,6 +1182,65 @@ public final class ApprovalRequestCoordinator {
         }
         return try read { try provider.publicationBarrier(after: revision, transaction: $0) }
     }
+    func localPhonePushRevocation(_ provider: AuthorityPhonePushRegistration, revision: UInt64,
+                                 now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
+        try checkClock(now)
+        return try read { try provider.localRevocation(at: revision, transaction: $0) }
+    }
+
+    func localPhonePushRevocation(_ provider: AuthorityPhonePushRegistration, phone: DeliveryRecipient,
+                                 now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
+        try checkClock(now)
+        return try read { try provider.localRevocation(for: phone, transaction: $0) }
+    }
+
+    func phonePushGrantRetirement(_ provider: AuthorityPhonePushRegistration, after head: UInt64,
+                                  now: AuthorityMoment, wall: UInt64) throws -> GatewayGrantRetirement {
+        try running(); try checkClock(now)
+        guard head < UInt64.max else { return .none }
+        return try read { try provider.grantRetirement(at: head + 1, transaction: $0, wall: wall) }
+    }
+
+    func abandonPhonePushGrant(_ control: GatewayControlTombstone, provider: AuthorityPhonePushRegistration,
+                              now: AuthorityMoment, wall: UInt64) throws -> Data {
+        try running(); try checkClock(now)
+        if let signature = try read({ try $0.signedGatewayGrantAbandonment(control) }) { return signature }
+        // Commit the retirement and its continuity checkpoint before asking the signer for proof.
+        try write { try provider.stageAbandonment(control, transaction: $0, wall: wall) }
+        return try write { try provider.signAbandonment(control, transaction: $0, wall: wall) }
+    }
+
+    func prepareManagedPhoneRevocation(_ provider: AuthorityPhonePushRegistration, now: AuthorityMoment,
+                                       wall: UInt64) throws -> Bool {
+        try running(); try checkClock(now)
+        let registration = provider.policy.registration
+        let row = try read { tx in
+            try tx.approvalEnrollments().first { row in
+                guard row.gatewayRevocation?.registration == registration,
+                      row.gatewayRevocation?.progress != .applied else { return false }
+                return try tx.gatewayLocalRevocation(for: DeliveryRecipient(row), registration: registration) == nil
+            }
+        }
+        guard let row else { return false }
+        do {
+            return try write { try provider.prepareManagedRevocation(row, transaction: $0, now: now, wall: wall) != nil }
+        } catch GatewayAuthorityError.capacityExceeded {
+            try recordManagedPhoneRevocation(DeliveryRecipient(row), registration: registration, progress: .blocked)
+            return true
+        }
+    }
+
+    func recordManagedPhoneRevocation(_ phone: DeliveryRecipient, registration: GatewayRegistrationIdentity,
+                                      progress: GatewayRevocationProgress) throws {
+        try running()
+        let previous = try read { tx in
+            try tx.approvalEnrollments().first { DeliveryRecipient($0) == phone }?.gatewayRevocation
+        }
+        guard let previous, previous.registration == registration,
+              previous.progress != progress, previous.progress != .applied else { return }
+        try write { try $0.recordGatewayRevocation(phone, registration: registration, progress: progress) }
+    }
+
     /// Automatic expiry/restart recovery retains pairing. A new candidate still requires provider possession proof.
     func renewExpiredPhonePushRegistration(_ provider: AuthorityPhonePushRegistration, phoneID: Data, enrollmentEpoch: Data,
                                           now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
@@ -1365,7 +1440,7 @@ extension ApprovalRequestCoordinator {
         verifyHost: (JournalTransaction) throws -> Void) throws -> UpdateSchedulingIntent {
         try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
         let schema = try read { tx in try verifyHost(tx); return try tx.storageSchemaVersion }
-        if schema != 17 { try enableUpdateSchedulingStorage(candidate: candidate, verifyHost: verifyHost) }
+        if schema < 17 { try enableUpdateSchedulingStorage(candidate: candidate, verifyHost: verifyHost) }
         let previous = try read { tx in try verifyHost(tx); return try tx.updateSchedulingIntent() }
         if let previous, previous.snapshot.updateID == candidate.updateID, previous.snapshot.generation == candidate.generation {
             try candidate.requireCurrent(macID: mac, accountID: account)
@@ -1385,7 +1460,7 @@ extension ApprovalRequestCoordinator {
         }
         try read { tx in
             try verifyHost(tx)
-            guard try tx.storageSchemaVersion == 17 else { throw UpdateSchedulingJournalError.unavailableSchema }
+            guard try tx.storageSchemaVersion >= 17 else { throw UpdateSchedulingJournalError.unavailableSchema }
         }
         try candidate.requireCurrent(macID: mac, accountID: account)
     }

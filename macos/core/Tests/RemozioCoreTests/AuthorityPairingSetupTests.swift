@@ -28,12 +28,13 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let authority = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey(), biometric = P256.Signing.PrivateKey()
         let environment = Environment()
         let access: AuthorityPairingSetupAccess
+        let gatewayRevocations: AuthorityGatewayRevocationState?
         let policy: XPCPeerPolicy
         let writer: AuditEpochWriter
         let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 12, maxItems: 1024)
         var mac: Data { Data(repeating: 1, count: 16) }
         var account: Data { Data(repeating: 2, count: 16) }
-        init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil) throws {
+        init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false) throws {
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
             let ownedRoot = root
             var complete = false
@@ -50,7 +51,16 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16), limits = self.limits
             let db = try JournalDatabase(lease: .init(anchor: root.path, relativeDirectory: "store", owner: getuid()),
                 macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                maximumConsumptions: 20, busyMilliseconds: 100, initialize: true)
+                maximumConsumptions: 20, busyMilliseconds: 100, initialize: true,
+                gatewayPolicy: configureGateway ? GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits,
+                    maximumControls: 32, candidateLifetimeMillis: 1000, clockEpoch: environment.epoch) : nil)
+            if configureGateway {
+                let registration = try GatewayRegistrationIdentity(ownerID: Data(repeating: 40, count: 16), macID: mac, accountID: account,
+                    gatewayID: Data(repeating: 41, count: 16), lifecycleEpoch: Data(repeating: 42, count: 16),
+                    rootPublicKey: authority.publicKey.x963Representation)
+                try db.write { try $0.configureGatewayAuthority(registration) }
+                gatewayRevocations = AuthorityGatewayRevocationState(registration: registration)
+            } else { gatewayRevocations = nil }
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
             _ = try db.write { try $0.configureApprovalAuthority(capabilities: .init(contracts: [contract: []]), allowedContracts: [contract]) }
             let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(mac),
@@ -75,7 +85,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 appPolicy: policy, configuration: .init(transportPublicKey: transport.publicKey.x963Representation, lifetimeMilliseconds: 1000),
                 minimumEnvelopeVersion: 1, auditVersions: auditVersions, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
                     if environment.selfDenied.value { throw Failure.denied }
-                }, commit: { attempt, proof, event, authorize, validate in
+                }, gatewayRevocations: gatewayRevocations, commit: { attempt, proof, event, authorize, validate in
                     try journal.commitPairingFixture(attempt, biometricProof: proof, authorityPublicKey: authority.publicKey.x963Representation,
                         addEventID: event, recheckAdministrator: authorize, now: { environment.now() }, validate: validate, sign: {
                             environment.signed.value += 1
@@ -146,9 +156,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
     }
 
     private final class ClientDriver: PairingClientDriver, @unchecked Sendable {
-        enum Hold: Sendable { case none, stage, commit }
+        enum Hold: Sendable { case none, stage, commit, revoke }
         let endpoint: AuthorityPairingXPCEndpoint
-        let sends = Box(0), stageSends = Box(0), commitSends = Box(0)
+        let sends = Box(0), stageSends = Box(0), commitSends = Box(0), revocationSends = Box(0)
         let hold = Box(Hold.none)
         let late = Box<(@Sendable () -> Void)?>(nil)
         private let transform: @Sendable (PairingClientCall, PairingClientReply) throws -> PairingClientReply
@@ -162,7 +172,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 let result: PairingClientReply
                 do { result = try transform(call, value) } catch { reply(.failed); return }
                 let held: Bool
-                switch (hold.value, call) { case (.stage, .stage), (.commit, .commit): held = true; default: held = false }
+                switch (hold.value, call) {
+                case (.stage, .stage), (.commit, .commit), (.revoke, .managePhone(.revoke, _, _)): held = true
+                default: held = false
+                }
                 if held { late.value = { reply(result) } } else { reply(result) }
             }
             switch call {
@@ -174,6 +187,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 commitSends.value += 1
                 endpoint.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
             case .cancel: endpoint.cancelPairing { complete(.cancelled($0)) }
+            case .phoneManagementHello: endpoint.pairedPhoneHello { complete(.version($0)) }
+            case .managePhone(let operation, let selection, let authorization):
+                if operation == .revoke { revocationSends.value += 1 }
+                endpoint.managePairedPhone(operation.rawValue, selection: selection, authorization: authorization) { complete(.bytes($0)) }
             }
         }
         func close() { endpoint.close() }
@@ -236,7 +253,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         private let policy: XPCPeerPolicy
         init(endpoint: NSXPCListenerEndpoint, policy: XPCPeerPolicy, requirement: String) {
             self.policy = policy; connection = NSXPCConnection(listenerEndpoint: endpoint)
-            connection.remoteObjectInterface = NSXPCInterface(with: AuthorityPairingXPCProtocol.self)
+            connection.remoteObjectInterface = NSXPCInterface(with: AuthorityAppXPCProtocol.self)
             connection.setCodeSigningRequirement(requirement)
         }
         func start(closed: @escaping @Sendable () -> Void) {
@@ -247,7 +264,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 do { guard try policy.verifyCredentials(connection).processID == getpid() else { throw Failure.denied }; reply(value) }
                 catch { reply(.failed) }
             }
-            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in complete(.failed) }) as? any AuthorityPairingXPCProtocol else {
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in complete(.failed) }) as? any AuthorityAppXPCProtocol else {
                 complete(.failed); return
             }
             switch call {
@@ -257,6 +274,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .commit(let setup, let digest, let proof, let authorization):
                 proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
             case .cancel: proxy.cancelPairing { complete(.cancelled($0)) }
+            case .phoneManagementHello: proxy.pairedPhoneHello { complete(.version($0)) }
+            case .managePhone(let operation, let selection, let authorization):
+                proxy.managePairedPhone(operation.rawValue, selection: selection, authorization: authorization) { complete(.bytes($0)) }
             }
         }
         func close() { connection.invalidate() }
@@ -327,6 +347,201 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.commitSends.value, 1); XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
         await channel.close()
     }
+    private func pairForRevocation(_ fixture: Fixture) async throws -> (AuthorityPairingChannel, ClientDriver) {
+        let driver = try ClientDriver(fixture), channel = client(fixture, driver: driver)
+        _ = try await channel.start()
+        let transcript = try await channel.stage(fixture.proposal(), authorization: authorization)
+        _ = try await channel.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, fixture),
+            authorization: authorization)
+        return (channel, driver)
+    }
+
+    func testPairedPhoneRevocationIsCheckpointedAndRejectsOldSelection() async throws {
+        let f = try Fixture(), (channel, driver) = try await pairForRevocation(f)
+        let listed = try await channel.pairedPhones()
+        let phone = try XCTUnwrap(listed.phones.first), selection = try XCTUnwrap(listed.selection(for: phone))
+        XCTAssertEqual(listed.phones.count, 1)
+        let peer = try XCTUnwrap(f.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let originalBinding = AuthorityPeerBinding(peer: peer, revision: listed.revision)
+        try f.journal.read { try $0.requireDirectApprovalBinding(originalBinding) }
+        let before = try await channel.revocationStatus(selection)
+        XCTAssertEqual(before, .active)
+        let approvals = f.environment.authorized.value
+        let result = try await channel.revokePhone(selection, authorization: authorization)
+        XCTAssertEqual(result, .revokedOnMac)
+        XCTAssertEqual(f.environment.authorized.value, approvals + 2)
+        let stale = try await channel.revokePhone(selection, authorization: authorization)
+        XCTAssertEqual(stale, .staleSelection)
+        let current = try await channel.pairedPhones()
+        XCTAssertTrue(current.phones.isEmpty)
+        XCTAssertThrowsError(try f.journal.read { try $0.requireDirectApprovalBinding(originalBinding) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        }
+        let refreshedBinding = AuthorityPeerBinding(peer: peer, revision: current.revision)
+        XCTAssertThrowsError(try f.journal.read { try $0.requireDirectApprovalBinding(refreshedBinding) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+        }
+        let retained = try await channel.revocationStatus(selection)
+        XCTAssertEqual(retained, .revokedOnMac)
+        XCTAssertEqual(try f.records(), 2)
+        XCTAssertEqual(driver.revocationSends.value, 2)
+        try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testLocalRevocationCommitsIntentWhileTheGatewayIsOffline() async throws {
+        let f = try Fixture(configureGateway: true), (channel, _) = try await pairForRevocation(f)
+        let before = try await channel.pairedPhones()
+        XCTAssertEqual(before.revocationAvailability, .gatewayUnavailable)
+        let phone = try XCTUnwrap(before.phones.first), selection = try XCTUnwrap(before.selection(for: phone))
+        let binding = try XCTUnwrap(f.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let status = try await channel.revokePhone(selection, authorization: authorization)
+        XCTAssertEqual(status, .gatewayPending)
+        let retained = try XCTUnwrap(f.journal.read { try $0.approvalEnrollments().first })
+        let intent = try XCTUnwrap(retained.gatewayRevocation)
+        XCTAssertFalse(retained.approval.active)
+        XCTAssertEqual(intent.progress, .pending)
+        XCTAssertEqual(try f.journal.read { try $0.gatewayAuthorityHead(intent.registration) }, 0)
+        let after = try await channel.pairedPhones()
+        XCTAssertTrue(after.phones.isEmpty)
+        XCTAssertEqual(after.gatewayRevocationHealth, .pending)
+        XCTAssertThrowsError(try f.journal.read {
+            try $0.requireDirectApprovalBinding(AuthorityPeerBinding(peer: binding, revision: after.revision))
+        }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+        }
+        try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testPairedPhoneReaderReportsGatewayHealthWithoutAnEnrollmentOrAWrite() async throws {
+        let f = try Fixture(configureGateway: true), gateway = try XCTUnwrap(f.gatewayRevocations)
+        let channel = client(f, driver: try ClientDriver(f))
+        _ = try await channel.start()
+        let previous = try f.continuity.read(), owner = UUID()
+        let clear = try await channel.gatewayRevocationStatus()
+        XCTAssertEqual(clear.health, .clear)
+        gateway.begin(owner)
+        gateway.recordGrantHealth(.gatewayUpdateNeeded, owner: owner)
+        let overview = try await channel.gatewayRevocationStatus()
+        let sheet = try await channel.pairedPhones()
+        XCTAssertTrue(sheet.phones.isEmpty)
+        XCTAssertEqual(overview.health, .gatewayUpdateNeeded)
+        XCTAssertEqual(overview, sheet.gatewayRevocationStatus)
+        gateway.recordGrantHealth(.grantAbandonmentInconclusive, owner: owner)
+        let inconclusive = try await channel.gatewayRevocationStatus()
+        XCTAssertEqual(inconclusive.health, .grantAbandonmentInconclusive)
+        XCTAssertEqual(try f.continuity.read(), previous)
+        XCTAssertEqual(f.environment.authorized.value, 0)
+        await channel.close()
+    }
+
+    func testLostRevocationReplyReadsTheExactEpochWithoutReplayingTheWrite() async throws {
+        let f = try Fixture(), (paired, _) = try await pairForRevocation(f)
+        let list = try await paired.pairedPhones()
+        let selection = try XCTUnwrap(list.selection(for: XCTUnwrap(list.phones.first)))
+        await paired.close()
+        let driver = try ClientDriver(f)
+        let channel = client(f, driver: driver, timeout: 100)
+        _ = try await channel.start(); _ = try await channel.pairedPhones()
+        driver.hold.value = .revoke
+        do {
+            _ = try await channel.revokePhone(selection, authorization: authorization)
+            XCTFail("Accepted a withheld reply")
+        } catch { XCTAssertEqual(error as? AuthorityPairingChannelError, .timedOut) }
+        driver.late.value?()
+        let fresh = client(f, driver: try ClientDriver(f))
+        _ = try await fresh.start()
+        let observed = try await fresh.revocationStatus(selection)
+        XCTAssertEqual(observed, .revokedOnMac)
+        let other = PairedPhoneSelection(macID: f.mac, accountID: f.account, revision: list.revision,
+            phone: DeliveryRecipient(phoneID: selection.phone.phoneID, enrollmentEpoch: Data(repeating: 17, count: 16)))
+        let otherStatus = try await fresh.revocationStatus(other)
+        XCTAssertEqual(otherStatus, .unknown)
+        XCTAssertEqual(driver.revocationSends.value, 1)
+        XCTAssertEqual(try f.records(), 2)
+        try f.assertCheckpoint()
+        await fresh.close()
+    }
+
+    func testPairedPhoneEndpointRejectsForeignMacAndAccountWithoutWriting() async throws {
+        let f = try Fixture(), (channel, _) = try await pairForRevocation(f)
+        let list = try await channel.pairedPhones()
+        let selected = try XCTUnwrap(list.selection(for: XCTUnwrap(list.phones.first)))
+        let foreign = Data(repeating: 200, count: 16)
+        for (mac, account) in [(foreign, f.account), (f.mac, foreign)] {
+            let selection = PairedPhoneSelection(macID: mac, accountID: account, revision: selected.revision, phone: selected.phone)
+            let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {},
+                authorize: { _ in }, invalidate: {})
+            try hello(endpoint)
+            let version = Box<UInt64>(0)
+            endpoint.pairedPhoneHello { version.value = $0 }
+            XCTAssertEqual(version.value, 1)
+            let bytes = try selection.encode()
+            let read = Box<Data?>(Data())
+            endpoint.managePairedPhone(PairedPhoneOperation.status.rawValue, selection: bytes, authorization: Data()) {
+                read.value = $0
+            }
+            XCTAssertNil(read.value)
+            let write = Box<Data?>(Data())
+            endpoint.managePairedPhone(PairedPhoneOperation.revoke.rawValue, selection: bytes, authorization: authorization) {
+                write.value = $0
+            }
+            XCTAssertNil(write.value)
+        }
+        let status = try await channel.revocationStatus(selected)
+        XCTAssertEqual(status, .active)
+        XCTAssertEqual(try f.records(), 1)
+        try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testPhoneRevocationRechecksAdministratorAtTheWrite() async throws {
+        let f = try Fixture(), (channel, _) = try await pairForRevocation(f)
+        let listed = try await channel.pairedPhones()
+        let selection = try XCTUnwrap(listed.selection(for: XCTUnwrap(listed.phones.first)))
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {},
+            authorize: { [calls = Box(0)] _ in
+                calls.value += 1
+                if calls.value == 2 { throw Failure.denied }
+            }, invalidate: {})
+        try hello(endpoint)
+        let version = Box<UInt64>(0)
+        endpoint.pairedPhoneHello { version.value = $0 }
+        XCTAssertEqual(version.value, 1)
+        let reply = Box<Data?>(nil)
+        endpoint.managePairedPhone(PairedPhoneOperation.revoke.rawValue, selection: try selection.encode(),
+            authorization: authorization) { reply.value = $0 }
+        XCTAssertNil(reply.value)
+        let current = try await channel.revocationStatus(selection)
+        XCTAssertEqual(current, .active)
+        XCTAssertEqual(try f.records(), 1)
+        try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testPhoneManagementRequiresItsOwnVersionAndRejectsMalformedSelection() throws {
+        let f = try Fixture()
+        let endpoint = try f.endpoint()
+        try hello(endpoint)
+        let unnegotiated = Box<Data?>(nil)
+        endpoint.managePairedPhone(PairedPhoneOperation.list.rawValue, selection: Data(), authorization: Data()) {
+            unnegotiated.value = $0
+        }
+        XCTAssertNil(unnegotiated.value)
+        let second = try f.endpoint()
+        try hello(second)
+        let negotiated = Box<UInt64>(0)
+        second.pairedPhoneHello { negotiated.value = $0 }
+        XCTAssertEqual(negotiated.value, 1)
+        let malformed = Box<Data?>(nil)
+        second.managePairedPhone(PairedPhoneOperation.revoke.rawValue, selection: Data(repeating: 0, count: 129),
+            authorization: authorization) { malformed.value = $0 }
+        XCTAssertNil(malformed.value)
+        XCTAssertEqual(f.environment.authorized.value, 0)
+        XCTAssertEqual(try f.records(), 0)
+    }
+
     func testClientAuthenticatesParametersStagesAndVerifiesReceipt() async throws {
         let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver)
         let context = try await channel.start()

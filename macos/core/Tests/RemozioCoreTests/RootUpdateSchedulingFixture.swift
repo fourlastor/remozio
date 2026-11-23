@@ -10,10 +10,26 @@ final class RootUpdateSchedulingFixture {
     let owner: ApprovalRequestCoordinator
     let nonce = Data(repeating: 42, count: 32)
     init(checkpointed: Bool = true, enabled: Bool = true, startupOffer: Bool = true, gatewayEnabled: Bool = true,
-        updateOwner: UpdateSchedulingAccountFixture.UpdateOwner = .currentAccount) throws {
+        updateOwner: UpdateSchedulingAccountFixture.UpdateOwner = .currentAccount, retireExpiredGrant: Bool = false) throws {
         let prepared = try UpdateSchedulingAccountFixture(enabled: enabled, gatewayEnabled: gatewayEnabled, updateOwner: updateOwner)
         if enabled && startupOffer { try prepared.install(); _ = try prepared.offer() }
         else { _ = try prepared.machine.select(prepared.machine.copy()) }
+        if retireExpiredGrant {
+            let peer = try prepared.binding(), registration = try prepared.gateway
+            try prepared.commits.write(epoch: prepared.epoch) { tx in
+                let envelope = try tx.prepareGatewayCandidate(registrationToken: "synthetic-token",
+                    authenticatedPhoneID: prepared.id(6), authenticatedEnrollmentEpoch: prepared.id(4),
+                    registration: registration, registrationActive: true, expectedTrustRevision: peer.revision,
+                    expectedHead: 0, nowUnixMillis: 1000, now: prepared.nextNow(), sign: { candidate in
+                        try prepared.rootKey.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+                            canonicalPayload: candidate.encode(limits: prepared.limits), payloadLimits: prepared.limits,
+                            inputLimits: prepared.limits)).rawRepresentation
+                    })
+                guard case .eligible(let control) = try tx.gatewayGrantRetirement(at: envelope.revision,
+                    registration: registration, wall: 2000) else { throw Fault.injected }
+                try tx.stageGatewayGrantAbandonment(control, wall: 2000)
+            }
+        }
         let coordinator: ApprovalRequestCoordinator
         if checkpointed {
             coordinator = try ApprovalRequestCoordinator(database: prepared.db, continuity: prepared.store, writer: prepared.writer,

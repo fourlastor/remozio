@@ -202,11 +202,26 @@ public final class JournalDatabase {
     fileprivate func storageSchemaVersion(_ token: UUID) throws -> UInt64 {
         _ = try access(token)
         let version = try integer("PRAGMA user_version")
-        guard (12...17).contains(version) else {
+        guard (12...18).contains(version) else {
             unavailable = true
             throw JournalDatabaseError.incompatibleStore
         }
         return UInt64(version)
+    }
+
+    fileprivate func firstUnconfirmedGrantAbandonment(_ token: UUID) throws -> UInt64? {
+        guard try storageSchemaVersion(token) >= 18 else { return nil }
+        return try statement("""
+            SELECT first_unconfirmed_ms FROM main.gateway_abandoned_grants_v1
+            WHERE resolution=0 AND first_unconfirmed_ms IS NOT NULL ORDER BY first_unconfirmed_ms LIMIT 1
+            """) { row in
+            let result = sqlite3_step(row)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard sqlite3_column_type(row, 0) == SQLITE_BLOB, sqlite3_column_bytes(row, 0) == 8,
+                  let bytes = sqlite3_column_blob(row, 0) else { throw JournalDatabaseError.incompatibleStore }
+            return UInt64(bigEndian: bytes.loadUnaligned(as: UInt64.self))
+        }
     }
 
     func requireInitializationPath(_ path: String) throws {
@@ -393,7 +408,7 @@ public final class JournalDatabase {
     private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
         let version = try integer("PRAGMA user_version")
         guard try integer("PRAGMA application_id") == Self.applicationID,
-              expectedVersion.map({ version == $0 }) ?? (12...17).contains(version) else {
+              expectedVersion.map({ version == $0 }) ?? (12...18).contains(version) else {
             throw JournalDatabaseError.incompatibleStore
         }
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
@@ -436,6 +451,9 @@ public final class JournalDatabase {
         if version >= 17 {
             queries += ["SELECT update_id,generation,revision,action FROM main.update_scheduling_state_v1 LIMIT 0",
                         "SELECT operation,payload,trust,run,started,deadline,consumed FROM main.update_scheduling_operations_v1 LIMIT 0"]
+        }
+        if version >= 18 {
+            queries.append("SELECT operation,revision,kind,digest,signature,resolution,first_unconfirmed_ms FROM main.gateway_abandoned_grants_v1 LIMIT 0")
         }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
@@ -568,7 +586,6 @@ public final class JournalTransaction {
             _ = try tables()
             let version = try storageSchemaVersion
             if version < 17 { return nil }
-            guard version == 17 else { throw UpdateSchedulingJournalError.unavailableSchema }
             guard let owner else { throw JournalDatabaseError.expiredTransaction }
             return try owner.retainedUpdateSchedulingIntentForAdmission(token)
         } catch {
@@ -738,6 +755,10 @@ public final class JournalTransaction {
     public func requireDirectApprovalBinding(_ binding: AuthorityPeerBinding) throws {
         try withEnrollment(write: false) { try $0.requireDirectBinding(binding) }
     }
+    func hasApprovalGateway() throws -> Bool {
+        try withEnrollment(write: false) { try $0.hasGateway() }
+    }
+
     public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
     }
@@ -760,6 +781,23 @@ public final class JournalTransaction {
                 writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
             return next
         }
+    }
+
+    func revokeManagedPhone(_ phone: DeliveryRecipient, expectedTrustRevision: UUID, eventID: Data,
+                            writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> PhoneRevocationStatus {
+        try withEnrollment(write: true) { ledger in
+            let registration = try ledger.gatewayRegistration()
+            _ = try ledger.revoke(phone: phone.phoneID, epoch: phone.enrollmentEpoch, expected: expectedTrustRevision,
+                gatewayIntent: registration)
+            try enrollmentEvent(phone: phone.phoneID, added: false, eventID: eventID, receiptTimeMs: nil,
+                writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
+            return registration == nil ? .revokedOnMac : .gatewayPending
+        }
+    }
+
+    func recordGatewayRevocation(_ phone: DeliveryRecipient, registration: GatewayRegistrationIdentity,
+                                 progress: GatewayRevocationProgress) throws {
+        try withEnrollment(write: true) { try $0.updateGatewayRevocation(phone, registration: registration, progress: progress) }
     }
 
     /// Removal and its audit event share the transaction with the signed gateway control when a gateway is configured.
@@ -1112,6 +1150,41 @@ public final class JournalTransaction {
 
     public func gatewayAuthorityHead(_ identity: GatewayRegistrationIdentity) throws -> UInt64 {
         try withGateway(write: false) { try $0.head(identity) }
+    }
+
+    func gatewayGrantRetirement(at revision: UInt64, registration: GatewayRegistrationIdentity,
+                                wall: UInt64) throws -> GatewayGrantRetirement {
+        let enrollments = try approvalEnrollments()
+        return try withGateway(write: false) { try $0.grantRetirement(at: revision, registration: registration,
+            enrollments: enrollments, wall: wall) }
+    }
+
+    func stageGatewayGrantAbandonment(_ control: GatewayControlTombstone, wall: UInt64) throws {
+        let enrollments = try approvalEnrollments()
+        if try storageSchemaVersion < 15 { try installCommandSubmissionReplay() }
+        try withGateway(write: true) { try $0.stageGrantAbandonment(control, enrollments: enrollments, wall: wall) }
+    }
+
+    func signedGatewayGrantAbandonment(_ control: GatewayControlTombstone) throws -> Data? {
+        try withGateway(write: false) { try $0.signedGrantAbandonment(control) }
+    }
+
+    func finishGatewayGrantAbandonment(_ control: GatewayControlTombstone, wall: UInt64, sign: (Data) throws -> Data) throws -> Data {
+        try withGateway(write: true) { try $0.finishGrantAbandonment(control, wall: wall, sign: sign) }
+    }
+
+    func firstUnconfirmedGrantAbandonment() throws -> UInt64? {
+        _ = try tables()
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.firstUnconfirmedGrantAbandonment(token)
+    }
+
+    func gatewayLocalRevocation(for phone: DeliveryRecipient, registration: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
+        try withGateway(write: false) { try $0.localRevocation(for: phone, registration: registration) }
+    }
+
+    func gatewayLocalRevocation(at revision: UInt64, registration: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
+        try withGateway(write: false) { try $0.localRevocation(at: revision, registration: registration) }
     }
 
     func firstGatewayNonRegistrationControl(after revision: UInt64, registration: GatewayRegistrationIdentity) throws -> UInt64? {

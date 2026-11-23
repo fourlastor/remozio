@@ -13,8 +13,15 @@ import Synchronization
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void)
 }
 
+/// Optional management on the same authenticated app channel.
+@objc public protocol AuthorityPairedPhoneXPCProtocol {
+    func pairedPhoneHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func managePairedPhone(_ operation: UInt64, selection: Data, authorization: Data,
+                           reply: @escaping @Sendable (Data?) -> Void)
+}
+
 /// One signed app connection retains at most one uncommitted attempt. Disconnect discards only that attempt.
-final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, @unchecked Sendable {
+final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, AuthorityPairedPhoneXPCProtocol, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let access: AuthorityPairingSetupAccess
     private let budget: AuthorityXPCWorkBudget
@@ -24,6 +31,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private let onHandshake: @Sendable () -> Void
     private struct WorkState {
         var ready = false, closed = false, busy = false
+        var phoneManagement = false
         var attempt: PairingEnrollmentAttempt?
         var activity: ReleaseActivityToken?
         var stage: AuthorityMaintenancePairingAdmission.Stage?
@@ -105,6 +113,41 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
     func pairingContext(reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) { try access.context() }
+    }
+    func pairedPhoneHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let completed = try work { state.withLock { $0.phoneManagement = true } }
+            defer { completed.completion.close() }
+            send { reply(1) }
+        } catch { close(); reply(0) }
+    }
+    func managePairedPhone(_ operation: UInt64, selection: Data, authorization: Data,
+                           reply: @escaping @Sendable (Data?) -> Void) {
+        respond(reply) {
+            guard state.withLock({ $0.phoneManagement }), let operation = PairedPhoneOperation(rawValue: operation) else {
+                throw AuthorityPairingSetupError.unavailable
+            }
+            switch operation {
+            case .list:
+                guard selection.isEmpty, authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+                return try access.pairedPhones().encode()
+            case .status:
+                guard authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+                return try Data([UInt8(access.revocationStatus(.decode(selection)).rawValue)])
+            case .revoke:
+                guard attempt == nil, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AuthorityPairingSetupError.unavailable
+                }
+                let selection = try PairedPhoneSelection.decode(selection)
+                try authorize(authorization)
+                let stage = try access.maintenanceAdmission.reserveStage()
+                defer { stage.close() }
+                let replyStage = try stage.retained()
+                state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
+                let status = try access.revokePhone(selection, authorize: { [authorize] in try authorize(authorization) })
+                return Data([UInt8(status.rawValue)])
+            }
+        }
     }
     func stagePairing(_ proposal: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
@@ -213,7 +256,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
 }
 
 /// Existing presence selectors keep version 1. Pairing has an independent version handshake on the signed app channel.
-@objc public protocol AuthorityAppXPCProtocol: AuthorityPresenceXPCProtocol, AuthorityPairingXPCProtocol {}
+@objc public protocol AuthorityAppXPCProtocol: AuthorityPresenceXPCProtocol, AuthorityPairingXPCProtocol, AuthorityPairedPhoneXPCProtocol {}
 
 final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @unchecked Sendable {
     let presence: AuthorityPresenceXPCEndpoint
@@ -225,6 +268,11 @@ final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @uncheck
     func setMode(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { presence.setMode(payload, reply: reply) }
     func pairingHello(reply: @escaping @Sendable (UInt64) -> Void) { pairing.pairingHello(reply: reply) }
     func pairingContext(reply: @escaping @Sendable (Data?) -> Void) { pairing.pairingContext(reply: reply) }
+    func pairedPhoneHello(reply: @escaping @Sendable (UInt64) -> Void) { pairing.pairedPhoneHello(reply: reply) }
+    func managePairedPhone(_ operation: UInt64, selection: Data, authorization: Data,
+                           reply: @escaping @Sendable (Data?) -> Void) {
+        pairing.managePairedPhone(operation, selection: selection, authorization: authorization, reply: reply)
+    }
     func stagePairing(_ proposal: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
         pairing.stagePairing(proposal, authorization: authorization, reply: reply)
     }

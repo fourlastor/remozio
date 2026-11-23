@@ -45,25 +45,31 @@ final class UpdateSchedulingJournal {
 
     func install() throws {
         let version = try schema()
-        guard (15...17).contains(version) else { throw UpdateSchedulingJournalError.unavailableSchema }
+        guard (15...18).contains(version) else { throw UpdateSchedulingJournalError.unavailableSchema }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         guard try CodePolicyJournal(connection: db).read() != nil else { throw UpdateSchedulingJournalError.invalidConfiguration }
-        if version < 17 {
-            if version == 15 { try GatewayAuthorityJournal.createSubmissionHistoryStorage(connection: db) }
-            try exec("""
-                CREATE TABLE main.update_scheduling_state_v1(id INTEGER PRIMARY KEY CHECK(id=1),
-                    update_id BLOB NOT NULL CHECK(length(update_id)=32), generation BLOB NOT NULL CHECK(length(generation)=8),
-                    revision BLOB NOT NULL CHECK(length(revision)=8), action INTEGER CHECK(action IN (0,1,2))) STRICT;
-                CREATE TABLE main.update_scheduling_operations_v1(operation BLOB PRIMARY KEY CHECK(length(operation)=16),
-                    payload BLOB NOT NULL CHECK(length(payload) BETWEEN 1 AND 65536),
-                    trust BLOB NOT NULL CHECK(length(trust)=16), run BLOB NOT NULL CHECK(length(run)=16),
-                    started BLOB NOT NULL CHECK(length(started)=8), deadline BLOB NOT NULL CHECK(length(deadline)=8),
-                    consumed BLOB CHECK(consumed IS NULL OR length(consumed)=8)) STRICT, WITHOUT ROWID;
-                PRAGMA main.user_version=17;
-                """)
-        }
+        if version < 17 { try Self.createStorage(connection: db, from: version) }
         try statement("SELECT update_id,generation,revision,action FROM main.update_scheduling_state_v1 LIMIT 0", []) { try complete($0) }
         try statement("SELECT operation,payload,trust,run,started,deadline,consumed FROM main.update_scheduling_operations_v1 LIMIT 0", []) { try complete($0) }
+    }
+
+    /// Create the empty predecessor tables for a checkpointed migration.
+    static func createStorage(connection: OpaquePointer, from version: Int64) throws {
+        guard version == 15 || version == 16 else { throw UpdateSchedulingJournalError.unavailableSchema }
+        guard sqlite3_txn_state(connection, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
+        if version == 15 { try GatewayAuthorityJournal.createSubmissionHistoryStorage(connection: connection) }
+        let result = sqlite3_exec(connection, """
+            CREATE TABLE main.update_scheduling_state_v1(id INTEGER PRIMARY KEY CHECK(id=1),
+                update_id BLOB NOT NULL CHECK(length(update_id)=32), generation BLOB NOT NULL CHECK(length(generation)=8),
+                revision BLOB NOT NULL CHECK(length(revision)=8), action INTEGER CHECK(action IN (0,1,2))) STRICT;
+            CREATE TABLE main.update_scheduling_operations_v1(operation BLOB PRIMARY KEY CHECK(length(operation)=16),
+                payload BLOB NOT NULL CHECK(length(payload) BETWEEN 1 AND 65536),
+                trust BLOB NOT NULL CHECK(length(trust)=16), run BLOB NOT NULL CHECK(length(run)=16),
+                started BLOB NOT NULL CHECK(length(started)=8), deadline BLOB NOT NULL CHECK(length(deadline)=8),
+                consumed BLOB CHECK(consumed IS NULL OR length(consumed)=8)) STRICT, WITHOUT ROWID;
+            PRAGMA main.user_version=17;
+            """, nil, nil, nil)
+        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
     }
 
     func state() throws -> UpdateSchedulingIntent? {
@@ -249,7 +255,7 @@ final class UpdateSchedulingJournal {
                 run: run, started: started, deadline: deadline, consumed: consumed)
         }
     }
-    private func installed() throws { guard try schema() == 17 else { throw UpdateSchedulingJournalError.unavailableSchema } }
+    private func installed() throws { guard try (17...18).contains(schema()) else { throw UpdateSchedulingJournalError.unavailableSchema } }
     private func schema() throws -> Int64 {
         try statement("PRAGMA main.user_version", []) { row in
             guard sqlite3_step(row) == SQLITE_ROW else { throw JournalDatabaseError.incompatibleStore }
@@ -273,10 +279,6 @@ final class UpdateSchedulingJournal {
             guard rc == SQLITE_OK else { throw JournalDatabaseError.storage(rc) }
         }
         return try body(row)
-    }
-    private func exec(_ sql: String) throws {
-        let rc = sqlite3_exec(db, sql, nil, nil, nil)
-        guard rc == SQLITE_OK else { throw JournalDatabaseError.storage(rc) }
     }
     private func complete(_ row: OpaquePointer) throws {
         guard sqlite3_step(row) == SQLITE_DONE else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) }
