@@ -65,7 +65,19 @@ final class PairingExpiryReceiptTests: XCTestCase {
         let values = try vectors()
         let transcript = try PairingTranscript.decode(hex(values.transcript))
         for row in values.unverified {
-            let receipt = try PairingExpiryReceipt.decode(hex(row.hex))
+            let bytes = hex(row.hex)
+            let receipt = try PairingExpiryReceipt.decode(bytes)
+            if row.name.hasPrefix("another ") {
+                guard case .map(let envelope) = try DeterministicCBOR.decode(bytes,
+                    limits: .init(maxBytes: PairingExpiryReceipt.maximumBytes, maxDepth: 1, maxItems: 8)),
+                    case .bytes(let input) = envelope[0] else { return XCTFail(row.name) }
+                XCTAssertTrue(P256Verification.verify(signature: receipt.signature, publicKey: transcript.macAuthorityKey,
+                    input: input), row.name)
+            }
+            if row.name == "valid MAC_COMMIT signature in the expiry envelope" {
+                XCTAssertTrue(try transcript.verify(signature: receipt.signature, publicKey: transcript.macAuthorityKey,
+                    purpose: .macCommit), row.name)
+            }
             XCTAssertFalse(try receipt.verify(transcript: transcript), row.name)
         }
         let ordinary = try PairingTranscript.decode(hex(values.ordinaryTranscript))

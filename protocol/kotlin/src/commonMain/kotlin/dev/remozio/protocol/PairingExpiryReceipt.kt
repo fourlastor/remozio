@@ -17,9 +17,12 @@ class PairingExpiryReceipt private constructor(private val claims: Claims, signa
         this(Claims.fromTranscript(transcript, reason), signature)
 
     fun verify(transcript: PairingTranscript): Boolean {
-        val predecessor = transcript.replacement ?: return false
-        if (predecessor.phoneID != transcript.phone.scope.value.values[2]) return false
-        if (claims != Claims.fromTranscript(transcript, reason)) return false
+        val expected = try {
+            Claims.fromTranscript(transcript, reason)
+        } catch (_: IllegalArgumentException) {
+            return false
+        }
+        if (claims != expected) return false
         return P256Verification.verify(signature.copyBytes(), transcript.macAuthorityKey.copyBytes(), claims.encode())
     }
 

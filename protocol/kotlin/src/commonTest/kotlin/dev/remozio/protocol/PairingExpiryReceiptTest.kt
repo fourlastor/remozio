@@ -44,8 +44,21 @@ class PairingExpiryReceiptTest {
         val transcript = PairingTranscript.decode(values.bytes("transcript"))
         for (value in values.getValue("unverified").jsonArray) {
             val row = value.jsonObject
-            val receipt = PairingExpiryReceipt.decode(row.bytes("hex"))
-            assertFalse(receipt.verify(transcript), row.getValue("name").jsonPrimitive.content)
+            val name = row.getValue("name").jsonPrimitive.content
+            val bytes = row.bytes("hex")
+            val receipt = PairingExpiryReceipt.decode(bytes)
+            if (name.startsWith("another ")) {
+                val envelope = assertIs<CborValue.Fields>(
+                    DeterministicCbor.decode(bytes, CborLimits(PairingExpiryReceipt.MAXIMUM_BYTES, 1, 8)),
+                )
+                val input = assertIs<CborValue.Bytes>(envelope.values[0uL]).copyBytes()
+                assertTrue(P256Verification.verify(receipt.signature.copyBytes(), transcript.macAuthorityKey.copyBytes(), input), name)
+            }
+            if (name == "valid MAC_COMMIT signature in the expiry envelope") {
+                assertTrue(transcript.verify(receipt.signature.copyBytes(), transcript.macAuthorityKey.copyBytes(),
+                    PairingProofPurpose.MAC_COMMIT), name)
+            }
+            assertFalse(receipt.verify(transcript), name)
         }
         val ordinary = PairingTranscript.decode(values.bytes("ordinaryTranscript"))
         val row = values.getValue("valid").jsonArray.first().jsonObject

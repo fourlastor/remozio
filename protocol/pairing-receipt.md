@@ -93,6 +93,6 @@ The signed input is a canonical CBOR map with these fields.
 | 7 | Unsigned transcript expiry in Unix milliseconds |
 | 8 | Unsigned reason. Zero is deadline elapsed. One is retired authority incarnation. |
 
-The outer map is limited to 1 KiB and contains the canonical input as bytes at key 0 and a raw 64-byte P-256 signature at key 1. Reject unknown fields and noncanonical inputs. Both reason values attest that the exact attempt can no longer commit. The retired-incarnation reason does not assert that the wall deadline passed.
+The outer map is limited to 1 KiB and contains the canonical input as bytes at key 0 and a raw 64-byte P-256 signature at key 1. Reject unknown fields and noncanonical inputs. Like other Root signatures, this format accepts both high-S and low-S signatures. A claim can have multiple valid receipt byte sequences. Use the setup ID and transcript digest to identify the attempt. Both reason values attest that the exact attempt can no longer commit. The retired-incarnation reason does not assert that the wall deadline passed.
 
 Verify all claims against the retained re-pair transcript. Verify the signature with its pinned Root authority key and the dedicated signing input. An ordinary pairing transcript is ineligible. Swift and Kotlin share the signed, malformed, and signature or binding rejection cases in `vectors/pairing-expiry-receipt-v1.json`.
