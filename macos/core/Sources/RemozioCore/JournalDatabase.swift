@@ -624,6 +624,10 @@ public final class JournalTransaction {
         }
     }
 
+    func expiredRePairStages() throws -> [PairingRecoveryStage] {
+        try withRecoveryStages { try $0?.expiredStages() ?? [] }
+    }
+
     private func withRecoveryStages<Value>(write: Bool = false, install: Bool = false,
                                            _ body: (PairingRecoveryStageJournal?) throws -> Value) throws -> Value {
         do {

@@ -146,23 +146,37 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 }
                 let selection = try PairedPhoneSelection.decode(selection)
                 try authorize(authorization)
-                let stage = try access.maintenanceAdmission.reserveStage()
-                defer { stage.close() }
-                let replyStage = try stage.retained()
-                state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
-                let status = try access.revokePhone(selection, authorize: { [authorize] in try authorize(authorization) })
-                return Data([UInt8(status.rawValue)])
+                return try withPhoneMutationAdmission {
+                    let status = try access.revokePhone(selection, authorize: { [authorize] in try authorize(authorization) })
+                    return Data([UInt8(status.rawValue)])
+                }
+            case .listExpiredRePairs:
+                guard selection.isEmpty, authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+                return try access.expiredRePairs().encode()
             case .discardExpiredRePair:
-                guard selection.count == 48, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                guard attempt == nil, selection.count == 48,
+                      authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
                     throw AuthorityPairingSetupError.invalidConfirmation
                 }
                 try authorize(authorization)
-                try access.discardExpiredRePair(setupID: Data(selection.prefix(16)), digest: Data(selection.suffix(32)),
-                                               authorize: { [authorize] in try authorize(authorization) })
-                return Data([1])
+                return try withPhoneMutationAdmission {
+                    try access.discardExpiredRePair(setupID: Data(selection.prefix(16)), digest: Data(selection.suffix(32)),
+                                                   authorize: { [authorize] in try authorize(authorization) })
+                    return Data([1])
+                }
             }
         }
     }
+    private func withPhoneMutationAdmission(_ body: () throws -> Data) throws -> Data {
+        let stage = try access.maintenanceAdmission.reserveStage()
+        defer { stage.close() }
+        let replyStage = try stage.retained()
+        state.withLock { state in
+            if let id = state.currentOperation { state.retiringStages[id, default: []].append(replyStage) }
+        }
+        return try body()
+    }
+
     func stagePairing(_ proposal: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
             guard attempt == nil, proposal.count <= 132_000,

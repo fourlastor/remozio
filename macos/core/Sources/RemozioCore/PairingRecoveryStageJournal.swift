@@ -47,7 +47,7 @@ struct PairingRecoveryStageJournal {
     private static let columns = "setup,phone,proposal,transcript,digest,incarnation,started,deadline,state"
     private static let phoneIndex = "pairing_recovery_phone_v1"
     private static let phoneIndexDefinition = "UNIQUE INDEX \(phoneIndex) ON \(table)(phone)"
-    private static let maximumSlots = 32
+    static let maximumSlots = 32
     let db: OpaquePointer
 
     static func createStorage(on db: OpaquePointer) throws {
@@ -169,21 +169,41 @@ struct PairingRecoveryStageJournal {
             let step = sqlite3_step(row)
             if step == SQLITE_DONE { return nil }
             guard step == SQLITE_ROW else { throw JournalDatabaseError.storage(step) }
-            let setup = try blob(row, 0, length: 16...16)
-            let phone = try blob(row, 1, length: 16...16)
-            let transcript = try PairingTranscript.decode(blob(row, 3, length: 1...132_000))
-            guard transcript.setupID == setup, transcript.phone.scope.phoneID == phone,
-                  sqlite3_column_type(row, 8) == SQLITE_INTEGER,
-                  let state = PairingRecoveryStage.State(rawValue: sqlite3_column_int64(row, 8)) else {
-                throw JournalDatabaseError.incompatibleStore
-            }
-            let stage = try PairingRecoveryStage(transcript: transcript, proposalDigest: blob(row, 2, length: 32...32),
-                incarnation: GatewayHostSnapshot.uuid(blob(row, 5, length: 16...16)),
-                started: number(row, 6), deadline: number(row, 7), state: state)
-            guard try stage.transcriptDigest == blob(row, 4, length: 32...32),
-                  sqlite3_step(row) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore }
+            let stage = try decode(row)
+            guard sqlite3_step(row) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore }
             return stage
         }
+    }
+
+    func expiredStages() throws -> [PairingRecoveryStage] {
+        try statement("SELECT \(Self.columns) FROM main.\(Self.table) WHERE state IN (2,3) ORDER BY phone", []) { row in
+            var stages: [PairingRecoveryStage] = []
+            while true {
+                let step = sqlite3_step(row)
+                if step == SQLITE_DONE { return stages }
+                guard step == SQLITE_ROW else { throw JournalDatabaseError.storage(step) }
+                guard stages.count < Self.maximumSlots else { throw JournalDatabaseError.incompatibleStore }
+                stages.append(try decode(row))
+            }
+        }
+    }
+
+    private func decode(_ row: OpaquePointer) throws -> PairingRecoveryStage {
+        let setup = try blob(row, 0, length: 16...16)
+        let phone = try blob(row, 1, length: 16...16)
+        let transcript = try PairingTranscript.decode(blob(row, 3, length: 1...132_000))
+        guard transcript.setupID == setup, transcript.phone.scope.phoneID == phone,
+              sqlite3_column_type(row, 8) == SQLITE_INTEGER,
+              let state = PairingRecoveryStage.State(rawValue: sqlite3_column_int64(row, 8)) else {
+            throw JournalDatabaseError.incompatibleStore
+        }
+        let stage = try PairingRecoveryStage(transcript: transcript, proposalDigest: blob(row, 2, length: 32...32),
+            incarnation: GatewayHostSnapshot.uuid(blob(row, 5, length: 16...16)),
+            started: number(row, 6), deadline: number(row, 7), state: state)
+        guard try stage.transcriptDigest == blob(row, 4, length: 32...32) else {
+            throw JournalDatabaseError.incompatibleStore
+        }
+        return stage
     }
 
     private func mutate(_ sql: String, _ values: [Data]) throws {

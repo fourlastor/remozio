@@ -272,6 +272,22 @@ final class AuthorityPairingSetupAccess: Sendable {
             validateSetupCode: requireCurrent)
     }
 
+    func expiredRePairs() throws -> ExpiredRePairSnapshot {
+        try journal.read { tx in
+            try self.requireCurrent(tx)
+            let records = try tx.expiredRePairStages().map { stage in
+                let scope = stage.transcript.phone.scope
+                guard scope.macID == macID, scope.accountID == accountID, let reason = stage.state.expiryReason else {
+                    throw AuthorityPairingSetupError.wrongScope
+                }
+                return ExpiredRePairRecord(macID: macID, accountID: accountID, phoneID: scope.phoneID,
+                    originalExpiryUnixMilliseconds: stage.transcript.expiresAtUnixMillis, reason: reason,
+                    setupID: stage.transcript.setupID, transcriptDigest: stage.transcriptDigest)
+            }
+            return ExpiredRePairSnapshot(macID: macID, accountID: accountID, records: records)
+        }
+    }
+
     func discardExpiredRePair(setupID: Data, digest: Data, authorize: () throws -> Void) throws {
         guard setupID.count == 16, digest.count == 32 else { throw AuthorityPairingSetupError.invalidConfirmation }
         try journal.discardExpiredRePair(setupID: setupID, digest: digest, verifyHost: requireCurrent, authorize: authorize)

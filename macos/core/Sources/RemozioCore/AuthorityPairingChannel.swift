@@ -47,7 +47,7 @@ enum PairingClientCall: Sendable {
 enum PairingClientReply: Sendable { case version(UInt64), bytes(Data?), cancelled(Bool), failed }
 protocol PairingClientDriver: Sendable {
     func start(closed: @escaping @Sendable () -> Void)
-    func invoke(_ call: PairingClientCall, reply: @escaping @Sendable (PairingClientReply) -> Void)
+    func invoke(_ call: PairingClientCall, onSend: () -> Void, reply: @escaping @Sendable (PairingClientReply) -> Void)
     func close()
 }
 private final class NativePairingClientDriver: PairingClientDriver, @unchecked Sendable {
@@ -62,13 +62,14 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
     func start(closed: @escaping @Sendable () -> Void) {
         connection.interruptionHandler = closed; connection.invalidationHandler = closed; connection.activate()
     }
-    func invoke(_ call: PairingClientCall, reply: @escaping @Sendable (PairingClientReply) -> Void) {
+    func invoke(_ call: PairingClientCall, onSend: () -> Void, reply: @escaping @Sendable (PairingClientReply) -> Void) {
         if case .hello = call {} else {
             do { _ = try policy.verifyCredentials(connection) } catch { reply(.failed); return }
         }
         guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in reply(.failed) }) as? any AuthorityAppXPCProtocol else {
             reply(.failed); return
         }
+        onSend()
         switch call {
         case .hello: proxy.pairingHello { [self] in checked(.version($0), reply: reply) }
         case .context: proxy.pairingContext { [self] in checked(.bytes($0), reply: reply) }
@@ -113,7 +114,7 @@ public actor AuthorityPairingChannel {
     private var context: AuthorityPairingContext?
     private var staged: PairingTranscript?
     private var managesPhones = false
-    private var authorizingRevocation = false
+    private var authorizingPhoneMutation = false
     private var pending: (id: UUID, continuation: CheckedContinuation<PairingClientReply, any Error>)?
     private var timer: Task<Void, Never>?
 
@@ -169,19 +170,10 @@ public actor AuthorityPairingChannel {
 
     /// Call after explicit confirmation. The rights live only through this single mutation.
     public func revokePhone(_ selection: PairedPhoneSelection) async throws -> PhoneRevocationStatus {
-        guard managesPhones, state == .open, !authorizingRevocation else { throw AuthorityPairingChannelError.closed }
+        guard managesPhones, state == .open, !authorizingPhoneMutation else { throw AuthorityPairingChannelError.closed }
         try requireScope(selection)
-        authorizingRevocation = true
-        let administrator = NativePairingAdministrator()
-        defer { authorizingRevocation = false }
-        do {
-            let authorization = try await administrator.authorization()
-            let status = try await revokePhone(selection, authorization: authorization)
-            await administrator.close()
-            return status
-        } catch {
-            await administrator.close()
-            throw error
+        return try await withPhoneAdministrator { channel, authorization in
+            try await channel.revokePhone(selection, authorization: authorization)
         }
     }
 
@@ -198,6 +190,68 @@ public actor AuthorityPairingChannel {
         try requireScope(selection)
         try await requirePhoneManagement()
         return try decodeStatus(bytes(await perform(.managePhone(.status, selection.encode(), Data()))))
+    }
+
+    func expiredRePairs() async throws -> [ExpiredRePairRecord] {
+        try await requirePhoneManagement()
+        let reply: PairingClientReply
+        do {
+            reply = try await perform(.managePhone(.listExpiredRePairs, Data(), Data()))
+        } catch AuthorityPairingChannelError.closed {
+            throw ExpiredRePairListError.supportUnconfirmed
+        }
+        // Earlier Root versions close this connection or return nil for the unknown operation.
+        guard case .bytes(let data?) = reply else {
+            close()
+            throw ExpiredRePairListError.supportUnconfirmed
+        }
+        return try ExpiredRePairSnapshot.decode(data, macID: macID, accountID: accountID).records
+    }
+
+    func discardExpiredRePair(_ record: ExpiredRePairRecord,
+                              administrator: (any MacPairingAdministrator)? = nil) async throws {
+        var submitted = false
+        do {
+            guard record.macID == macID, record.accountID == accountID else {
+                throw AuthorityPairingChannelError.wrongAccount
+            }
+            try await requirePhoneManagement()
+            try await withPhoneAdministrator(administrator) { channel, authorization in
+                guard authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AuthorityPairingChannelError.invalidMessage
+                }
+                let reply = try await channel.perform(.managePhone(.discardExpiredRePair, record.selection, authorization),
+                    onSend: { submitted = true })
+                guard try channel.bytes(reply) == Data([1]) else {
+                    channel.close()
+                    throw AuthorityPairingChannelError.invalidMessage
+                }
+            }
+        } catch SetupAdministratorAuthorizationError.cancelled where !submitted {
+            throw SetupAdministratorAuthorizationError.cancelled
+        } catch {
+            throw submitted ? ExpiredRePairDiscardError.replyUnconfirmed : .notSubmitted
+        }
+    }
+
+    private func withPhoneAdministrator<Value>(
+        _ administrator: (any MacPairingAdministrator)? = nil,
+        _ operation: (isolated AuthorityPairingChannel, Data) async throws -> Value
+    ) async throws -> Value {
+        guard state == .open, !authorizingPhoneMutation else { throw AuthorityPairingChannelError.closed }
+        authorizingPhoneMutation = true
+        defer { authorizingPhoneMutation = false }
+        let administrator = administrator ?? NativePairingAdministrator()
+        do {
+            let authorization = try await administrator.authorization()
+            try Task.checkCancellation()
+            let value = try await operation(self, authorization)
+            await administrator.close()
+            return value
+        } catch {
+            await administrator.close()
+            throw error
+        }
     }
 
     private func requirePhoneManagement() async throws {
@@ -289,7 +343,7 @@ public actor AuthorityPairingChannel {
         guard case .bytes(let value) = reply, let value, value.count <= 132_000 else { throw AuthorityPairingChannelError.invalidMessage }
         return value
     }
-    private func perform(_ call: PairingClientCall) async throws -> PairingClientReply {
+    private func perform(_ call: PairingClientCall, onSend: () -> Void = {}) async throws -> PairingClientReply {
         do { try verifyAccount() } catch { close(); throw error }
         try Task.checkCancellation()
         switch call {
@@ -310,9 +364,12 @@ public actor AuthorityPairingChannel {
                 if case .hello = call {
                     driver.start { [weak self] in lifetime.close(); Task { await self?.close() } }
                 }
-                guard lifetime.ifOpen({ driver.invoke(call) { [weak self] value in Task { await self?.complete(id, value: value) } } }) else {
-                    close(); return
+                let invoked = lifetime.ifOpen {
+                    driver.invoke(call, onSend: onSend) { [weak self] value in
+                        Task { await self?.complete(id, value: value) }
+                    }
                 }
+                if !invoked { close() }
             }
         } onCancel: { [weak self] in lifetime.close(); driver.close(); Task { await self?.close() } }
         try Task.checkCancellation()
