@@ -14,11 +14,15 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
-/** Platform operations confined to the engine for a single authenticated recovery connection. */
-interface PairingRecoveryTLSProvider {
+/** Platform operations confined to the engine for a single authenticated pairing connection. */
+interface PairingTLSExporter {
     fun configure(engine: SSLEngine)
     fun export(engine: SSLEngine): ByteArray?
 }
+
+interface PairingRecoveryTLSProvider : PairingTLSExporter
+
+interface PairingV2TLSProvider : PairingTLSExporter
 
 /** The opener authenticates a route before this channel sends one lookup. The caller owns the lease and key manager. */
 class PairingRecoveryChannel private constructor(
@@ -77,7 +81,7 @@ class PairingRecoveryChannel private constructor(
                     session = TLSRecordSession(parent, engine, carrier)
                     session.awaitOpen()
                     checkRoute()
-                    PairingRecoveryChannel(session, engine.recoveryExporter(), query, keys, checkRoute)
+                    PairingRecoveryChannel(session, engine.pairingExporter(), query, keys, checkRoute)
                 } catch (failure: Throwable) {
                     withContext(NonCancellable) {
                         if (session != null) session.closeAndJoin() else {

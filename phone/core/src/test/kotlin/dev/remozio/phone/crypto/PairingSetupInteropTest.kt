@@ -4,6 +4,8 @@ import dev.remozio.pairing.PairingSetupChannel
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.transport.*
 import dev.remozio.protocol.*
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -19,6 +21,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.crypto.KeyGenerator
 import javax.net.ssl.KeyManager
+import javax.net.ssl.SSLEngine
+import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.SSLSocket
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.serialization.json.*
@@ -282,4 +287,69 @@ class PairingSetupInteropTest {
             } finally { session?.closeAndJoin(); owner.cancelAndJoin() }
         }
     }
+    @Test fun v2WaitsForTheTranscriptAfterTheRouteSelectionBudgetElapses(): Unit = runBlocking {
+        val phone = HeldCertificate.Builder().ecdsa256().commonName("v2-fixture-phone").build()
+        val mac = HeldCertificate.Builder().ecdsa256().commonName("v2-fixture-mac").build()
+        val server = HandshakeCertificates.Builder().heldCertificate(mac).addTrustedCertificate(phone.certificate).build()
+        val keys = arrayOf<KeyManager>(HandshakeCertificates.Builder().heldCertificate(phone).build().keyManager)
+        val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
+        val authority = point(key())
+        val pin = point(mac.keyPair)
+        val invitation = PairingInvitation(ByteArray(16) { 1 }, ByteArray(16) { 2 }, "Fixture", authority, pin, 1u)
+        val credentials = PairingInvitationV2(invitation, ByteArray(16) { 5 }, ByteArray(32) { 6 },
+            lifetimeMilliseconds = 60_000u)
+        val offer = ChannelOffer(ChannelRole.PHONE, scope, ByteArray(32) { 7 }, setOf(1u), emptyList(), emptySet())
+        val proposal = PairingPhoneProposal(offer, PairingKey(ByteArray(16) { 8 }, point(phone.keyPair)),
+            PairingKey(ByteArray(16) { 9 }, point(key())), PairingKey(ByteArray(16) { 10 }, point(key())))
+        val transcript = PairingTranscript(ByteArray(16) { 11 }, ByteArray(32) { 12 }, offer,
+            ChannelOffer(ChannelRole.MAC, scope, ByteArray(32) { 13 }, setOf(1u), emptyList(), emptySet()), 1u, 1u,
+            authority, pin, proposal.transportKey, proposal.decisionKey, proposal.biometricKey,
+            ByteArray(32) { 14 }, null, ByteArray(16) { 15 }, 1000u, 2000u)
+        val routeBudgetMillis = 2_000L
+        val challenge = ByteArray(32) { 16 }
+        // The Android device test checks the platform exporter. This peer isolates the route/session deadline.
+        val exporter = ByteArray(32) { 17 }
+        val provider = object : PairingV2TLSProvider {
+            override fun configure(engine: SSLEngine) = Unit
+            override fun export(engine: SSLEngine) = exporter.copyOf()
+        }
+        val address = InetAddress.getByName("127.0.0.1")
+        (server.sslContext().serverSocketFactory.createServerSocket(0, 1, address) as SSLServerSocket).use { listener ->
+            listener.soTimeout = 8_000
+            listener.needClientAuth = true
+            listener.enabledProtocols = arrayOf("TLSv1.3")
+            listener.sslParameters = listener.sslParameters.apply {
+                applicationProtocols = arrayOf(PairingSetupPreludeV2.APPLICATION_PROTOCOL)
+            }
+            val peer = async(Dispatchers.IO) {
+                (listener.accept() as SSLSocket).use { socket ->
+                    socket.soTimeout = 8_000
+                    socket.startHandshake()
+                    assertEquals(PairingSetupPreludeV2.APPLICATION_PROTOCOL, socket.applicationProtocol)
+                    val output = DataOutputStream(socket.outputStream)
+                    fun send(body: ByteArray) { output.writeInt(body.size); output.write(body); output.flush() }
+                    send(PairingSetupPreludeV2.Challenge(challenge).encode())
+                    val input = DataInputStream(socket.inputStream)
+                    val size = input.readInt()
+                    require(size in 1..PairingSetupPreludeV2.MAXIMUM_BYTES)
+                    val proof = assertIs<PairingSetupPreludeV2.Proposal>(
+                        PairingSetupPreludeV2.decode(ByteArray(size).also(input::readFully)))
+                    assertEquals(CborValue.Bytes(credentials.proof(proposal, challenge, exporter)), proof.tag)
+                    delay(routeBudgetMillis + 250)
+                    send(PairingSetupFrame.Transcript(transcript).encode())
+                }
+            }
+            val channel = authenticatePairingV2Routes(this, flowOf(ApprovalCarrierRoute { owner ->
+                DirectTCPConnector().connect(owner, InetSocketAddress(address, listener.localPort))
+            }), keys, credentials, proposal, routeBudgetMillis, provider)
+            try {
+                val actual = withTimeout(8_000) { channel.awaitTranscriptV2(credentials) }
+                assertContentEquals(transcript.encode(), actual.encode())
+                peer.await()
+            } finally {
+                channel.closeAndJoin()
+            }
+        }
+    }
+
 }
