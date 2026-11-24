@@ -459,6 +459,11 @@ class CoreTestSelectionTests(unittest.TestCase):
         self.assertEqual(JOBS.select([JOBS.WEIGHTS]), set())
         self.assertIsNone(JOBS.release_reason([JOBS.WEIGHTS]))
 
+    def test_a_slow_test_exceptions_change_alone_runs_only_the_python_checks(self):
+        self.assertEqual(JOBS.jobs_for(JOBS.SLOW_TESTS), frozenset())
+        self.assertEqual(JOBS.select([JOBS.SLOW_TESTS]), set())
+        self.assertIsNone(JOBS.release_reason([JOBS.SLOW_TESTS]))
+
     def test_the_smoke_classes_are_weighted_core_classes_that_need_no_app(self):
         weights = json.loads((ROOT / JOBS.WEIGHTS).read_text())['weights']
         for name in JOBS.SMOKE_CLASSES:

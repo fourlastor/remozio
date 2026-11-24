@@ -1,0 +1,18 @@
+{
+ "description": "macos/core tests allowed to exceed the 20 s per-test limit that scripts/core-test-time-guard.py enforces after the Mac core test shards. Each entry is Class/method with a written reason and its own cap in seconds, about 1.5 times its measured time; a run over its cap fails like any other slow test. This file is meant to shrink over time: remove an entry once its test is fast. Adding an entry or raising a cap must be a visible change that a reviewer approves on its own merits, never a quiet way to make CI pass. nightly_total_cap_seconds is the summed per-test time of the whole suite above which the nightly run prints a warning; it never fails.",
+ "source": "Per-test durations from the latest full main run on 2026-11-24 (suite total about 7,974 s). Each cap is about 1.5 times the measured time, rounded up.",
+ "nightly_total_cap_seconds": 9500,
+ "exceptions": {
+  "MachineUpdateReplacementTests/testCompletionPublicationStorageRetainsOnlyTheExactRecordedPlan": {"cap_seconds": 155, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "MachineUpdateRetainedSetupPromotionSourceValidationTests/testAValidChangedCompletionRowIsRejectedAfterEverySourceRead": {"cap_seconds": 99, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "MachineUpdateRetainedSetupPromotionSourceValidationTests/testRuntimeClientsAndMaterialRejectChangesAfterAValidRead": {"cap_seconds": 39, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "SetupExecutorAdmissionOwnerTests/testAuditScopeSurvivesTwoHundredTimedClaimsGroup00": {"cap_seconds": 36, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "SetupExecutorAdmissionOwnerTests/testAuditScopeSurvivesTwoHundredTimedClaimsGroup01": {"cap_seconds": 36, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "SetupExecutorAdmissionOwnerTests/testAuditScopeSurvivesTwoHundredTimedClaimsGroup02": {"cap_seconds": 36, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "SetupExecutorAdmissionOwnerTests/testAuditScopeSurvivesTwoHundredTimedClaimsGroup03": {"cap_seconds": 36, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "SetupExecutorAdmissionOwnerTests/testAuditScopeSurvivesTwoHundredTimedClaimsGroup04": {"cap_seconds": 36, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "MachCommandCallerReceiverTests/testNativePTYFullDuplexPreservesBinaryBytesThroughKernelBackpressure": {"cap_seconds": 35, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "MachineUpdateReplacementTests/testCompletionFileCoordinatorPublishesBothAccounts": {"cap_seconds": 34, "reason": "pre-existing; tracked for the store fixture speed-up"},
+  "SetupOrphanRecoveryOperationsTests/testFiveOwnerCleanupFailuresWaitForANewQuiescenceEvent": {"cap_seconds": 31, "reason": "pre-existing; tracked for the store fixture speed-up"}
+ }
+}

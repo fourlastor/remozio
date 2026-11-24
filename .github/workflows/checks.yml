@@ -311,6 +311,9 @@ jobs:
         part: ${{ fromJSON(needs.changes.outputs.mac_core_parts || '[1, 2]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Depth 2 also fetches the base a pull request was merged onto, for the duration check's changed paths.
+          fetch-depth: 2
       - name: Identify compatible Mac build cache
         id: build-cache-key
         run: python3 scripts/ci-build-cache.py key --scope mac --github-output "$GITHUB_OUTPUT"
@@ -347,6 +350,22 @@ jobs:
           python3 scripts/run-xctest-shards.py --package-path macos/core \
             --weights .github/macos-core-test-weights.json "$@" --app-dependent exclude \
             --allowed-skips RemozioCoreTests.LiveOwnedJobInspectionTests/testOwnedGUIJobReconciliation \
+            -- --triple arm64-apple-macosx26.0 -Xswiftc -O
+      # Fails on a test over 20 s (or over its cap in .github/macos-core-slow-tests.json) that is still slow when
+      # re-run alone, and on a pull request whose selected or changed classes outgrow their weights. It reads the
+      # shard logs and changes neither the selection nor the shards; see scripts/core-test-time-guard.py.
+      - name: Check macos/core test durations
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PARTS: ${{ needs.changes.outputs.mac_core_parts || '[1, 2]' }}
+          MODE: ${{ needs.changes.outputs.mac_core_mode || 'full' }}
+          SELECTED_TESTS: ${{ needs.changes.outputs.mac_core_tests }}
+        run: |
+          parts=1
+          if [ "$PARTS" != '[1]' ]; then parts=2; fi
+          python3 scripts/core-test-time-guard.py --package-path macos/core --event "$EVENT_NAME" --base "$BASE_SHA" \
+            --mode "$MODE" --selected-tests "$SELECTED_TESTS" --parts "$parts" \
             -- --triple arm64-apple-macosx26.0 -Xswiftc -O
       - name: Retain shard logs
         if: always()
