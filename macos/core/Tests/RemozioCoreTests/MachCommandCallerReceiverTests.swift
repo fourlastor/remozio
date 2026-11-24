@@ -809,8 +809,9 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         guard case .admitted = try typedOutcome(firstReply, submission: original, profile: originalProfile) else {
             return XCTFail("The original request must commit")
         }
+        let retiredAt = fixture.now(120)
         _ = try XCTUnwrap(fixture.authority).withRequests { try $0.retirePending(requestID: request.requestID,
-            reason: .cancelled, now: fixture.now(120), receiptTimeMs: nil) }
+            reason: .cancelled, now: retiredAt, receiptTimeMs: nil) }
         let hold = DispatchSemaphore(value: 0)
         let occupied = try pool.start(.admission(getuid())) { _, _ in
             _ = hold.wait(timeout: .now() + .seconds(5))
