@@ -1537,21 +1537,13 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let phoneIdentity = try AuthorityJournalSchema19MigrationTests.fixtureIdentity(phone)
         let (legacy, _) = try AuthorityJournalSchema19MigrationTests.fixtureConnectLookup(port: port, purpose: PairingSetupFrame.applicationProtocol,
             serverKey: invitation.invitation.transportPublicKey, identity: phoneIdentity)
-        let legacyRejected: Bool
         do {
             try await legacy.start(timeoutMilliseconds: 2_000)
-            legacyRejected = try await legacy.receive() == nil
-        } catch NetworkChannelError.failed {
-            legacyRejected = true
-        } catch NetworkChannelError.closed {
-            legacyRejected = true
-        } catch NetworkChannelError.timedOut {
-            // Network.framework can leave the incompatible TLS handshake pending until the client deadline.
-            // The v2 exchange below must still complete on this listener.
-            legacyRejected = true
+            XCTFail("The v2 listener completed a legacy TLS handshake")
+        } catch NetworkChannelError.failed, NetworkChannelError.closed, NetworkChannelError.timedOut {
+            // Network.framework can leave an incompatible handshake pending until the client deadline.
         }
         await legacy.close()
-        XCTAssertTrue(legacyRejected, "The v2 listener accepted a legacy setup frame")
 
         let (channel, connection) = try AuthorityJournalSchema19MigrationTests.fixtureConnectLookup(port: port, purpose: PairingSetupPreludeV2.applicationProtocol,
             serverKey: invitation.invitation.transportPublicKey, identity: phoneIdentity)
