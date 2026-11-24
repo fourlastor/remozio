@@ -23,6 +23,7 @@ public protocol PairingOperatorConsole: AnyObject {
 public enum PairingSessionError: Error, Equatable {
     case unexpectedFrame
     case malformedFrame
+    case invalidInvitationProof
     case wrongTransportKey
     case wrongScope
     case invalidTranscript
@@ -89,15 +90,49 @@ public final class PairingAuthoritySession {
     public static func unixMilliseconds() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     public func run() throws(PairingSessionFailure) -> PairingSessionOutcome {
-        do { return try exchange() }
+        try run(prelude: legacyProposal)
+    }
+
+    public func runV2(invitation: PairingInvitationV2, proofDeadline: Int64,
+                      exporter: () throws -> Data) throws(PairingSessionFailure) -> PairingSessionOutcome {
+        try run { deadline in
+            try self.invitationProposal(invitation, deadline: min(deadline, proofDeadline), exporter: exporter)
+        }
+    }
+
+    private func run(prelude: (Int64) throws -> PairingPhoneProposal) throws(PairingSessionFailure) -> PairingSessionOutcome {
+        do { return try exchange(prelude: prelude) }
         catch let error as PairingSessionError { throw PairingSessionFailure(error: error, transcriptSent: transcriptSent) }
         catch { throw PairingSessionFailure(error: .stream(String(describing: error)), transcriptSent: transcriptSent) }
     }
 
-    private func exchange() throws -> PairingSessionOutcome {
-        var deadline = now() + limitMilliseconds
+    private func legacyProposal(deadline: Int64) throws -> PairingPhoneProposal {
         try write(.hello, deadline: deadline)
         guard case .proposal(let proposal) = try read(deadline: deadline) else { throw PairingSessionError.unexpectedFrame }
+        return proposal
+    }
+
+    private func invitationProposal(_ invitation: PairingInvitationV2, deadline: Int64,
+                                    exporter: () throws -> Data) throws -> PairingPhoneProposal {
+        let challenge = randomBytes(32)
+        try write(PairingSetupPreludeV2.challenge(challenge).encode(), deadline: deadline)
+        let body = try readBody(maximum: PairingSetupPreludeV2.maximumBytes, deadline: deadline)
+        guard let prelude = try? PairingSetupPreludeV2.decode(body),
+              case .proposal(let proposal, let tag) = prelude else {
+            throw PairingSessionError.malformedFrame
+        }
+        var material = try exporter()
+        defer { material.resetBytes(in: 0..<material.count) }
+        guard (try? invitation.verifiesProof(tag, proposal: proposal, challenge: challenge, exporter: material)) == true else {
+            throw PairingSessionError.invalidInvitationProof
+        }
+        guard now() < deadline else { throw PairingSessionError.expired }
+        return proposal
+    }
+
+    private func exchange(prelude: (Int64) throws -> PairingPhoneProposal) throws -> PairingSessionOutcome {
+        var deadline = now() + limitMilliseconds
+        let proposal = try prelude(deadline)
         guard proposal.transportKey.publicKey == peerPoint else { throw PairingSessionError.wrongTransportKey }
         guard proposal.phone.scope.macID == identity.macID, proposal.phone.scope.accountID == identity.accountID else {
             throw PairingSessionError.wrongScope
@@ -189,7 +224,10 @@ public final class PairingAuthoritySession {
     // MARK: Framing
 
     private func write(_ frame: PairingSetupFrame, deadline: Int64) throws {
-        let body = try frame.encode()
+        try write(frame.encode(), deadline: deadline)
+    }
+
+    private func write(_ body: Data, deadline: Int64) throws {
         let size = UInt32(body.count)
         var output = Data([UInt8(size >> 24), UInt8((size >> 16) & 255), UInt8((size >> 8) & 255), UInt8(size & 255)])
         output.append(body)
@@ -198,14 +236,19 @@ public final class PairingAuthoritySession {
     }
 
     private func read(deadline: Int64) throws -> PairingSetupFrame {
+        let body = try readBody(maximum: PairingSetupFrame.maximumBytes, deadline: deadline)
+        guard let frame = try? PairingSetupFrame.decode(body) else { throw PairingSessionError.malformedFrame }
+        return frame
+    }
+
+    private func readBody(maximum: Int, deadline: Int64) throws -> Data {
         try fill(4, deadline: deadline)
         let length = pending.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-        guard length > 0, length <= PairingSetupFrame.maximumBytes else { throw PairingSessionError.malformedFrame }
+        guard length > 0, length <= maximum else { throw PairingSessionError.malformedFrame }
         try fill(4 + Int(length), deadline: deadline)
         let body = pending.subdata(in: pending.startIndex + 4..<pending.startIndex + 4 + Int(length))
         pending = Data(pending.dropFirst(4 + Int(length)))
-        guard let frame = try? PairingSetupFrame.decode(body) else { throw PairingSessionError.malformedFrame }
-        return frame
+        return body
     }
 
     private func fill(_ count: Int, deadline: Int64) throws {
