@@ -860,6 +860,27 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testAdmissionRejectsReplacementAfterFinalFilesystemProbe() throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true)
+        let authority = try XCTUnwrap(fixture.authority)
+        let tool = fixture.root.appendingPathComponent("admission-tool").path
+        let replacement = fixture.root.appendingPathComponent("admission-replacement").path
+        for path in [tool, replacement] { try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: path) }
+        let reply = try Endpoint()
+        let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: tool)
+        let context = try admissionContext(), now = fixture.now()
+        let before = try fixture.auditRecordCount
+        XCTAssertThrowsError(try authority.admitCommandAttempt(attempt, expression: selfExpression(),
+            resolve: { _ in .capture(context) }, draft: { self.admissionDraft($0, fixture: fixture) },
+            now: {
+                XCTAssertEqual(rename(replacement, tool), 0)
+                return now
+            }, receiptTimeMs: nil)) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+        XCTAssertNil(try fixture.reservation(submission.binding.id))
+        XCTAssertEqual(try fixture.auditRecordCount, before)
+    }
+
     func testAdmissionAttemptCallbackErrorsCannotSpoofCaptureRefusalAndCannotReenterJournal() throws {
         for stage in 0..<3 {
             let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
@@ -5328,6 +5349,30 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(outcome?.phase, .succeeded)
         XCTAssertEqual(outcome?.revision, 2)
         XCTAssertGreaterThanOrEqual(calls.withLock { $0 }, 4)
+    }
+
+    func testNativeDispatchRejectsReplacementAfterFinalFilesystemProbe() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tool = directory.appendingPathComponent("tool").path
+        let replacement = directory.appendingPathComponent("replacement").path
+        for path in [tool, replacement] { try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: path) }
+        let test = try nativeDispatchFixture(path: tool)
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let now = test.fixture.now(130)
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, clock: {
+            let count = calls.withLock { $0 += 1; return $0 }
+            if count == 3 { XCTAssertEqual(rename(replacement, tool), 0) }
+            return now
+        })
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertGreaterThanOrEqual(calls.withLock { $0 }, 3)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .failedBeforeStart)
+        let id = test.request.requestID
+        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .cancelled)
+        XCTAssertEqual(outcome?.revision, 1)
     }
 
     func testNativeDispatchRetriesFilesystemCapacityBeforePreparationAndDispatch() throws {

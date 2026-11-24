@@ -18,6 +18,10 @@ public final class RetainedCommandCapture {
         guard !closed else { throw RetainedCommandCaptureError.closed }
         return try filesystem.makeRecheck()
     }
+    func verifyFilesystemMetadata(_ proof: CommandFilesystemCapture.MetadataProof) throws {
+        guard !closed else { throw RetainedCommandCaptureError.closed }
+        try filesystem.verifyMetadata(proof)
+    }
     let outputs: RetainedCommandOutputChannels?
     let admissionProfile: CommandHandshakeProfile?
     let submissionDigest: Data

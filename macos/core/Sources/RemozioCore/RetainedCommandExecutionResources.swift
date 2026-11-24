@@ -76,6 +76,10 @@ final class RetainedCommandExecutionResources {
         guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
         return try filesystem.makeRecheck()
     }
+    func verifyFilesystemMetadata(_ proof: CommandFilesystemCapture.MetadataProof) throws {
+        guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
+        try filesystem.verifyMetadata(proof)
+    }
 
     /// Checks the original caller without treating executable changes as a running-command cancellation.
     func recheckCaller(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {

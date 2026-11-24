@@ -499,15 +499,19 @@ public final class ApprovalRequestCoordinator {
     /// Production always uses the exclusive transfer and protected release policy above.
     func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, expression: String,
                       userID: uid_t, auditSessionID: au_asid_t?, now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
-                      checkCancellation: () throws -> Void = {}, filesystemChecked: Bool = false) throws -> IssuedRequestPayload {
-        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs) {
+                      checkCancellation: () throws -> Void = {},
+                      filesystemProof: CommandFilesystemCapture.MetadataProof? = nil) throws -> IssuedRequestPayload {
+        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs, verifyMetadata: {
+            if let filesystemProof { try command.verifyFilesystemMetadata(filesystemProof) }
+        }) {
             try command.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID,
-                checkCancellation: checkCancellation, filesystemChecked: filesystemChecked)
+                checkCancellation: checkCancellation, filesystemChecked: filesystemProof != nil)
         }
     }
 
     private func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft,
-                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?, recheck: () throws -> Void) throws -> IssuedRequestPayload {
+                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                              verifyMetadata: () throws -> Void = {}, recheck: () throws -> Void) throws -> IssuedRequestPayload {
         try command.claimForRequestOwner()
         let reply = try command.takeAdmissionReply()
         defer { reply?.close() }
@@ -526,6 +530,7 @@ public final class ApprovalRequestCoordinator {
             }
             try recheck()
             let moment = try now()
+            try verifyMetadata()
             // Only errors from this owner's admission path can classify a refusal. Callback errors remain uncertain.
             do { payload = try admit(draft, command: command, now: moment, receiptTimeMs: receiptTimeMs) }
             catch { rejection = Self.admissionRejection(error); throw error }

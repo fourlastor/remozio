@@ -179,6 +179,26 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         XCTAssertEqual(componentsChecked, afterReadlink)
     }
 
+    func testFinalMetadataCheckRejectsAnAncestorReplacedWithASymlink() throws {
+        let fixture = try Fixture()
+        let ancestor = fixture.root + "/ancestor"
+        let relocated = fixture.root + "/relocated"
+        try FileManager.default.createDirectory(atPath: ancestor, withIntermediateDirectories: false)
+        let executable = ancestor + "/tool"
+        try FileManager.default.copyItem(atPath: fixture.executable, toPath: executable)
+        let capture = try CommandFilesystemCapture(executablePath: Data(executable.utf8), directoryPath: Data(fixture.cwd.utf8))
+        let probe = try capture.makeRecheck()
+        let proof = try probe.run(deadline: ContinuousClock.now + .seconds(5), checkProbe: {})
+        try capture.verifyMetadata(proof)
+
+        XCTAssertEqual(rename(ancestor, relocated), 0)
+        XCTAssertEqual(symlink("relocated", ancestor), 0)
+        // A lookup of the complete path still reaches the original file.
+        XCTAssertThrowsError(try capture.verifyMetadata(proof)) {
+            XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed)
+        }
+    }
+
     func testExecutableReplacementRetiresTheOriginalCapture() throws {
         let fixture = try Fixture(), capture = try fixture.capture()
         XCTAssertEqual(rename(fixture.executable, fixture.executable + ".old"), 0)

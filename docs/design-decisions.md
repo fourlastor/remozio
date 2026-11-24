@@ -56,9 +56,11 @@ Execute the captured command by pathname after a final executable identity/conte
 
 On macOS, the Authority opens the symlink target from retained directories. The private child frame uses the resolved path and preserves the captured argv, including its first entry. The approval payload keeps the requested path.
 
-The Authority hashes up to 512 MiB per executable outside the journal lock. It reserves two worker slots for preparation and dispatch. Admission uses two separate slots, with one active operation per caller UID.
+For a `#!` script, macOS passes the resolved script path to the interpreter. Through a symlink, this can change `$0`, directory names derived with `dirname`, and Bash's `BASH_SOURCE`. [macOS execve(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/execve.2.html)
 
-Each filesystem phase has a five-second monotonic deadline. A timed-out operation holds its slot until the filesystem call returns. Before the dispatch commit, the filesystem observation can be up to five seconds plus one poll old. The commit and the native release attempt run in the same locked operation.
+The Authority hashes up to 512 MiB per executable outside the journal lock. Two worker slots serve preparation and dispatch, with no per-UID limit. Two separate admission slots allow one active operation per caller UID. Two callers with distinct UIDs can occupy both admission slots.
+
+Each filesystem phase has a five-second monotonic deadline. A stalled FUSE or NFS call holds its worker and slot until the call returns, including after the deadline. The Authority checks file and directory metadata under the lock before committing admission or dispatch. The metadata check reads no executable bytes, but a filesystem stall can still delay it. The dispatch commit and native release attempt run in the same locked operation.
 
 A process can still replace or modify the executable after the recheck and before the OS executes it. Scripts and dependencies can also change. Approval binds the invocation; it does not guarantee immutable approved program bytes or transitive behavior.
 

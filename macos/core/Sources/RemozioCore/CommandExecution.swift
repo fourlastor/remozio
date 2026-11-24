@@ -33,7 +33,7 @@ final class CommandExecution {
     private var terminalDeliveryPending = false
     private var terminalDeliveryFinished = false
     var dispatchRevision: UInt64 = 0
-    var filesystemProbe: CommandFilesystemProbe<Void>?
+    var filesystemProbe: CommandFilesystemProbe<CommandFilesystemCapture.MetadataProof>?
     var needsFinalFilesystemProbe = false
     var canPrepare: Bool { !disposed && !cancelledBeforeRelease && monitor == nil }
     var terminalCommitFailed = false

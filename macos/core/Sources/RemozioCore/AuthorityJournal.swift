@@ -49,9 +49,10 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var commandExecutions: [Data: CommandExecution] = [:]
     private var commandFilesystem = CommandFilesystemProbePool()
     private var commandsAwaitingPreparation = Set<Data>()
+    private typealias ExecutionFilesystemProbe = CommandFilesystemProbe<CommandFilesystemCapture.MetadataProof>
     private struct DeferredCommandPreparation {
         let deadline: ContinuousClock.Instant
-        let finish: (CommandFilesystemProbe<Void>) throws -> Void
+        let finish: (ExecutionFilesystemProbe) throws -> Void
     }
     private var deferredCommandPreparations: [Data: DeferredCommandPreparation] = [:]
     private var releaseActivity: ReleaseActivityBarrier?
@@ -618,14 +619,15 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
         attempt.close()
         let requestDraft: ApprovalRequestDraft
+        let provedFilesystem: CommandFilesystemCapture.MetadataProof
         var filesystemRefusal: CommandAdmissionRejectionReason?
-        func verifyFilesystem() throws {
+        func verifyFilesystem() throws -> CommandFilesystemCapture.MetadataProof {
             do {
                 let check = try command.makeFilesystemRecheck()
                 let probe = try commandFilesystem.start(.admission(userID)) { deadline, checkProbe in
                     try check.run(deadline: deadline, checkProbe: checkProbe)
                 }
-                try awaitCommandFilesystem(probe, checkCancellation: {
+                return try awaitCommandFilesystem(probe, checkCancellation: {
                     do { try checkCancellation() }
                     catch { throw CommandAdmissionCallbackFailure(underlying: error) }
                 })
@@ -638,7 +640,7 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
         do {
             requestDraft = try draft(command.capture)
-            try verifyFilesystem()
+            provedFilesystem = try verifyFilesystem()
             try requireCurrentOwner()
             try validateCapture(command.capture)
         }
@@ -652,7 +654,7 @@ public final class AuthorityJournal: @unchecked Sendable {
         do {
             return try requests.admitCommand(command, draft: requestDraft, expression: peerExpression,
                 userID: userID, auditSessionID: auditSessionID, now: now,
-                receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation, filesystemChecked: true)
+                receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation, filesystemProof: provedFilesystem)
         } catch {
             if database.retired { retireRequests() }
             throw error
@@ -1179,7 +1181,7 @@ extension AuthorityJournal {
             commandExecutions[requestID] = execution
             commandActivity[requestID] = activity; transferredActivity = true
             startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
-            let prepare: (CommandFilesystemProbe<Void>) throws -> Void = { probe in
+            let prepare: (ExecutionFilesystemProbe) throws -> Void = { probe in
                 guard self.commandExecutions[requestID] === execution, self.requests === requests, execution.canPrepare else {
                     throw CommandExecutionError.unavailable
                 }
@@ -1213,7 +1215,7 @@ extension AuthorityJournal {
                 }
                 guard current == context else { throw CommandExecutionError.policyChanged }
             }
-            let probe: CommandFilesystemProbe<Void>
+            let probe: ExecutionFilesystemProbe
             do {
                 probe = try startExecutionFilesystemProbe(execution)
             } catch CommandFilesystemProbeError.atCapacity {
@@ -1227,7 +1229,7 @@ extension AuthorityJournal {
             commandsAwaitingPreparation.insert(requestID)
             defer { commandsAwaitingPreparation.remove(requestID) }
             do {
-                try awaitCommandFilesystem(probe)
+                _ = try awaitCommandFilesystem(probe)
                 try prepare(probe)
             } catch {
                 execution.cancelBeforeRelease()
@@ -1276,7 +1278,7 @@ extension AuthorityJournal {
                             catch CommandFilesystemProbeError.atCapacity { }
                             continue
                         }
-                        guard try probe.consumeIfReady() != nil else { continue }
+                        guard let proof = try probe.consumeIfReady() else { continue }
                         execution.filesystemProbe = nil
                         try validate()
                         try execution.recheck(filesystemChecked: true)
@@ -1288,8 +1290,10 @@ extension AuthorityJournal {
                             continue
                         }
                         // No observer can see .executing between the commit and the native release attempt.
+                        let now = try execution.clock(), receiptTime = execution.receiptTime()
+                        try execution.resources.verifyFilesystemMetadata(proof)
                         _ = try requests.recordOutcome(requestID: id, expectedRevision: 0, event: .beginDispatch,
-                            now: execution.clock(), receiptTimeMs: execution.receiptTime())
+                            now: now, receiptTimeMs: receiptTime)
                         execution.dispatchRevision = 1
                         try execution.validateLauncher()
                         try execution.validateElevation(execution.resources.capture)
@@ -1330,7 +1334,7 @@ extension AuthorityJournal {
         }
     }
 
-    private func startExecutionFilesystemProbe(_ execution: CommandExecution) throws -> CommandFilesystemProbe<Void> {
+    private func startExecutionFilesystemProbe(_ execution: CommandExecution) throws -> ExecutionFilesystemProbe {
         let check = try execution.resources.makeFilesystemRecheck()
         return try commandFilesystem.start(.execution) { deadline, checkProbe in
             try check.run(deadline: deadline, checkProbe: checkProbe)
