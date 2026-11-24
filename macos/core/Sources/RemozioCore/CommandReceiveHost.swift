@@ -14,6 +14,23 @@ public enum CommandReceiveEvent: Sendable, Equatable {
     case rejected(CommandReceiveRejection)
 }
 
+/// Paces a streak of import failures. Other rejected messages do not interrupt it.
+struct CommandDescriptorRejectionPacing {
+    private var consecutiveFailures: UInt32 = 0
+
+    mutating func recordDescriptorRejection(capacity: Bool) -> UInt32? {
+        consecutiveFailures = min(consecutiveFailures + 1, 10)
+        return capacity || consecutiveFailures >= 4 ? 5 * consecutiveFailures : nil
+    }
+
+    mutating func observe(_ event: CommandReceiveEvent) {
+        switch event {
+        case .idle, .hello, .inputHandled: consecutiveFailures = 0
+        case .rejected: break
+        }
+    }
+}
+
 /// A thread-safe stop signal. It never disposes resources from another thread.
 public struct CommandReceiveStop: Sendable {
     fileprivate let state = OSAllocatedUnfairLock(initialState: false)
@@ -38,7 +55,7 @@ public final class CommandReceiveHost {
     private let descriptorOutcome: (CommandHandshakeProfile, CapturedSubmission, CommandAdmissionRejectionReason) -> CommandAdmissionOutcome
     private let beforeDescriptorImport: ((CommandDescriptorImportSlot) throws -> Void)?
     private let waitAfterDescriptorRejection: (UInt32) -> Void
-    private var consecutiveDescriptorRejections: UInt32 = 0
+    private var descriptorRejectionPacing = CommandDescriptorRejectionPacing()
     private var busy = false
     private var running = false
     private var delivering = false
@@ -235,6 +252,13 @@ public final class CommandReceiveHost {
     }
     private func receiveTurn(submissionLimits: CBORLimits? = nil,
                              handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
+        let event = try receiveOne(submissionLimits: submissionLimits, handleInput: handleInput)
+        descriptorRejectionPacing.observe(event)
+        return event
+    }
+
+    private func receiveOne(submissionLimits: CBORLimits?,
+                            handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
         try begin(); defer { end() }
         let before = try currentContext()
         let receiver: MachCommandCallerReceiver
@@ -253,17 +277,15 @@ public final class CommandReceiveHost {
                             outcome: descriptorOutcome)
                     }
                 })
-            consecutiveDescriptorRejections = 0
         } catch let error as CommandDescriptorImportRejection {
-            consecutiveDescriptorRejections = min(consecutiveDescriptorRejections + 1, 10)
-            if error.reason == .capacityExceeded || consecutiveDescriptorRejections >= 4 {
+            let capacity = error.reason == .capacityExceeded
+            if let delay = descriptorRejectionPacing.recordDescriptorRejection(capacity: capacity) {
                 try stop.check()
-                waitAfterDescriptorRejection(5 * consecutiveDescriptorRejections)
+                waitAfterDescriptorRejection(delay)
                 try stop.check()
             }
-            return .rejected(error.reason == .capacityExceeded ? .capacity : .malformed)
+            return .rejected(capacity ? .capacity : .malformed)
         } catch let error as MachCommandCallerError {
-            consecutiveDescriptorRejections = 0
             // Even rejected traffic and empty queues must observe a changed or unreadable policy.
             _ = try currentContext()
             switch error {

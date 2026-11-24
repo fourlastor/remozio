@@ -26,7 +26,11 @@ struct CommandDescriptorImportRejection: Error {
     init?(_ error: any Error) {
         switch error {
         case RetainedCommandInputError.system(let code), RetainedCommandOutputError.system(let code):
-            reason = [EMFILE, ENFILE, ENOMEM, ENOBUFS].contains(code) ? .capacityExceeded : .invalidRequest
+            switch code {
+            case EINVAL, EBADF: reason = .invalidRequest
+            case EMFILE, ENFILE: reason = .capacityExceeded
+            default: return nil
+            }
         case RetainedCommandInputError.invalidBinding, RetainedCommandInputError.notReadable,
              RetainedCommandOutputError.notWritable, MachCommandCallerError.malformed:
             reason = .invalidRequest

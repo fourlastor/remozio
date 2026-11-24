@@ -8517,9 +8517,10 @@ extension MachCommandCallerReceiverTests {
 
     @MainActor func testReceiveWorkerRejectsDescriptorAndAdmitsNextBoundRequest() async throws {
         let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), box = ElevationGrantBox()
-        let policy = try currentElevation(box), invalid = Mutex(true), outcomes = Mutex(0)
+        let policy = try currentElevation(box), invalid = Mutex(true), outcomes = Mutex(0), diagnostics = ReceiveDiagnostics()
         let worker = try elevationWorker(fixture, port: port, policy: policy,
             streamBinding: { Data(repeating: 0xe4, count: 16) }, onAdmission: { _ in outcomes.withLock { $0 += 1 } },
+            diagnostics: diagnostics,
             beforeDescriptorImport: { slot in
                 if slot == .input, invalid.withLock({ let value = $0; $0 = false; return value }) {
                     throw RetainedCommandInputError.system(EINVAL)
@@ -8534,6 +8535,7 @@ extension MachCommandCallerReceiverTests {
         let rejectedSubmission = try workerElevationSubmission(destination, reply: rejected, profile: profile,
             descriptor: descriptor, id: 0xb5)
         XCTAssertEqual(try typedOutcome(rejected, submission: rejectedSubmission, profile: profile), .notAdmitted(.invalidRequest, .never))
+        try await waitForReceiveWorker { diagnostics.malformedCount == 1 }
         XCTAssertEqual(try sendReferences(rejected.port), 1)
         XCTAssertNil(try fixture.reservation(rejectedSubmission.binding.id))
         XCTAssertEqual(outcomes.withLock { $0 }, 0)
@@ -8593,6 +8595,11 @@ extension MachCommandCallerReceiverTests {
         }
         XCTAssertEqual(try sendReferences(originalResult.port), 2)
         let before = try fixture.auditRecordCount
+        func openDescriptorCount() throws -> Int {
+            try FileManager.default.contentsOfDirectory(atPath: "/dev/fd")
+                .compactMap(Int32.init).filter { fcntl($0, F_GETFD) >= 0 }.count
+        }
+        let descriptorsBefore = try openDescriptorCount()
         failures.withLock { $0 = true }
 
         let rejected: [(CommandSubmission, Endpoint, Endpoint)] = try (0..<11).map { index in
@@ -8609,6 +8616,15 @@ extension MachCommandCallerReceiverTests {
             XCTAssertEqual(try sendReferences(reply.port), 1)
             XCTAssertEqual(try sendReferences(result.port), 1)
         }
+        XCTAssertEqual(try openDescriptorCount(), descriptorsBefore)
+        let duplicateReply = try Endpoint(), duplicateResult = try Endpoint()
+        let duplicate = try submit(id: 0xb7, reply: duplicateReply, result: duplicateResult)
+        XCTAssertEqual(duplicate.canonicalBytes, original.canonicalBytes)
+        XCTAssertEqual(try typedOutcome(duplicateReply, submission: duplicate, profile: profile), .uncertain(.duplicateSubmission))
+        try await waitForReceiveWorker { waits.withLock { $0.count == 12 } }
+        XCTAssertEqual(try sendReferences(duplicateReply.port), 1)
+        XCTAssertEqual(try sendReferences(duplicateResult.port), 1)
+        XCTAssertEqual(try openDescriptorCount(), descriptorsBefore)
         XCTAssertEqual(try fixture.auditRecordCount, before)
         XCTAssertNotNil(try fixture.reservation(original.binding.id))
         XCTAssertEqual(try sendReferences(originalResult.port), 2)
@@ -8616,6 +8632,140 @@ extension MachCommandCallerReceiverTests {
         XCTAssertFalse(worker.isRetired)
         XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0)
         XCTAssertGreaterThanOrEqual(fcntl(output, F_GETFD), 0)
+        await worker.close()
+    }
+
+    func testDescriptorRejectionPacingSurvivesOtherRejectedTurnsAndResetsOnProgress() {
+        var pacing = CommandDescriptorRejectionPacing()
+        for _ in 0..<3 {
+            XCTAssertNil(pacing.recordDescriptorRejection(capacity: false))
+            pacing.observe(.rejected(.malformed))
+        }
+        XCTAssertEqual(pacing.recordDescriptorRejection(capacity: false), 20)
+        pacing.observe(.rejected(.incompatible))
+        XCTAssertEqual(pacing.recordDescriptorRejection(capacity: false), 25)
+        pacing.observe(.inputHandled)
+        XCTAssertNil(pacing.recordDescriptorRejection(capacity: false))
+        pacing.observe(.idle)
+        XCTAssertEqual(pacing.recordDescriptorRejection(capacity: true), 5)
+    }
+
+    @MainActor func testReceiveWorkerTreatsDescriptorIOFailureAsFatal() async throws {
+        let port = WorkerPort(), admitted = Mutex(0)
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        let worker = try AuthorityCommandReceiveWorker(submissionLimits: assemblyLimits, makeHost: {
+            try Self.workerHost(port: port, context: context, beforeDescriptorImport: { slot in
+                if slot == .input { throw RetainedCommandInputError.system(EIO) }
+            })
+        }, admit: { _, _, _ in
+            admitted.withLock { $0 += 1 }
+            throw CommandReceiveHostError.invalidConfiguration
+        })
+        try await worker.start()
+        let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        let profile = try workerElevationProfile(destination), reply = try Endpoint()
+        _ = try workerElevationSubmission(destination, reply: reply, profile: profile, descriptor: descriptor, id: 0xdf)
+        try await waitForReceiveWorker { worker.isRetired }
+        XCTAssertEqual(worker.status, .failed)
+        XCTAssertEqual(admitted.withLock { $0 }, 0)
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+        await worker.close()
+        XCTAssertFalse(receiveRightPresent(destination))
+    }
+
+    @MainActor func testReceiveWorkerStopDuringDescriptorBackoffDoesNotRetire() async throws {
+        let port = WorkerPort(), stoppedDuringPause = Mutex(false)
+        let stop = Mutex<(@Sendable () -> Void)?>(nil), stopReturned = DispatchSemaphore(value: 0)
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        let worker = try AuthorityCommandReceiveWorker(submissionLimits: assemblyLimits, makeHost: {
+            try Self.workerHost(port: port, context: context, beforeDescriptorImport: { slot in
+                if slot == .input { throw RetainedCommandInputError.system(EMFILE) }
+            }, waitAfterDescriptorRejection: { _ in
+                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(1)) {
+                    stop.withLock { $0 }?()
+                    stopReturned.signal()
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+                let stopped = stopReturned.wait(timeout: .now()) == .success
+                stoppedDuringPause.withLock { $0 = stopped }
+            })
+        }, admit: { _, _, _ in
+            XCTFail("A descriptor failure must not reach admission")
+            throw CommandReceiveHostError.invalidConfiguration
+        })
+        stop.withLock { $0 = { worker.requestStop() } }
+        defer { stop.withLock { $0 = nil } }
+        try await worker.start()
+        let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        let profile = try workerElevationProfile(destination), reply = try Endpoint()
+        _ = try workerElevationSubmission(destination, reply: reply, profile: profile, descriptor: descriptor, id: 0xe0)
+        try await waitForReceiveWorker { worker.status == .closed }
+        XCTAssertTrue(stoppedDuringPause.withLock { $0 })
+        XCTAssertFalse(worker.isRetired)
+        XCTAssertFalse(receiveRightPresent(destination))
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+        await worker.close()
+    }
+
+    @MainActor func testReceiveWorkerDoesNotReplyWhenRejectedDescriptorHasNoBoundSession() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), box = ElevationGrantBox()
+        let policy = try currentElevation(box), diagnostics = ReceiveDiagnostics()
+        let worker = try elevationWorker(fixture, port: port, policy: policy, streamBinding: { Data(repeating: 0xe4, count: 16) },
+            onAdmission: { _ in XCTFail("Unbound input must not enter admission") }, diagnostics: diagnostics,
+            beforeDescriptorImport: { slot in
+                if slot == .input { throw RetainedCommandInputError.system(EINVAL) }
+            })
+        try await worker.start()
+        let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        _ = try workerElevationProfile(destination)
+        let reply = try Endpoint()
+        let submission = try commandSubmission(binding: .init(id: Data(repeating: 0xe1, count: 16),
+            nonce: Data(repeating: 0xe1, count: 32), callerBinding: Data(repeating: 0, count: 32)))
+        try MachCommandAdmissionWire.send(submission.canonicalBytes, inputDescriptor: descriptor, destination: destination,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        try await waitForReceiveWorker { diagnostics.malformedCount == 1 }
+        XCTAssertThrowsError(try receiver(reply, maximum: 4096).receiveAdmissionReply(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+        XCTAssertNil(try fixture.reservation(submission.binding.id))
+        XCTAssertFalse(worker.isRetired)
+        await worker.close()
+    }
+
+    @MainActor func testReceiveWorkerDisposesDeadDescriptorRefusalReplyRight() async throws {
+        let port = WorkerPort(), diagnostics = ReceiveDiagnostics(), importing = Mutex(false)
+        let allowFailure = DispatchSemaphore(value: 0)
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        let worker = try AuthorityCommandReceiveWorker(submissionLimits: assemblyLimits, makeHost: {
+            try Self.workerHost(port: port, context: context, beforeDescriptorImport: { slot in
+                if slot == .input {
+                    importing.withLock { $0 = true }
+                    guard allowFailure.wait(timeout: .now() + 2) == .success else { throw MachCommandCallerError.timeout }
+                    throw RetainedCommandInputError.system(EINVAL)
+                }
+            })
+        }, admit: { _, _, _ in
+            XCTFail("A descriptor failure must not reach admission")
+            throw CommandReceiveHostError.invalidConfiguration
+        }, observeReceive: { diagnostics.record($0) })
+        try await worker.start()
+        let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        defer { allowFailure.signal(); worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        let profile = try workerElevationProfile(destination), reply = try Endpoint()
+        _ = try workerElevationSubmission(destination, reply: reply, profile: profile, descriptor: descriptor, id: 0xe2)
+        try await waitForReceiveWorker { importing.withLock { $0 } }
+        try reply.closeReceiveRight()
+        allowFailure.signal()
+        try await waitForReceiveWorker { diagnostics.malformedCount == 1 }
+        var references: mach_port_urefs_t = 0
+        XCTAssertEqual(mach_port_get_refs(mach_task_self_, reply.port, MACH_PORT_RIGHT_DEAD_NAME, &references), KERN_SUCCESS)
+        XCTAssertEqual(references, 1)
+        XCTAssertEqual(worker.status, .running)
+        XCTAssertFalse(worker.isRetired)
         await worker.close()
     }
 

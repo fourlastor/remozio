@@ -145,7 +145,7 @@ public final class CommandSessionRegistry {
         try reply.recheck()
         try checkCancellation()
         let result = CommandAdmissionResultPayload(profile: session.profile, submission: submission.binding,
-            submissionDigest: Data(SHA256.hash(data: rejected.payload)),
+            submissionDigest: Data(SHA256.hash(data: submission.canonicalBytes)),
             outcome: outcome(session.profile, submission.binding, rejected.reason))
         try checkCancellation()
         try reply.send(result.canonicalBytes, timeoutMilliseconds: timeoutMilliseconds)
