@@ -124,6 +124,7 @@ final class CommandFilesystemProbePool: @unchecked Sendable {
         let probe = CommandFilesystemProbe<Value>(deadline: ContinuousClock.now + timeout)
         queue.async {
             let result = Result {
+                try CommandFilesystemCaller.requireProcessIdentity()
                 try probe.checkActive()
                 self.beforeWork()
                 try probe.checkActive()

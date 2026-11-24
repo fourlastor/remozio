@@ -605,6 +605,7 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
         let executablePath = attempt.submission.executablePath
         let directoryPath = attempt.submission.directoryPath
+        let filesystemCaller = attempt.filesystemCaller
         func requireCurrentOwner() throws {
             guard requests === admissionOwner, !updatePolicyOperationActive,
                   try currentPolicy() == initialPolicy else { throw CommandExecutionError.policyChanged }
@@ -615,7 +616,7 @@ public final class AuthorityJournal: @unchecked Sendable {
         do {
             let probe = try commandFilesystem.start(.admission(userID)) { deadline, checkProbe in
                 try CommandFilesystemCapture(executablePath: executablePath, directoryPath: directoryPath, deadline: deadline,
-                    checkProbe: checkProbe)
+                    caller: filesystemCaller, checkProbe: checkProbe)
             }
             let filesystem = try awaitCommandFilesystem(probe, checkCancellation: {
                 do { try checkCancellation() }
@@ -643,9 +644,7 @@ public final class AuthorityJournal: @unchecked Sendable {
             do {
                 return try proveAdmissionFilesystem(command, userID: userID, checkCancellation: checkCancellation)
             } catch {
-                if CommandFilesystemProbeError.isCapacityFailure(error) {
-                    filesystemRefusal = .capacityExceeded
-                }
+                filesystemRefusal = Self.commandCaptureRefusal(error)
                 throw (error as? CommandAdmissionCallbackFailure)?.underlying ?? error
             }
         }
@@ -688,10 +687,10 @@ public final class AuthorityJournal: @unchecked Sendable {
     static func commandCaptureRefusal(_ error: Error) -> CommandAdmissionRejectionReason? {
         switch error {
         case CommandFilesystemCaptureError.invalidPath, CommandFilesystemCaptureError.invalidExecutable,
-             CommandFilesystemCaptureError.invalidDirectory: return .invalidRequest
+             CommandFilesystemCaptureError.invalidDirectory, CommandFilesystemCaptureError.changed: return .invalidRequest
         case CommandFilesystemCaptureError.timedOut, CommandFilesystemProbeError.atCapacity,
              CommandFilesystemProbeError.expired: return .capacityExceeded
-        case CommandFilesystemCaptureError.system(let code) where [ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG].contains(code):
+        case CommandFilesystemCaptureError.system(let code) where [ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG, EACCES, EPERM].contains(code):
             return .invalidRequest
         default: return nil
         }

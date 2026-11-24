@@ -32,6 +32,7 @@ public final class RetainedCommandAdmissionAttempt {
     public let submission: CommandSubmission
     public let profile: CommandHandshakeProfile
     let userID: uid_t
+    let filesystemCaller: CommandFilesystemCaller
     let auditSessionID: au_asid_t?
     private let submissionLimits: CBORLimits
     private let digest: Data
@@ -50,6 +51,7 @@ public final class RetainedCommandAdmissionAttempt {
                   UInt64(received.carrierVersion) == profile.inputCarrierVersion else { throw MachCommandHandshakeError.wrongBinding }
             self.submission = submission; self.profile = profile; self.digest = Data(SHA256.hash(data: received.payload))
             self.userID = userID; self.auditSessionID = auditSessionID; self.submissionLimits = submissionLimits
+            self.filesystemCaller = received.caller.filesystemCaller
             self.received = received; self.reply = reply
         } catch { received.closeIfUnclaimed(); reply.close(); throw error }
     }

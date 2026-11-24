@@ -474,7 +474,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     }
 
     private func admissionAttempt(reply: Endpoint, executable: String = "/usr/bin/true", binding: CapturedSubmission? = nil,
-                                  descriptor: Int32? = nil) throws -> (RetainedCommandAdmissionAttempt, CommandSubmission, CommandHandshakeProfile) {
+                                  descriptor: Int32? = nil,
+                                  directory: String = FileManager.default.temporaryDirectory.path) throws -> (RetainedCommandAdmissionAttempt, CommandSubmission, CommandHandshakeProfile) {
         let endpoint = try Endpoint(), helloReply = try Endpoint()
         let session = try RetainedCommandHandshake(hello: hello(endpoint, reply: helloReply, capabilities: .admissionResults),
             capabilities: .admissionResults, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
@@ -483,7 +484,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let fresh = binding ?? CapturedSubmission(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32),
             callerBinding: session.profile.callerBinding)
         let submission = try commandSubmission(executablePath: executable, binding: .init(id: fresh.id, nonce: fresh.nonce,
-            callerBinding: session.profile.callerBinding))
+            callerBinding: session.profile.callerBinding), directory: directory)
         let fd = descriptor ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         guard fd >= 0 else { throw MachCommandCallerError.unavailable }
         defer { if descriptor == nil { _ = Darwin.close(fd) } }
@@ -826,20 +827,56 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertNotNil(try fixture.reservation(original.binding.id))
     }
 
+    func testAdmissionReturnsTheSameRefusalForUnusablePaths() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Normal-user search permissions") }
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true)
+        let denied = fixture.root.appendingPathComponent("unsearchable", isDirectory: true)
+        try FileManager.default.createDirectory(at: denied, withIntermediateDirectories: false)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"),
+            to: denied.appendingPathComponent("tool"))
+        XCTAssertEqual(chmod(denied.path, 0), 0)
+        defer { _ = chmod(denied.path, 0o700) }
+        let initial = try fixture.auditRecordCount
+        let missing = fixture.root.appendingPathComponent("missing").path
+        let loop = fixture.root.appendingPathComponent("loop")
+        XCTAssertEqual(symlink(loop.lastPathComponent, loop.path), 0)
+        let regularFile = fixture.root.appendingPathComponent("regular")
+        try Data([1]).write(to: regularFile)
+        let notDirectory = regularFile.appendingPathComponent("child").path
+        let temporary = FileManager.default.temporaryDirectory.path
+        for (executable, directory, expected) in [
+            (missing, temporary, ENOENT),
+            (denied.appendingPathComponent("tool").path, temporary, EACCES),
+            ("/usr/bin/true", missing, ENOENT),
+            ("/usr/bin/true", denied.path, EACCES),
+            (loop.path, temporary, ELOOP),
+            ("/usr/bin/true", notDirectory, ENOTDIR),
+        ] {
+            let reply = try Endpoint()
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: executable, directory: directory)
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture)) {
+                XCTAssertEqual($0 as? CommandFilesystemCaptureError, .system(expected))
+            }
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
+            XCTAssertNil(try fixture.reservation(submission.binding.id))
+            XCTAssertEqual(try fixture.auditRecordCount, initial)
+        }
+    }
+
     func testAdmissionCaptureClassifierNeverTreatsHostResourceOrUnknownFailuresAsInvalidCommands() {
-        for code in [EMFILE, ENFILE, EIO, ENOMEM, ENOSPC, EAGAIN, EINTR, EACCES, EPERM, ESTALE, Int32.max] {
+        for code in [EMFILE, ENFILE, EIO, ENOMEM, ENOSPC, EAGAIN, EINTR, ESTALE, Int32.max] {
             XCTAssertNil(AuthorityJournal.commandCaptureRefusal(CommandFilesystemCaptureError.system(code)))
         }
-        for error in [CommandFilesystemCaptureError.changed, .closed] {
+        for error in [CommandFilesystemCaptureError.credentialUnavailable, .closed] {
             XCTAssertNil(AuthorityJournal.commandCaptureRefusal(error))
         }
-        for code in [ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG] {
+        for code in [ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG, EACCES, EPERM] {
             XCTAssertEqual(AuthorityJournal.commandCaptureRefusal(CommandFilesystemCaptureError.system(code)), .invalidRequest)
         }
         XCTAssertNil(AuthorityJournal.commandCaptureRefusal(ApprovalCoordinatorError.capacityExceeded))
     }
 
-    func testAdmissionAttemptChangedExecutableDuringCaptureRemainsUncertainAndKeepsItsReply() throws {
+    func testAdmissionAttemptChangedExecutableDuringCaptureIsRefusedWithoutReservation() throws {
         for checkpointed in [false, true] {
             let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
             let executable = fixture.root.appendingPathComponent("capture-tool")
@@ -855,7 +892,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     XCTAssertEqual(pwrite(writer, &byte, 1, 0), 1)
                 }
             })) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
-            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
             XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try sendReferences(reply.port), 1)
         }
     }
@@ -876,7 +913,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 XCTAssertEqual(rename(replacement, tool), 0)
                 return now
             }, receiptTimeMs: nil)) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
-        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
         XCTAssertNil(try fixture.reservation(submission.binding.id))
         XCTAssertEqual(try fixture.auditRecordCount, before)
     }
@@ -908,7 +945,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 return now
             }, receiptTimeMs: nil)) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
         XCTAssertEqual(reads.withLock { $0 }, 1)
-        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
         XCTAssertNil(try fixture.reservation(submission.binding.id))
         XCTAssertEqual(try fixture.auditRecordCount, before)
     }
@@ -2084,10 +2121,11 @@ final class MachCommandCallerReceiverTests: XCTestCase {
          .init(name: Data("HOME".utf8), value: Data("/synthetic/home".utf8), source: .minimal)]
     }
     private func commandSubmission(executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, binding: CapturedSubmission? = nil,
-                                   disconnect: StartedCommandDisconnect = .terminate, ioMode: CommandIOMode = .pipes) throws -> CommandSubmission {
+                                   disconnect: StartedCommandDisconnect = .terminate, ioMode: CommandIOMode = .pipes,
+                                   directory: String = FileManager.default.temporaryDirectory.path) throws -> CommandSubmission {
         try CommandSubmission(schemaVersion: 1, executablePath: Data(executablePath.utf8),
             arguments: arguments ?? [Data("custom argv0".utf8), Data(), Data([0xff, 0x0a, 0x22])],
-            directoryPath: Data(FileManager.default.temporaryDirectory.path.utf8), requestedTargetUID: geteuid(),
+            directoryPath: Data(directory.utf8), requestedTargetUID: geteuid(),
             environmentAdditions: [.init(name: Data("HOME".utf8), value: Data("/synthetic/requested".utf8)),
                 .init(name: Data("RAW".utf8), value: Data([0xfe, 0x0a]))],
             ioMode: ioMode, disconnectBehavior: disconnect, unverifiedRationale: "pid=123, caller claim",

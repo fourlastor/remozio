@@ -530,12 +530,15 @@ public final class ApprovalRequestCoordinator {
             let proof: CommandFilesystemCapture.MetadataProof?
             do { proof = try filesystemProof() }
             catch {
-                if CommandFilesystemProbeError.isCapacityFailure(error) { rejection = .capacityExceeded }
+                rejection = AuthorityJournal.commandCaptureRefusal(error)
                 throw error
             }
             try recheck(proof != nil)
             let moment = try now()
-            if let proof { try command.verifyFilesystemMetadata(proof) }
+            if let proof {
+                do { try command.verifyFilesystemMetadata(proof) }
+                catch { rejection = AuthorityJournal.commandCaptureRefusal(error); throw error }
+            }
             // Only errors from this owner's admission path can classify a refusal. Callback errors remain uncertain.
             do { payload = try admit(draft, command: command, now: moment, receiptTimeMs: receiptTimeMs) }
             catch { rejection = Self.admissionRejection(error); throw error }

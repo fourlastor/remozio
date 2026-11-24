@@ -682,6 +682,10 @@ public final class RetainedCommandCaller {
         } catch let failure as MachCommandCallerError { close(); throw failure }
     }
 
+    var filesystemCaller: CommandFilesystemCaller {
+        .init(userID: audit_token_to_euid(token), groupID: audit_token_to_egid(token))
+    }
+
     /// Read-only kernel binding values do not connect the ownership regions of two retained callers.
     var retainedAuditBinding: Data? {
         guard code != nil else { return nil }
