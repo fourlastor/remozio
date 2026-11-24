@@ -17,6 +17,33 @@ public enum MachCommandCallerError: Error, Equatable {
 }
 
 enum MachCommandReceiveTimeoutStage: Sendable, Equatable { case previewWait, authenticatedPreview, packetReceive }
+enum CommandDescriptorImportSlot: Sendable, Equatable { case input, controlTerminal, standardOutput, standardError }
+
+/// Only raised after a listener consumes a packet and fails to import its descriptors.
+struct CommandDescriptorImportRejection: Error {
+    let reason: CommandAdmissionRejectionReason
+
+    init?(_ error: any Error) {
+        switch error {
+        case RetainedCommandInputError.system(let code), RetainedCommandOutputError.system(let code):
+            reason = [EMFILE, ENFILE, ENOMEM, ENOBUFS].contains(code) ? .capacityExceeded : .invalidRequest
+        case RetainedCommandInputError.invalidBinding, RetainedCommandInputError.notReadable,
+             RetainedCommandOutputError.notWritable, MachCommandCallerError.malformed:
+            reason = .invalidRequest
+        default:
+            return nil
+        }
+    }
+}
+
+/// The receiver still owns the caller and the reply while the host considers a refusal.
+struct CommandDescriptorRejectionReceipt {
+    let payload: Data
+    let caller: RetainedCommandCaller
+    let carrierVersion: UInt32
+    let reply: MachCommandReplyRight?
+    let reason: CommandAdmissionRejectionReason
+}
 
 /// Receives untrusted submission bytes and authenticates their actual sender. This grants no command authority.
 /// This receiver is the port's sole consumer. The owner supplies the borrowed right, serializes access, and owns its lifetime.
@@ -151,7 +178,13 @@ public final class MachCommandCallerReceiver {
     /// Only hello and original-input submission carriers belong on a command listener.
     /// The timeout bounds queue waiting. Authentication may finish a queued packet through a nonblocking receive.
     public func receiveNext(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandMessage {
-        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil, finishQueuedListenerPacket: true)
+        try receiveNext(timeoutMilliseconds: timeoutMilliseconds, beforeImport: nil, rejectDescriptor: nil)
+    }
+
+    func receiveNext(timeoutMilliseconds: UInt32, beforeImport: ((CommandDescriptorImportSlot) throws -> Void)?,
+                     rejectDescriptor: ((CommandDescriptorRejectionReceipt) throws -> Void)?) throws -> sending ReceivedMachCommandMessage {
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil, finishQueuedListenerPacket: true,
+            beforeImport: beforeImport, rejectDescriptor: rejectDescriptor)
         switch packet.kind {
         case .hello:
             guard let reply = packet.reply else { packet.caller.close(); throw MachCommandCallerError.malformed }
@@ -185,7 +218,9 @@ public final class MachCommandCallerReceiver {
     }
 
     private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?, previewTimeoutMilliseconds: UInt32? = nil,
-                               allowNonblockingPreview: Bool = false, finishQueuedListenerPacket: Bool = false) throws -> sending Packet {
+                               allowNonblockingPreview: Bool = false, finishQueuedListenerPacket: Bool = false,
+                               beforeImport: ((CommandDescriptorImportSlot) throws -> Void)? = nil,
+                               rejectDescriptor: ((CommandDescriptorRejectionReceipt) throws -> Void)? = nil) throws -> sending Packet {
         let previewWait = previewTimeoutMilliseconds ?? timeoutMilliseconds
         guard (timeoutMilliseconds > 0 || requestedKind == .streamControl),
               (previewWait > 0 || requestedKind == .streamControl || allowNonblockingPreview),
@@ -325,7 +360,6 @@ public final class MachCommandCallerReceiver {
             throw MachCommandCallerError.malformed
         }
         try caller.recheck(requirement: requirement, userID: userID, auditSessionID: auditSessionID)
-        let input = hasInput ? try RetainedCommandInputDescriptor(fileport: carriedPorts[0]) : nil
         func takeReply(_ index: Int, identifier: mach_msg_id_t) -> MachCommandReplyRight {
             let right = MachCommandReplyRight(taking: carriedPorts[index], identifier: identifier)
             let offset = headerBytes + MemoryLayout<mach_msg_body_t>.size + index * MemoryLayout<mach_msg_port_descriptor_t>.size
@@ -334,34 +368,66 @@ public final class MachCommandCallerReceiver {
             storage.storeBytes(of: descriptor, toByteOffset: offset, as: mach_msg_port_descriptor_t.self)
             return right
         }
-        let controlTerminal: RetainedCommandInputDescriptor?
-        if kind == .mappedIOInput, carriedPorts[3] != MACH_PORT_NULL {
-            let terminal = try RetainedCommandInputDescriptor(fileport: carriedPorts[3])
-            try terminal.withBorrowedDescriptor { fd in
-                let flags = fcntl(fd, F_GETFL)
-                guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
-                guard flags & O_ACCMODE == O_RDWR, flags & O_EVTONLY == 0, isatty(fd) == 1 else {
-                    throw MachCommandCallerError.malformed
+        let admissionReplyIndex: Int?
+        switch kind {
+        case .admissionInput: admissionReplyIndex = 1
+        case .ioInput: admissionReplyIndex = 3
+        case .mappedIOInput: admissionReplyIndex = 4
+        default: admissionReplyIndex = nil
+        }
+
+        let payload = Data(bytes: storage.advanced(by: prefixBytes), count: count)
+        let imported: (input: RetainedCommandInputDescriptor?, controlTerminal: RetainedCommandInputDescriptor?,
+                       outputs: RetainedCommandOutputChannels?)
+        do {
+            let input: RetainedCommandInputDescriptor?
+            let controlTerminal: RetainedCommandInputDescriptor?
+            let outputs: RetainedCommandOutputChannels?
+            if hasInput {
+                try beforeImport?(.input)
+                input = try RetainedCommandInputDescriptor(fileport: carriedPorts[0])
+            } else { input = nil }
+            if kind == .mappedIOInput, carriedPorts[3] != MACH_PORT_NULL {
+                try beforeImport?(.controlTerminal)
+                let terminal = try RetainedCommandInputDescriptor(fileport: carriedPorts[3])
+                try terminal.withBorrowedDescriptor { fd in
+                    let flags = fcntl(fd, F_GETFL)
+                    guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
+                    guard flags & O_ACCMODE == O_RDWR, flags & O_EVTONLY == 0, isatty(fd) == 1 else {
+                        throw MachCommandCallerError.malformed
+                    }
                 }
-            }
-            controlTerminal = terminal
-        } else { controlTerminal = nil }
-        let outputs: RetainedCommandOutputChannels?
-        if isIO {
-            let output = try RetainedCommandOutputDescriptor(fileport: carriedPorts[1])
-            let error = try RetainedCommandOutputDescriptor(fileport: carriedPorts[2])
-            outputs = RetainedCommandOutputChannels(output: output, error: error,
-                result: takeReply(kind == .mappedIOInput ? 5 : 4, identifier: Self.terminalReplyMessageID))
-        } else { outputs = nil }
+                controlTerminal = terminal
+            } else { controlTerminal = nil }
+            if isIO {
+                try beforeImport?(.standardOutput)
+                let output = try RetainedCommandOutputDescriptor(fileport: carriedPorts[1])
+                try beforeImport?(.standardError)
+                let error = try RetainedCommandOutputDescriptor(fileport: carriedPorts[2])
+                outputs = RetainedCommandOutputChannels(output: output, error: error,
+                    result: takeReply(kind == .mappedIOInput ? 5 : 4, identifier: Self.terminalReplyMessageID))
+            } else { outputs = nil }
+            imported = (input, controlTerminal, outputs)
+        } catch {
+            // Defer still destroys all rights not detached for the bounded, authenticated refusal.
+            guard let rejectDescriptor, let rejection = CommandDescriptorImportRejection(error) else { throw error }
+            let admissionReply = admissionReplyIndex.map { takeReply($0, identifier: Self.admissionReplyMessageID) }
+            defer { admissionReply?.close() }
+            try rejectDescriptor(.init(payload: payload, caller: caller, carrierVersion: carrierVersion,
+                reply: admissionReply, reason: rejection.reason))
+            throw rejection
+        }
         let reply: MachCommandReplyRight?
-        if kind == .hello || kind == .admissionInput || isIO {
-            let index = kind == .hello ? 0 : (kind == .mappedIOInput ? 4 : (kind == .ioInput ? 3 : 1))
-            reply = takeReply(index, identifier: kind == .hello ? Self.helloReplyMessageID : Self.admissionReplyMessageID)
+        if kind == .hello {
+            reply = takeReply(0, identifier: Self.helloReplyMessageID)
+        } else if let admissionReplyIndex {
+            reply = takeReply(admissionReplyIndex, identifier: Self.admissionReplyMessageID)
         } else if kind == .streamOpened {
             reply = takeReply(0, identifier: Self.streamControlMessageID)
         } else { reply = nil }
         completed = true
-        return Packet(kind: kind, payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller, input: input, reply: reply, outputs: outputs, controlTerminal: controlTerminal)
+        return Packet(kind: kind, payload: payload, caller: caller, input: imported.input, reply: reply,
+            outputs: imported.outputs, controlTerminal: imported.controlTerminal)
     }
 
     private func discardQueueHead() throws {
