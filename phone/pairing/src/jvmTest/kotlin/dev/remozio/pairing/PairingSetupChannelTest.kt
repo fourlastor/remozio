@@ -30,9 +30,11 @@ class PairingSetupChannelTest {
         val proposal = PairingPhoneProposal(offer, PairingKey(ByteArray(16) { 6 }, point(transport)),
             PairingKey(ByteArray(16) { 7 }, point(decision)), PairingKey(ByteArray(16) { 8 }, point(biometric)))
         val invitation = PairingInvitation(ByteArray(16) { 1 }, ByteArray(16) { 2 }, "Fixture", point(authority), point(macTransport), 1u)
-        val transcript = PairingTranscript(ByteArray(16) { 9 }, ByteArray(32) { 10 }, offer,
+        val transcript = transcriptFor(proposal)
+        fun transcriptFor(claims: PairingPhoneProposal) = PairingTranscript(
+            ByteArray(16) { 9 }, ByteArray(32) { 10 }, claims.phone,
             ChannelOffer(ChannelRole.MAC, scope, ByteArray(32) { 11 }, setOf(1u), emptyList(), emptySet()), 1u, 1u,
-            point(authority), point(macTransport), proposal.transportKey, proposal.decisionKey, proposal.biometricKey,
+            point(authority), point(macTransport), claims.transportKey, claims.decisionKey, claims.biometricKey,
             ByteArray(32) { 12 }, null, ByteArray(16) { 13 }, 1000u, 2000u)
         fun proof() = sign(biometric, transcript.signingInput(PairingProofPurpose.PHONE_BIOMETRIC))
         fun receipt() = sign(authority, transcript.signingInput(PairingProofPurpose.MAC_COMMIT))
@@ -176,4 +178,115 @@ class PairingSetupChannelTest {
             finally { parent.cancelAndJoin() }
         }
     }
+
+    private inner class V2Stream(val fixture: Fixture, challenge: ByteArray = ByteArray(32) { 21 },
+        val material: ByteArray = ByteArray(32) { 22 }, reply: PairingTranscript? = fixture.transcript,
+    ) : PairingV2ByteStream {
+        private val inbound = ArrayDeque<ByteArray>()
+        val sent = ByteArrayOutputStream()
+        private val ended = CompletableDeferred<ByteArray?>()
+
+        init {
+            val encoded = PairingSetupPreludeV2.Challenge(challenge).encode()
+            inbound.add(ByteBuffer.allocate(4 + encoded.size).putInt(encoded.size).put(encoded).array())
+            reply?.let { inbound.add(wire(PairingSetupFrame.Transcript(it))) }
+        }
+
+        override fun pairingExporter() = material.copyOf()
+        override suspend fun awaitOpen() {}
+        override suspend fun send(bytes: ByteArray) { sent.write(bytes) }
+        override suspend fun receive(): ByteArray? = inbound.removeFirstOrNull() ?: ended.await()
+        override fun close() { ended.complete(null) }
+        override suspend fun awaitClosed() {}
+    }
+
+    @Test fun v2SendsOneProofAndChecksTheTranscript(): Unit = runBlocking {
+        val f = Fixture()
+        val stream = V2Stream(f)
+        val credentials = PairingInvitationV2(f.invitation, ByteArray(16) { 19 }, ByteArray(32) { 20 },
+            lifetimeMilliseconds = 10_000u)
+        val channel = PairingSetupChannel.authenticate(this, stream, f.invitation, f.proposal)
+        try {
+            assertEquals(0, stream.sent.size())
+            var checkpoint = false
+            val result = channel.awaitTranscriptV2(credentials) {
+                assertEquals(0, stream.sent.size())
+                checkpoint = true
+            }
+            assertTrue(checkpoint)
+            assertContentEquals(f.transcript.encode(), result.encode())
+            val bytes = ByteBuffer.wrap(stream.sent.toByteArray())
+            val size = bytes.int
+            assertEquals(size, bytes.remaining())
+            val proof = assertIs<PairingSetupPreludeV2.Proposal>(
+                PairingSetupPreludeV2.decode(ByteArray(size).also { bytes.get(it) }))
+            assertContentEquals(f.proposal.encode(), proof.value.encode())
+            assertContentEquals(credentials.proof(f.proposal, ByteArray(32) { 21 }, stream.material), proof.tag.copyBytes())
+            assertFails { channel.awaitTranscriptV2(credentials) }
+            assertEquals(size + 4, stream.sent.size())
+        } finally {
+            channel.closeAndJoin()
+        }
+    }
+
+    @Test fun v2RejectsLegacyProposalAndMissingExporterBeforeAnyWrite(): Unit = runBlocking {
+        val f = Fixture()
+        val credentials = PairingInvitationV2(f.invitation, ByteArray(16) { 19 }, ByteArray(32) { 20 },
+            lifetimeMilliseconds = 10_000u)
+        for (legacy in listOf(true, false)) {
+            val stream = V2Stream(f, material = ByteArray(0))
+            val channel = PairingSetupChannel.authenticate(this, stream, f.invitation, f.proposal)
+            try {
+                if (legacy) assertFails { channel.awaitTranscript() }
+                else assertFails { channel.awaitTranscriptV2(credentials) }
+                assertEquals(0, stream.sent.size())
+            } finally {
+                channel.closeAndJoin()
+            }
+        }
+    }
+
+    @Test fun v2CancellationAfterProofDoesNotRepeatSubmission(): Unit = runBlocking {
+        val f = Fixture()
+        val stream = V2Stream(f, reply = null)
+        val credentials = PairingInvitationV2(f.invitation, ByteArray(16) { 19 }, ByteArray(32) { 20 },
+            lifetimeMilliseconds = 10_000u)
+        val channel = PairingSetupChannel.authenticate(this, stream, f.invitation, f.proposal)
+        try {
+            assertFailsWith<TimeoutCancellationException> {
+                withTimeout(500) { channel.awaitTranscriptV2(credentials) }
+            }
+            val bytes = stream.sent.toByteArray()
+            assertTrue(bytes.size > 4)
+            assertFails { channel.awaitTranscriptV2(credentials) }
+            assertContentEquals(bytes, stream.sent.toByteArray())
+        } finally {
+            channel.closeAndJoin()
+        }
+    }
+
+    @Test fun v2RejectsATranscriptThatChangesTheProvedDecisionKey(): Unit = runBlocking {
+        val f = Fixture()
+        val credentials = PairingInvitationV2(f.invitation, ByteArray(16) { 19 }, ByteArray(32) { 20 },
+            lifetimeMilliseconds = 10_000u)
+        val changed = PairingPhoneProposal(f.offer, f.proposal.transportKey,
+            PairingKey(f.proposal.decisionKey.keyID.copyBytes(), point(key())), f.proposal.biometricKey)
+        val response = f.transcriptFor(changed)
+        f.invitation.validateMacClaims(response)
+        val stream = V2Stream(f, reply = response)
+        val channel = PairingSetupChannel.authenticate(this, stream, f.invitation, f.proposal)
+        try {
+            assertFailsWith<IllegalArgumentException> { channel.awaitTranscriptV2(credentials) }
+            val sent = ByteBuffer.wrap(stream.sent.toByteArray())
+            val size = sent.int
+            assertEquals(size, sent.remaining())
+            val proof = assertIs<PairingSetupPreludeV2.Proposal>(
+                PairingSetupPreludeV2.decode(ByteArray(size).also { sent.get(it) }))
+            assertContentEquals(f.proposal.encode(), proof.value.encode())
+            assertFails { channel.transcript }
+        } finally {
+            channel.closeAndJoin()
+        }
+    }
+
 }

@@ -10,3 +10,9 @@ interface PairingByteStream : AutoCloseable {
     suspend fun receive(): ByteArray?
     suspend fun awaitClosed()
 }
+
+
+/** Supplies the v2 exporter from the same authenticated stream that carries the challenge and proof. */
+interface PairingV2ByteStream : PairingByteStream {
+    fun pairingExporter(): ByteArray
+}

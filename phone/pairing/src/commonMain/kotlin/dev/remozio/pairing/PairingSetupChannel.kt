@@ -20,6 +20,7 @@ class PairingSetupChannel private constructor(
     private val operationLock = Mutex()
     private var state = State.OPENING
     private var staged: PairingTranscript? = null
+    private var challenge: PairingSetupPreludeV2.Challenge? = null
     private var pending = ByteArray(0)
     private var offset = 0
     private val deadline: Job
@@ -37,21 +38,53 @@ class PairingSetupChannel private constructor(
     private suspend fun authenticate() = operation {
         check(state == State.OPENING)
         stream.awaitOpen(); active()
-        check(read() == PairingSetupFrame.Hello)
+        if (stream is PairingV2ByteStream) {
+            challenge = PairingSetupPreludeV2.decode(readBytes(PairingSetupPreludeV2.MAXIMUM_BYTES))
+                as? PairingSetupPreludeV2.Challenge ?: throw IOException("Missing pairing challenge")
+        } else {
+            check(read() == PairingSetupFrame.Hello)
+        }
         state = State.AUTHENTICATED
     }
 
     /** Start the sole proposal only after selecting an authenticated route. Human setup has its own longer deadline. */
     suspend fun awaitTranscript(beforeProposal: suspend () -> Unit = {}): PairingTranscript = operation {
         check(state == State.AUTHENTICATED)
+        check(stream !is PairingV2ByteStream)
         beforeProposal()
         state = State.PROPOSAL_SENT
         write(PairingSetupFrame.Proposal(proposal))
+        readTranscript()
+    }
+
+    /** Only the selected connection sends a proof. V2 uses the proof's proposal for the rest of setup. */
+    suspend fun awaitTranscriptV2(invitationV2: PairingInvitationV2,
+        beforeProposal: suspend () -> Unit = {},
+    ): PairingTranscript = operation {
+        check(state == State.AUTHENTICATED)
+        val v2 = stream as? PairingV2ByteStream ?: throw IOException("Pairing v2 requires an authenticated v2 connection")
+        require(invitationV2.invitation.encode().contentEquals(invitation.encode()))
+        val challengeBytes = checkNotNull(challenge).value.copyBytes()
+        val exporter = v2.pairingExporter()
+        val proof = try { invitationV2.proof(proposal, challengeBytes, exporter) }
+            finally { exporter.fill(0) }
+        try {
+            beforeProposal()
+            state = State.PROPOSAL_SENT
+            challenge = null
+            writeBytes(PairingSetupPreludeV2.Proposal(proposal, proof).encode())
+        } finally {
+            proof.fill(0)
+        }
+        readTranscript()
+    }
+
+    private suspend fun readTranscript(): PairingTranscript {
         val frame = read() as? PairingSetupFrame.Transcript ?: throw IOException("Missing pairing transcript")
         invitation.validateMacClaims(frame.value); proposal.validate(frame.value)
         require(frame.value.selectedEnvelopeVersion == 1uL && frame.value.expiresAtUnixMillis - frame.value.issuedAtUnixMillis <= 300_000uL)
         staged = frame.value; state = State.STAGED
-        frame.value
+        return frame.value
     }
 
     /** Call once after human confirmation, durable PREPARED storage and a fresh hardware biometric proof.
@@ -84,8 +117,10 @@ class PairingSetupChannel private constructor(
         finally { operationLock.unlock() }
     }
     private suspend fun active() { currentCoroutineContext().ensureActive(); check(!closed.load()) }
-    private suspend fun write(frame: PairingSetupFrame) {
-        active(); val bytes = frame.encode(); val size = bytes.size
+    private suspend fun write(frame: PairingSetupFrame) = writeBytes(frame.encode())
+
+    private suspend fun writeBytes(bytes: ByteArray) {
+        active(); val size = bytes.size
         stream.send(byteArrayOf((size ushr 24).toByte(), (size ushr 16).toByte(), (size ushr 8).toByte(), size.toByte()))
         var position = 0
         while (position < size) {
@@ -93,11 +128,13 @@ class PairingSetupChannel private constructor(
             stream.send(bytes.copyOfRange(position, end)); active(); position = end
         }
     }
-    private suspend fun read(): PairingSetupFrame {
+    private suspend fun read(): PairingSetupFrame = PairingSetupFrame.decode(readBytes(PairingSetupFrame.MAXIMUM_BYTES))
+
+    private suspend fun readBytes(maximumBytes: Int): ByteArray {
         val header = exact(4)
         val length = header.fold(0L) { value, byte -> (value shl 8) or (byte.toLong() and 255) }
-        require(length in 1..PairingSetupFrame.MAXIMUM_BYTES.toLong())
-        return PairingSetupFrame.decode(exact(length.toInt()))
+        require(length in 1..maximumBytes.toLong())
+        return exact(length.toInt())
     }
     private suspend fun exact(size: Int): ByteArray {
         val result = ByteArray(size); var position = 0

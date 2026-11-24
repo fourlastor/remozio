@@ -37,7 +37,7 @@ class PairingPreviewActivity : ComponentActivity() {
                         delay(1500)
                         displayed = displayed.copy(phase = PairingPhase.COMPARING)
                     }
-                    PairingSetupSurface(displayed, onConnect = {}, onCompare = {}, onExpire = {
+                    PairingSetupSurface(displayed, onConnect = { false }, onCompare = {}, onExpire = {
                         if (displayed.phase == PairingPhase.COMPARING) displayed = displayed.copy(phase = PairingPhase.EXPIRED)
                     }, onClose = ::finish, preview = true)
                 }

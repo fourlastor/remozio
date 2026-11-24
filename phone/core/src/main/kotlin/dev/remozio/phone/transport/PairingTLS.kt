@@ -2,13 +2,14 @@ package dev.remozio.phone.transport
 
 import dev.remozio.pairing.PairingByteStream
 import dev.remozio.pairing.PairingSetupChannel
+import dev.remozio.pairing.PairingV2ByteStream
 import dev.remozio.pairing.firstAuthenticatedPairingRoute
 import dev.remozio.protocol.*
 import javax.net.ssl.KeyManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 
-private class PairingTLSStream(private val session: TLSRecordSession) : PairingByteStream {
+private open class PairingTLSStream(private val session: TLSRecordSession) : PairingByteStream {
     override suspend fun awaitOpen() = session.awaitOpen()
     override suspend fun send(bytes: ByteArray) = session.send(bytes)
     override suspend fun receive(): ByteArray? = session.receive()
@@ -49,15 +50,19 @@ private suspend fun <T> rejectBeforeTLS(carrier: EncryptedRecordTransport, invit
 
 // Releases whatever it created if it throws, because the caller never receives the stream.
 private suspend fun openPairingTLS(scope: CoroutineScope, carrier: EncryptedRecordTransport, localKeys: Array<KeyManager>,
-    invitation: PairingInvitation,
+    invitation: PairingInvitation, provider: PairingV2TLSProvider? = null,
 ): PairingByteStream {
     var engine: PinnedTLSClient? = null
     var session: TLSRecordSession? = null
     try {
-        engine = PinnedTLSClient(localKeys, P256_SPKI_PREFIX + invitation.transportPublicKey.copyBytes(),
-            PairingSetupFrame.APPLICATION_PROTOCOL, 1_048_576)
-        session = TLSRecordSession(scope, engine, carrier)
-        return PairingTLSStream(session)
+        val pin = P256_SPKI_PREFIX + invitation.transportPublicKey.copyBytes()
+        val tls = if (provider == null) PinnedTLSClient(localKeys, pin, PairingSetupFrame.APPLICATION_PROTOCOL, 1_048_576)
+            else PinnedTLSClient.forPairingV2(localKeys, pin, provider)
+        engine = tls
+        session = TLSRecordSession(scope, tls, carrier)
+        return if (provider == null) PairingTLSStream(session) else object : PairingTLSStream(session), PairingV2ByteStream {
+            override fun pairingExporter() = tls.pairingExporter()
+        }
     } catch (failure: Throwable) {
         withContext(NonCancellable) {
             if (session != null) session.closeAndJoin() else { carrier.close(); carrier.awaitClosed(); engine?.close() }
@@ -79,3 +84,28 @@ suspend fun authenticatePairingRoutes(parent: CoroutineScope, direct: Flow<Appro
         throw failure
     }
 }, { it.closeAndJoin() })
+
+
+/** Authenticate candidate routes without sending a proof. Only the selected channel may send it. */
+suspend fun authenticatePairingV2Routes(parent: CoroutineScope, direct: Flow<ApprovalCarrierRoute>,
+    localKeys: Array<KeyManager>, invitation: PairingInvitationV2, proposal: PairingPhoneProposal, timeoutMillis: Long,
+    provider: PairingV2TLSProvider,
+): PairingSetupChannel {
+    val publicInvitation = invitation.invitation
+    proposal.validateMacScope(publicInvitation)
+    require(proposal.replacement?.phoneID == invitation.replacement?.phoneID &&
+        proposal.replacement?.epoch == invitation.replacement?.epoch)
+    return firstAuthenticatedPairingRoute(direct, timeoutMillis, { route ->
+        val carrier = route.open(parent)
+        try {
+            currentCoroutineContext().ensureActive()
+            // Route selection times out separately from the human setup session.
+            PairingSetupChannel.authenticate(parent, publicInvitation, proposal) { scope ->
+                openPairingTLS(scope, carrier, localKeys, publicInvitation, provider)
+            }
+        } catch (failure: Throwable) {
+            withContext(NonCancellable) { carrier.close(); carrier.awaitClosed() }
+            throw failure
+        }
+    }, { it.closeAndJoin() })
+}

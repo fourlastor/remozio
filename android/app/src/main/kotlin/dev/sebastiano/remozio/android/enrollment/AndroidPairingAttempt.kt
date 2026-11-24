@@ -19,6 +19,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
 import dev.remozio.phone.transport.authenticatePairingRoutes
+import dev.remozio.phone.transport.authenticatePairingV2Routes
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -59,11 +60,20 @@ internal class AndroidPairingAttempt(
     val phoneSuffix: String get() = phoneID.takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
     val transcript: PairingTranscript get() = checkNotNull(channel).transcript
 
-    suspend fun connect(text: String): PairingTranscript = operation {
-        check(invitation == null)
+    suspend fun connect(text: String): PairingTranscript {
         val imported = text.trim()
         val rePair = if (imported.startsWith("remozio-repair:")) RePairInvitation.importText(imported) else null
-        val selected = rePair?.invitation ?: PairingInvitation.importText(imported)
+        return connect(rePair?.invitation ?: PairingInvitation.importText(imported), rePair, null)
+    }
+
+    suspend fun connectV2(invitation: PairingInvitationV2): PairingTranscript = connect(
+        invitation.invitation, invitation.replacement?.let { RePairInvitation(invitation.invitation, it) }, invitation,
+    )
+
+    private suspend fun connect(selected: PairingInvitation, rePair: RePairInvitation?,
+        v2: PairingInvitationV2?,
+    ): PairingTranscript = operation {
+        check(invitation == null)
         val keyIDs = EnrollmentKeyRole.entries.map { CborValue.Bytes(randomID()) }
         if (rePair == null) {
             val snapshot = store.setupSnapshot()
@@ -111,14 +121,17 @@ internal class AndroidPairingAttempt(
         val proposal = PairingPhoneProposal(offer, claim(checkNotNull(transportKey)), claim(checkNotNull(decisionKey)),
             claim(checkNotNull(biometricKey)), rePair?.predecessor)
         active()
-        val opened = authenticatePairingRoutes(scope,
-            androidPairingRoutes(application(), selected.macID.copyBytes(), selected.accountID.copyBytes()),
-            arrayOf(checkNotNull(identity).identity.keyManager), selected, proposal,
-            LocalNetworkSettings(application()).timeoutSeconds() * 1000L)
+        val routes = androidPairingRoutes(application(), selected.macID.copyBytes(), selected.accountID.copyBytes())
+        val keys = arrayOf<javax.net.ssl.KeyManager>(checkNotNull(identity).identity.keyManager)
+        val timeout = LocalNetworkSettings(application()).timeoutSeconds() * 1000L
+        val opened = if (v2 == null) authenticatePairingRoutes(scope, routes, keys, selected, proposal, timeout)
+            else authenticatePairingV2Routes(scope, routes, keys, v2, proposal, timeout, AndroidInvitationExporter)
         channel = opened; active()
-        val transcript = opened.awaitTranscript {
+        val prepareProposal: suspend () -> Unit = {
             rePairRecordID?.let { store.prepareRePairProposal(it, RePairProposalMaterial(proposal, ownedKeys)) }
         }
+        val transcript = if (v2 == null) opened.awaitTranscript(prepareProposal)
+            else opened.awaitTranscriptV2(v2, prepareProposal)
         active()
         selected.validateMacClaims(transcript)
         proposal.validate(transcript)

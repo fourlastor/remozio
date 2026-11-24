@@ -6,6 +6,7 @@
         <activity android:name=".push.PushRegistrationWorkProbeActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".push.ProofHistoryProbeActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".PairingPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".PairingV2TestActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".AdbEndpointProbeActivity" android:exported="false" />
         <activity android:name=".BiometricProbeActivity" android:exported="false" />
         <activity android:name=".requests.CombinedInboxPreviewActivity" android:exported="true" android:excludeFromRecents="true" />

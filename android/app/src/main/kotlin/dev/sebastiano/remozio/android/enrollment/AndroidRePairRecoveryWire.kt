@@ -5,8 +5,10 @@ import android.net.ssl.SSLEngines
 import dev.remozio.phone.transport.ApprovalCarrierRoute
 import dev.remozio.phone.transport.PairingRecoveryChannel
 import dev.remozio.phone.transport.PairingRecoveryTLSProvider
+import dev.remozio.phone.transport.PairingV2TLSProvider
 import dev.remozio.phone.transport.RelayConnector
 import dev.remozio.protocol.PairingRecoveryFrame
+import dev.remozio.protocol.PairingInvitationV2
 import dev.sebastiano.remozio.android.transport.AndroidTransportIdentities
 import dev.sebastiano.remozio.android.transport.AndroidTransportIdentity
 import dev.sebastiano.remozio.android.transport.LocalNetworkSettings
@@ -63,12 +65,20 @@ internal suspend fun androidRePairRecoveryWire(context: Context, parent: Corouti
 internal fun recoveryDirectBudget(settingMillis: Long, attemptMillis: Long): Long =
     minOf(settingMillis, (attemptMillis / 2).coerceAtLeast(1))
 
-private object AndroidRecoveryExporter : PairingRecoveryTLSProvider {
-    override fun configure(engine: SSLEngine) {
-        if (!SSLEngines.isSupportedEngine(engine)) throw IOException("Pairing recovery TLS provider unavailable")
-        SSLEngines.setUseSessionTickets(engine, false)
-    }
-
-    override fun export(engine: SSLEngine): ByteArray? =
-        SSLEngines.exportKeyingMaterial(engine, PairingRecoveryFrame.EXPORTER_LABEL, ByteArray(0), 32)
+internal object AndroidRecoveryExporter : PairingRecoveryTLSProvider {
+    override fun configure(engine: SSLEngine) = configurePairingExporter(engine)
+    override fun export(engine: SSLEngine): ByteArray? = export(engine, PairingRecoveryFrame.EXPORTER_LABEL)
 }
+
+internal object AndroidInvitationExporter : PairingV2TLSProvider {
+    override fun configure(engine: SSLEngine) = configurePairingExporter(engine)
+    override fun export(engine: SSLEngine): ByteArray? = export(engine, PairingInvitationV2.EXPORTER_LABEL)
+}
+
+private fun configurePairingExporter(engine: SSLEngine) {
+    if (!SSLEngines.isSupportedEngine(engine)) throw IOException("Pairing TLS exporter unavailable")
+    SSLEngines.setUseSessionTickets(engine, false)
+}
+
+private fun export(engine: SSLEngine, label: String): ByteArray? =
+    SSLEngines.exportKeyingMaterial(engine, label, ByteArray(0), 32)

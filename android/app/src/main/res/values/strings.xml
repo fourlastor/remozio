@@ -442,6 +442,8 @@
     <string name="pairing_setup_title">Pair a Mac</string>
     <string name="pairing_setup_intro">On your Mac, open Remozio and choose Pair a phone. Scan its code or paste its invitation here. Keep both devices on the same LAN during setup.</string>
     <string name="pairing_setup_invitation">Mac invitation</string>
+    <string name="pairing_setup_invitation_ready">Invitation ready</string>
+    <string name="pairing_setup_v2_wrong_field">This is a v2 invitation. Use a standard invitation in this field.</string>
     <string name="pairing_setup_lan_denied">Allow local network access to find your Mac. You can also change this permission in Android settings.</string>
     <string name="pairing_setup_connect">Connect to Mac</string>
     <string name="pairing_setup_waiting">Choose this phone on your Mac and approve its setup prompt.</string>

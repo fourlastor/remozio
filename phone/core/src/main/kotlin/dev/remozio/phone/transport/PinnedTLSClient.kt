@@ -35,7 +35,7 @@ class TLSClientProgress internal constructor(
 class PinnedTLSClient private constructor(
     localKeys: Array<KeyManager>, peerSubjectPublicKeyInfo: ByteArray,
     private val applicationProtocol: String, private val maximumHandshakeBytes: Int,
-    private val recovery: PairingRecoveryTLSProvider?,
+    private val exporterProvider: PairingTLSExporter?,
 ) : AutoCloseable {
     constructor(localKeys: Array<KeyManager>, peerSubjectPublicKeyInfo: ByteArray, applicationProtocol: String,
         maximumHandshakeBytes: Int,
@@ -69,14 +69,14 @@ class PinnedTLSClient private constructor(
             useClientMode = true
             enabledProtocols = arrayOf("TLSv1.3")
             sslParameters = sslParameters.apply { applicationProtocols = arrayOf(this@PinnedTLSClient.applicationProtocol) }
-            recovery?.configure(this)
+            exporterProvider?.configure(this)
         }
     }
 
-    @Synchronized internal fun recoveryExporter(): ByteArray {
+    @Synchronized internal fun pairingExporter(): ByteArray {
         check(currentState == TLSClientState.OPEN && authenticated)
-        val bytes = checkNotNull(recovery).export(checkNotNull(engine))
-        if (bytes == null || bytes.size != 32) throw SSLException("Pairing recovery exporter unavailable")
+        val bytes = checkNotNull(exporterProvider).export(checkNotNull(engine))
+        if (bytes == null || bytes.size != 32) throw SSLException("Pairing exporter unavailable")
         return bytes
     }
 
@@ -212,6 +212,9 @@ class PinnedTLSClient private constructor(
     companion object {
         private const val BUFFER_BYTES = 65_536
         private const val MAX_CHUNK_BYTES = 32_768
+
+        internal fun forPairingV2(keys: Array<KeyManager>, pin: ByteArray, provider: PairingV2TLSProvider) =
+            PinnedTLSClient(keys, pin, dev.remozio.protocol.PairingSetupPreludeV2.APPLICATION_PROTOCOL, 1_048_576, provider)
 
         internal fun forPairingRecovery(keys: Array<KeyManager>, pin: ByteArray,
             provider: PairingRecoveryTLSProvider,
