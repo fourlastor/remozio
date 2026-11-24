@@ -12,6 +12,18 @@ struct UpdateSchedulingCandidateRecord: Codable, Equatable, Sendable, CustomStri
     let generation: UInt64
     let revision: UUID
     let selected: Bool
+    /// Excluded from CodingKeys and from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case macID
+        case installationID
+        case inventoryRevision
+        case preparation
+        case generation
+        case revision
+        case selected
+    }
     var updateID: Data { preparation.copyDigest! }
     var description: String { "UpdateSchedulingCandidateRecord(redacted)" }
     var debugDescription: String { description }
@@ -31,13 +43,13 @@ struct UpdateSchedulingCandidateRecord: Codable, Equatable, Sendable, CustomStri
         }
     }
     var encoded: Data {
-        get throws {
+        get throws { try canonicalCache.bytes {
             try validate()
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             let bytes = try encoder.encode(self)
             guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw PreparationStoreError.corruptRecord }
             return bytes
-        }
+        } }
     }
     static func decode(_ bytes: Data) throws -> Self {
         do {

@@ -24,6 +24,8 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
         }
     }
     private let storage: Storage
+    /// Excluded from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.role == rhs.role && lhs.releaseBinding == rhs.releaseBinding &&
@@ -205,7 +207,7 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
         try require(pairing.appPolicy, role: .app, uid: services.ownerUID)
         try require(pairing.transportPolicy, role: .transport, uid: serviceUID)
     }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         var fields: [UInt64: CBORValue] = [0: .unsigned(formatVersion), 1: .text("remozio-gateway-settings-consumer-host"),
             2: .unsigned(role.rawValue), 3: .bytes(try runtime.encoded), 4: .text(bundlePath), 5: .bytes(try codePolicy.bytes)]
         if let releaseBinding, let policyStage {
@@ -221,7 +223,7 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
             fields[7] = .unsigned(RuntimeReleasePolicyStage.completion.rawValue)
         }
         return try DeterministicCBOR.encode(.map(fields), limits: formatVersion == Self.version ? Self.limits : Self.archiveLimits)
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         try decode(bytes, allowReleaseBound: false)
     }

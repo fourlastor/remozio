@@ -20,6 +20,20 @@ struct MachineUpdateInstalledReleaseRecord: Codable, Equatable, Sendable, Custom
     let inventoryRevision: Data
     let releaseDigest: Data
     let operands: [Operand]
+    /// Excluded from CodingKeys and from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case id
+        case revision
+        case sourceSchemaVersion
+        case activationAttempt
+        case macID
+        case installationID
+        case inventoryRevision
+        case releaseDigest
+        case operands
+    }
     var description: String { "MachineUpdateInstalledReleaseRecord(redacted)" }
     var debugDescription: String { description }
 
@@ -76,12 +90,12 @@ struct MachineUpdateInstalledReleaseRecord: Codable, Equatable, Sendable, Custom
             }
         }
     }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate(); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw PreparationStoreError.capacity }
         return bytes
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw PreparationStoreError.corruptRecord }

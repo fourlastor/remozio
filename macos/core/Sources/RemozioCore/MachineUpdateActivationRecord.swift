@@ -23,6 +23,23 @@ struct MachineUpdateActivationRecord: Codable, Equatable, Sendable, CustomString
     let machineAdmission: PreparationFileIdentity
     let phase: Phase
     let policyPreflightDigest: Data?
+    /// Excluded from CodingKeys and from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case attemptID
+        case revision
+        case macID
+        case installationID
+        case updateID
+        case generation
+        case candidateDigest
+        case inventoryDigest
+        case admissionDigest
+        case machineAdmission
+        case phase
+        case policyPreflightDigest
+    }
     var description: String { "MachineUpdateActivationRecord(redacted)" }
     var debugDescription: String { description }
 
@@ -122,12 +139,12 @@ struct MachineUpdateActivationRecord: Codable, Equatable, Sendable, CustomString
               [updateID, candidateDigest, inventoryDigest, admissionDigest].allSatisfy({ $0.count == 32 }),
               machineAdmission.inode > 0 else { throw PreparationStoreError.corruptRecord }
     }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate(); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw PreparationStoreError.corruptRecord }
         return bytes
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw PreparationStoreError.corruptRecord }

@@ -18,6 +18,8 @@ struct RuntimeMaterialReference: Equatable, Sendable, CustomStringConvertible, C
     let gateway: GatewayRegistrationIdentity
     let serviceActivity: ServiceReleaseActivityReference?
     let auditDeliveryVersion: UInt64?
+    /// Excluded from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
     var formatVersion: UInt64 { auditDeliveryVersion != nil ? 3 : serviceActivity == nil ? 1 : 2 }
     var description: String { "RuntimeMaterialReference(redacted)" }
     var debugDescription: String { description }
@@ -38,13 +40,13 @@ struct RuntimeMaterialReference: Equatable, Sendable, CustomStringConvertible, C
     var transportPublicKeyX963: Data { get throws {
         try P256.Signing.PublicKey(derRepresentation: transportPublicKeyInfo).x963Representation
     } }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         var fields: [UInt64: CBORValue] = [0: .unsigned(formatVersion), 1: .bytes(materialID),
             2: .bytes(try services.encoded), 3: .bytes(materialDigest), 4: .bytes(transportPublicKeyInfo), 5: .bytes(try gateway.encode())]
         if let serviceActivity { fields[6] = .bytes(try serviceActivity.encoded) }
         if let auditDeliveryVersion { fields[7] = .unsigned(auditDeliveryVersion) }
         return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
               case .unsigned(let version) = fields[0], supportedVersions.contains(version),
