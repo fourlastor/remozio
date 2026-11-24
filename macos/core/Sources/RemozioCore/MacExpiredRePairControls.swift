@@ -8,7 +8,7 @@ public final class MacExpiredRePairControls {
     }
 
     public enum Availability: Equatable, Sendable {
-        case unread, available, supportUnconfirmed, unavailable
+        case unread, available, updateRequired, unavailable
     }
 
     /// An empty array means the authority reports no expired stages.
@@ -23,10 +23,26 @@ public final class MacExpiredRePairControls {
 
     public convenience init(openChannel: @escaping @MainActor () throws -> AuthorityPairingChannel) {
         self.init(load: {
-            let channel = try openChannel()
-            defer { channel.abort() }
-            _ = try await channel.start()
-            return try await channel.expiredRePairs()
+            for _ in 0..<2 {
+                try Task.checkCancellation()
+                let channel = try openChannel()
+                defer { channel.abort() }
+                do {
+                    _ = try await channel.start()
+                    try await channel.negotiateExpiredRePairList()
+                } catch {
+                    continue
+                }
+                return try await channel.expiredRePairs()
+            }
+
+            // A legacy service can close the connection on the unknown selector.
+            try Task.checkCancellation()
+            let legacy = try openChannel()
+            defer { legacy.abort() }
+            _ = try await legacy.start()
+            try await legacy.requirePhoneManagement()
+            throw ExpiredRePairListError.updateRequired
         }, discard: { record in
             let channel = try openChannel()
             defer { channel.abort() }
@@ -94,7 +110,7 @@ public final class MacExpiredRePairControls {
             guard !Task.isCancelled else { return nil }
             records = nil
             switch error {
-            case ExpiredRePairListError.supportUnconfirmed: availability = .supportUnconfirmed
+            case ExpiredRePairListError.updateRequired: availability = .updateRequired
             default: availability = .unavailable
             }
         }

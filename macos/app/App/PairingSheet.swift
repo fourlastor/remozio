@@ -515,11 +515,11 @@ struct PairedPhonesSheet: View {
         } else {
             switch expiredRePairs.availability {
             case .unread, .available: EmptyView()
-            case .supportUnconfirmed:
-                Text("This version of Remozio may need an update to show expired re-pair attempts.")
+            case .updateRequired:
+                Text("Update Remozio on this Mac to show expired re-pair attempts.")
                     .fixedSize(horizontal: false, vertical: true)
             case .unavailable:
-                Text("Expired re-pair attempts are unavailable.").fixedSize(horizontal: false, vertical: true)
+                Text("Expired re-pair attempts are unavailable. Try again.").fixedSize(horizontal: false, vertical: true)
             }
         }
         if let notice = expiredRePairs.notice {

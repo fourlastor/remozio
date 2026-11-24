@@ -9,6 +9,11 @@ import Synchronization
 import XCTest
 @testable import RemozioCore
 
+@objc private protocol LegacyPhoneManagementAppXPCProtocol:
+    AuthorityPresenceXPCProtocol, AuthorityPairingXPCProtocol, AuthorityPairedPhoneXPCProtocol {}
+
+extension AuthorityAppXPCEndpoint: LegacyPhoneManagementAppXPCProtocol {}
+
 final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
     private enum Failure: Error { case denied }
     fileprivate final class Box<Value>: @unchecked Sendable {
@@ -178,7 +183,6 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let endpoint: AuthorityPairingXPCEndpoint
         let sends = Box(0), stageSends = Box(0), commitSends = Box(0), revocationSends = Box(0)
         let discardSends = Box(0)
-        var supportsExpiredRePairs = true
         let hold = Box(Hold.none)
         let late = Box<(@Sendable () -> Void)?>(nil)
         private let transform: @Sendable (PairingClientCall, PairingClientReply) throws -> PairingClientReply
@@ -209,11 +213,12 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 endpoint.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
             case .cancel: endpoint.cancelPairing { complete(.cancelled($0)) }
             case .phoneManagementHello: endpoint.pairedPhoneHello { complete(.version($0)) }
+            case .versionedPhoneManagementHello(let maximumVersion):
+                endpoint.pairedPhoneHello(maximumVersion: maximumVersion) { complete(.version($0)) }
             case .managePhone(let operation, let selection, let authorization):
                 if operation == .revoke { revocationSends.value += 1 }
                 if operation == .discardExpiredRePair { discardSends.value += 1 }
-                let raw = operation == .listExpiredRePairs && !supportsExpiredRePairs ? UInt64.max : operation.rawValue
-                endpoint.managePairedPhone(raw, selection: selection, authorization: authorization) { complete(.bytes($0)) }
+                endpoint.managePairedPhone(operation.rawValue, selection: selection, authorization: authorization) { complete(.bytes($0)) }
             }
         }
         func close() { endpoint.close() }
@@ -224,10 +229,14 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         private let lock = NSRecursiveLock()
         private let fixture: Fixture
         private let requirement: String
+        private let servesLegacyPhoneManagement: Bool
+        private let acceptsConnections: Bool
         private var connections: [(NSXPCConnection, AuthorityAppXPCEndpoint)] = []
         private var closed = false
-        init(_ fixture: Fixture, requirement: String) {
+        init(_ fixture: Fixture, requirement: String, servesLegacyPhoneManagement: Bool = false, acceptsConnections: Bool = true) {
             self.fixture = fixture; self.requirement = requirement
+            self.servesLegacyPhoneManagement = servesLegacyPhoneManagement
+            self.acceptsConnections = acceptsConnections
             super.init(); listener.setConnectionCodeSigningRequirement(requirement); listener.delegate = self; listener.activate()
         }
         deinit { close() }
@@ -240,14 +249,14 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         }
         func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
             lock.withLock {
-                guard !closed, listener === self.listener, connections.count < 4 else { return false }
+                guard acceptsConnections, !closed, listener === self.listener, connections.count < 4 else { return false }
                 do {
                     let f = fixture, environment = f.environment
                     let credentials = try f.policy.verifyCredentials(connection)
                     guard credentials.processID == getpid() else { throw Failure.denied }
                     let invocation = XPCInvocationGuard(connection: connection, policy: f.policy)
                     let verify = {
-                        guard try invocation.verifyInvocation() == credentials else { throw Failure.denied }
+                        guard !environment.peerDenied.value, try invocation.verifyInvocation() == credentials else { throw Failure.denied }
                     }
                     let binding = try AuthorityPresenceBinding(macID: f.mac, accountID: f.account,
                         clockEpoch: environment.epoch, connectionID: UUID())
@@ -261,7 +270,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                         }, invalidate: { [weak connection] in connection?.invalidate() })
                     let endpoint = AuthorityAppXPCEndpoint(presence: presence, pairing: pairing)
                     connection.setCodeSigningRequirement(requirement)
-                    connection.exportedInterface = NSXPCInterface(with: AuthorityAppXPCProtocol.self)
+                    connection.exportedInterface = servesLegacyPhoneManagement
+                        ? NSXPCInterface(with: LegacyPhoneManagementAppXPCProtocol.self)
+                        : NSXPCInterface(with: AuthorityAppXPCProtocol.self)
                     connection.exportedObject = endpoint
                     connection.invalidationHandler = { [weak endpoint] in endpoint?.pairing.close(); endpoint?.presence.close() }
                     connection.interruptionHandler = { [weak endpoint] in endpoint?.pairing.close(); endpoint?.presence.close() }
@@ -270,12 +281,24 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             }
         }
     }
+    private final class PhoneManagementTrace: Sendable {
+        let opens = Box(0), legacyHellos = Box(0), versionedHellos = Box(0), expiredLists = Box(0)
+        let legacyReply = Box<UInt64>(0), versionedReply = Box<UInt64>(0)
+    }
+
     /// Wire-only driver: expected peer UID and hash identify this test process, not a deployed Root service.
     private final class NativeDriver: PairingClientDriver, @unchecked Sendable {
         private let connection: NSXPCConnection
         private let policy: XPCPeerPolicy
-        init(endpoint: NSXPCListenerEndpoint, policy: XPCPeerPolicy, requirement: String) {
-            self.policy = policy; connection = NSXPCConnection(listenerEndpoint: endpoint)
+        private let trace: PhoneManagementTrace?
+        private let beforeVersionedHello: @Sendable () -> Void
+        private let onVersionedHello: @Sendable () -> Void
+        init(endpoint: NSXPCListenerEndpoint, policy: XPCPeerPolicy, requirement: String,
+             trace: PhoneManagementTrace? = nil, beforeVersionedHello: @escaping @Sendable () -> Void = {},
+             onVersionedHello: @escaping @Sendable () -> Void = {}) {
+            self.policy = policy; self.trace = trace; self.beforeVersionedHello = beforeVersionedHello
+            self.onVersionedHello = onVersionedHello
+            connection = NSXPCConnection(listenerEndpoint: endpoint)
             connection.remoteObjectInterface = NSXPCInterface(with: AuthorityAppXPCProtocol.self)
             connection.setCodeSigningRequirement(requirement)
         }
@@ -298,8 +321,22 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .commit(let setup, let digest, let proof, let authorization):
                 proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
             case .cancel: proxy.cancelPairing { complete(.cancelled($0)) }
-            case .phoneManagementHello: proxy.pairedPhoneHello { complete(.version($0)) }
+            case .phoneManagementHello:
+                if let trace { trace.legacyHellos.value += 1 }
+                proxy.pairedPhoneHello { [trace] version in
+                    trace?.legacyReply.value = version
+                    complete(.version(version))
+                }
+            case .versionedPhoneManagementHello(let maximumVersion):
+                if let trace { trace.versionedHellos.value += 1 }
+                beforeVersionedHello()
+                proxy.pairedPhoneHello(maximumVersion: maximumVersion) { [trace, onVersionedHello] version in
+                    trace?.versionedReply.value = version
+                    onVersionedHello()
+                    complete(.version(version))
+                }
             case .managePhone(let operation, let selection, let authorization):
+                if operation == .listExpiredRePairs, let trace { trace.expiredLists.value += 1 }
                 proxy.managePairedPhone(operation.rawValue, selection: selection, authorization: authorization) { complete(.bytes($0)) }
             }
         }
@@ -694,33 +731,107 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         func close() async { closed = true }
     }
 
-    func testLegacyRootRejectsTheNewListOnItsOwnConnection() async throws {
-        let f = try Fixture()
-        let setup = try f.endpoint()
-        defer { setup.close() }
-        try hello(setup)
-        let transcript = try staged(setup, proposal: f.proposal())
-        XCTAssertNotNil(try commit(setup, transcript: transcript, fixture: f))
+    @MainActor
+    private func nativeExpiredListControls(_ f: Fixture, server: NativeServer, requirement: String,
+                                           trace: PhoneManagementTrace, onVersionedHello: @escaping @Sendable () -> Void = {})
+        -> MacExpiredRePairControls {
+        MacExpiredRePairControls(openChannel: {
+            trace.opens.value += 1
+            let driver = NativeDriver(endpoint: server.listener.endpoint, policy: f.policy, requirement: requirement,
+                trace: trace, onVersionedHello: onVersionedHello)
+            return AuthorityPairingChannel(driver: driver, macID: f.mac, accountID: f.account, timeoutMilliseconds: 3000)
+        })
+    }
 
-        let legacy = try ClientDriver(f), management = try ClientDriver(f)
-        legacy.supportsExpiredRePairs = false
-        let isolated = AuthorityPairingChannel(driver: legacy, macID: f.mac, accountID: f.account)
-        let normal = AuthorityPairingChannel(driver: management, macID: f.mac, accountID: f.account)
-        defer { isolated.abort(); normal.abort() }
-        _ = try await isolated.start()
-        _ = try await normal.start()
-        let before = f.environment.invalidated.value
-        let controls = await MacExpiredRePairControls(load: { try await isolated.expiredRePairs() },
-            discard: { _ in XCTFail("Unsupported Root cannot discard") })
+    @MainActor
+    func testNativeLegacyRootRequiresFreshHelloAndNoExpiredListRequest() async throws {
+        let f = try Fixture(), requirement = try testRequirement(), trace = PhoneManagementTrace()
+        let server = NativeServer(f, requirement: requirement, servesLegacyPhoneManagement: true)
+        defer { server.close() }
+        let controls = nativeExpiredListControls(f, server: server, requirement: requirement, trace: trace)
         await controls.refresh()
-        let availability = await controls.availability
-        XCTAssertEqual(availability, .supportUnconfirmed)
-        XCTAssertEqual(f.environment.invalidated.value, before + 1)
-        let phones = try await normal.pairedPhonesForRePair()
-        let selection = try XCTUnwrap(phones.phones.first.flatMap { phones.selection(for: $0) })
-        let result = try await normal.revokePhone(selection, authorization: authorization)
-        XCTAssertEqual(result, .revokedOnMac)
-        XCTAssertEqual(management.revocationSends.value, 1)
+        XCTAssertEqual(controls.availability, .updateRequired)
+        XCTAssertNil(controls.records)
+        XCTAssertEqual(trace.opens.value, 3)
+        XCTAssertEqual(trace.versionedHellos.value, 2)
+        XCTAssertEqual(trace.legacyHellos.value, 1)
+        XCTAssertEqual(trace.legacyReply.value, 1)
+        XCTAssertEqual(trace.expiredLists.value, 0)
+    }
+
+    @MainActor
+    func testNativeExpiredListRecoversAfterFirstVersionedHelloCloses() async throws {
+        let f = try Fixture(), requirement = try testRequirement(), trace = PhoneManagementTrace()
+        let server = NativeServer(f, requirement: requirement)
+        defer { server.close() }
+        let controls = MacExpiredRePairControls(openChannel: {
+            trace.opens.value += 1
+            let first = trace.opens.value == 1
+            f.environment.peerDenied.value = false
+            let driver = NativeDriver(endpoint: server.listener.endpoint, policy: f.policy, requirement: requirement,
+                trace: trace, beforeVersionedHello: { if first { f.environment.peerDenied.value = true } })
+            return AuthorityPairingChannel(driver: driver, macID: f.mac, accountID: f.account, timeoutMilliseconds: 3000)
+        })
+        await controls.refresh()
+        XCTAssertEqual(controls.availability, .available)
+        XCTAssertEqual(controls.records, [])
+        XCTAssertEqual(trace.opens.value, 2)
+        XCTAssertEqual(trace.versionedHellos.value, 2)
+        XCTAssertEqual(trace.versionedReply.value, 2)
+        XCTAssertEqual(trace.expiredLists.value, 1)
+        XCTAssertEqual(trace.legacyHellos.value, 0)
+    }
+
+    @MainActor
+    func testNativeVersionTwoRootClosingDuringExpiredListReportsUnavailable() async throws {
+        let f = try Fixture(), requirement = try testRequirement(), trace = PhoneManagementTrace()
+        let server = NativeServer(f, requirement: requirement)
+        defer { server.close() }
+        let controls = nativeExpiredListControls(f, server: server, requirement: requirement, trace: trace,
+            onVersionedHello: { f.environment.peerDenied.value = true })
+        await controls.refresh()
+        XCTAssertEqual(controls.availability, .unavailable)
+        XCTAssertNil(controls.records)
+        XCTAssertEqual(trace.opens.value, 1)
+        XCTAssertEqual(trace.versionedReply.value, 2)
+        XCTAssertEqual(trace.expiredLists.value, 1)
+        XCTAssertEqual(trace.legacyHellos.value, 0)
+    }
+
+    @MainActor
+    func testNativeUnreachableRootDoesNotRequireAnUpdate() async throws {
+        let f = try Fixture(), requirement = try testRequirement(), trace = PhoneManagementTrace()
+        let server = NativeServer(f, requirement: requirement, acceptsConnections: false)
+        defer { server.close() }
+        let controls = nativeExpiredListControls(f, server: server, requirement: requirement, trace: trace)
+        await controls.refresh()
+        XCTAssertEqual(controls.availability, .unavailable)
+        XCTAssertNil(controls.records)
+        XCTAssertEqual(trace.opens.value, 3)
+        XCTAssertEqual(trace.legacyReply.value, 0)
+        XCTAssertEqual(trace.expiredLists.value, 0)
+    }
+
+    func testNativeLegacyClientReceivesVersionOneFromCurrentRoot() async throws {
+        let f = try Fixture(), requirement = try testRequirement(), server = NativeServer(f, requirement: requirement)
+        defer { server.close() }
+        let legacy = NSXPCConnection(listenerEndpoint: server.listener.endpoint)
+        legacy.remoteObjectInterface = NSXPCInterface(with: LegacyPhoneManagementAppXPCProtocol.self)
+        legacy.setCodeSigningRequirement(requirement)
+        legacy.activate()
+        defer { legacy.invalidate() }
+        for pairing in [true, false] {
+            let version: UInt64 = try await withCheckedThrowingContinuation { continuation in
+                let delivery = WireHelloReply(continuation)
+                DispatchQueue.global().asyncAfter(deadline: .now() + 3) { delivery.complete(.failure(Failure.denied)) }
+                guard let proxy = legacy.remoteObjectProxyWithErrorHandler({ _ in delivery.complete(.failure(Failure.denied)) })
+                    as? any LegacyPhoneManagementAppXPCProtocol else { delivery.complete(.failure(Failure.denied)); return }
+                let reply: @Sendable (UInt64) -> Void = { delivery.complete(.success($0)) }
+                if pairing { proxy.pairingHello(reply: reply) }
+                else { proxy.pairedPhoneHello(reply: reply) }
+            }
+            XCTAssertEqual(version, 1)
+        }
     }
 
     func testDiscardAuthorizationCancellationAndDenialSendNothing() async throws {
@@ -950,6 +1061,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let negotiated = Box<UInt64>(0)
         second.pairedPhoneHello { negotiated.value = $0 }
         XCTAssertEqual(negotiated.value, 1)
+        let versions: [(UInt64, UInt64)] = [(0, 0), (1, 1), (2, 2), (UInt64.max, 2)]
+        for (maximum, expected) in versions {
+            second.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
+            XCTAssertEqual(negotiated.value, expected)
+        }
         let malformed = Box<Data?>(nil)
         second.managePairedPhone(PairedPhoneOperation.revoke.rawValue, selection: Data(repeating: 0, count: 129),
             authorization: authorization) { malformed.value = $0 }
@@ -3182,8 +3298,8 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let before = try f.continuity.read()
         let connection = try endpoint(f), version = Box<UInt64>(0), reply = Box<Data?>(nil)
         defer { connection.close() }
-        connection.pairedPhoneHello { version.value = $0 }
-        XCTAssertEqual(version.value, 1)
+        connection.pairedPhoneHello(maximumVersion: 2) { version.value = $0 }
+        XCTAssertEqual(version.value, 2)
         connection.managePairedPhone(PairedPhoneOperation.listExpiredRePairs.rawValue, selection: Data(),
             authorization: Data()) { reply.value = $0 }
         let records = try ExpiredRePairSnapshot.decode(XCTUnwrap(reply.value), macID: f.mac, accountID: f.account).records
