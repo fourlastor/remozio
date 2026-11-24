@@ -8,19 +8,55 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+
+/** A single recovery relay can be stopped before or after its socket is opened. */
+class PairingRecoveryRelayLease : AutoCloseable {
+    private val lock = Any()
+    private var revoked = false
+    private var abort: (() -> Unit)? = null
+
+    fun isCurrent(): Boolean = synchronized(lock) { !revoked }
+
+    internal fun bind(closeSocket: () -> Unit) {
+        val accepted = synchronized(lock) {
+            if (revoked) false else {
+                check(abort == null)
+                abort = closeSocket
+                true
+            }
+        }
+        if (!accepted) {
+            closeSocket()
+            throw IOException("Pairing recovery relay unavailable")
+        }
+    }
+
+    override fun close() {
+        val action = synchronized(lock) {
+            revoked = true
+            abort.also { abort = null }
+        }
+        action?.invoke()
+    }
+}
 
 /** Platform HTTPS trust for the outer relay only. The caller must still establish pinned inner TLS. */
 class RelayConnector internal constructor(private val sockets: SSLSocketFactory) {
@@ -30,6 +66,11 @@ class RelayConnector internal constructor(private val sockets: SSLSocketFactory)
     suspend fun connect(parent: CoroutineScope, credential: RelayAccessCredential): EncryptedRecordTransport =
         connect(parent, credential.endpoint, credential)
 
+    /** Revocation closes this connection's socket, including while the upgrade is in progress. */
+    suspend fun connectRecovery(parent: CoroutineScope, credential: RelayAccessCredential,
+        lease: PairingRecoveryRelayLease, requireCurrent: suspend () -> Unit,
+    ): EncryptedRecordTransport = connectOwned(parent, credential.endpoint, credential, 15_000, 32_768, 1, lease, requireCurrent)
+
     suspend fun connect(
         parent: CoroutineScope,
         endpoint: RelayEndpoint,
@@ -37,49 +78,79 @@ class RelayConnector internal constructor(private val sockets: SSLSocketFactory)
         timeoutMillis: Long = 15_000,
         maximumMessageBytes: Int = 32_768,
         queueCapacity: Int = 1,
+    ): EncryptedRecordTransport = connectOwned(parent, endpoint, credential, timeoutMillis, maximumMessageBytes, queueCapacity, null) {}
+
+    private suspend fun connectOwned(parent: CoroutineScope, endpoint: RelayEndpoint, credential: RelayAccessCredential,
+        timeoutMillis: Long, maximumMessageBytes: Int, queueCapacity: Int,
+        lease: PairingRecoveryRelayLease?, requireCurrent: suspend () -> Unit,
     ): EncryptedRecordTransport {
         require(credential.endpoint == endpoint)
         require(timeoutMillis in 1..60_000 && maximumMessageBytes in 1..32_768 && queueCapacity in 1..64)
         val parentJob = requireNotNull(parent.coroutineContext[Job])
         parentJob.ensureActive()
-        return withTimeoutOrNull(timeoutMillis) {
-            suspendCancellableCoroutine { continuation ->
-                val lifetime = SocketLifetime(parentJob)
-                val setup = CoroutineScope(Dispatchers.IO).launch(start = CoroutineStart.LAZY) {
-                    try {
-                        val raw = Socket()
-                        lifetime.install(raw)
-                        raw.connect(InetSocketAddress(endpoint.host, endpoint.port), timeoutMillis.toInt())
-                        coroutineContext.ensureActive()
-                        val secure = sockets.createSocket(raw, endpoint.host, endpoint.port, true) as SSLSocket
-                        lifetime.install(secure)
-                        secure.soTimeout = timeoutMillis.toInt()
-                        secure.enabledProtocols = secure.supportedProtocols.filter { it == "TLSv1.3" || it == "TLSv1.2" }.toTypedArray()
-                        secure.sslParameters = secure.sslParameters.apply {
-                            endpointIdentificationAlgorithm = "HTTPS"
-                            serverNames = listOf(SNIHostName(endpoint.host))
-                            applicationProtocols = arrayOf("http/1.1")
-                        }
-                        secure.startHandshake()
-                        coroutineContext.ensureActive()
-                        if (secure.applicationProtocol !in listOf("", "http/1.1")) throw IOException("Relay protocol rejected")
-                        WebSocketUpgrade.exchange(secure.inputStream, secure.outputStream, endpoint, credential)
-                        coroutineContext.ensureActive()
-                        secure.soTimeout = 0
-                        val carrier = SocketCarrier(secure, lifetime, maximumMessageBytes, queueCapacity)
-                        continuation.resume(carrier) { _, value, _ -> value.close() }
-                    } catch (_: Exception) {
-                        continuation.resumeWith(Result.failure(IOException("Relay connection rejected")))
-                        lifetime.close()
-                    }
-                }
-                val ownerCompletion = lifetime.owner.invokeOnCompletion { continuation.cancel() }
-                continuation.invokeOnCancellation { lifetime.close(); setup.cancel(); ownerCompletion.dispose() }
-                setup.invokeOnCompletion { ownerCompletion.dispose() }
-                setup.start()
+        val provisional = AtomicReference<SocketCarrier?>()
+        try {
+            val carrier = open(parentJob, endpoint, credential, timeoutMillis, maximumMessageBytes,
+                queueCapacity, lease, requireCurrent, provisional)
+            currentCoroutineContext().ensureActive()
+            provisional.set(null)
+            return carrier
+        } catch (cancelled: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            if (lease?.isCurrent() == false) throw IOException("Pairing recovery relay unavailable")
+            throw cancelled
+        } finally {
+            withContext(NonCancellable) {
+                provisional.getAndSet(null)?.let { it.close(); it.awaitClosed() }
             }
-        } ?: throw IOException("Relay connection timed out")
+        }
     }
+
+    private suspend fun open(parentJob: Job, endpoint: RelayEndpoint, credential: RelayAccessCredential, timeoutMillis: Long,
+        maximumMessageBytes: Int, queueCapacity: Int, lease: PairingRecoveryRelayLease?, requireCurrent: suspend () -> Unit,
+        provisional: AtomicReference<SocketCarrier?>,
+    ): SocketCarrier = withTimeoutOrNull(timeoutMillis) {
+        suspendCancellableCoroutine { continuation ->
+            val lifetime = SocketLifetime(parentJob)
+            val setup = launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                try {
+                    lease?.bind(lifetime::close)
+                    val raw = Socket()
+                    lifetime.install(raw)
+                    raw.connect(InetSocketAddress(endpoint.host, endpoint.port), timeoutMillis.toInt())
+                    coroutineContext.ensureActive()
+                    val secure = sockets.createSocket(raw, endpoint.host, endpoint.port, true) as SSLSocket
+                    lifetime.install(secure)
+                    secure.soTimeout = timeoutMillis.toInt()
+                    secure.enabledProtocols = secure.supportedProtocols.filter { it == "TLSv1.3" || it == "TLSv1.2" }.toTypedArray()
+                    secure.sslParameters = secure.sslParameters.apply {
+                        endpointIdentificationAlgorithm = "HTTPS"
+                        serverNames = listOf(SNIHostName(endpoint.host))
+                        applicationProtocols = arrayOf("http/1.1")
+                    }
+                    secure.startHandshake()
+                    coroutineContext.ensureActive()
+                    if (secure.applicationProtocol !in listOf("", "http/1.1")) throw IOException("Relay protocol rejected")
+                    requireCurrent()
+                    coroutineContext.ensureActive()
+                    check(lease?.isCurrent() != false)
+                    WebSocketUpgrade.exchange(secure.inputStream, secure.outputStream, endpoint, credential)
+                    coroutineContext.ensureActive()
+                    secure.soTimeout = 0
+                    val carrier = SocketCarrier(secure, lifetime, maximumMessageBytes, queueCapacity)
+                    provisional.set(carrier)
+                    continuation.resume(carrier) { _, value, _ -> value.close() }
+                } catch (_: Exception) {
+                    continuation.resumeWith(Result.failure(IOException("Relay connection rejected")))
+                    lifetime.close()
+                }
+            }
+            val ownerCompletion = lifetime.owner.invokeOnCompletion { continuation.cancel() }
+            continuation.invokeOnCancellation { lifetime.close(); setup.cancel(); ownerCompletion.dispose() }
+            setup.invokeOnCompletion { ownerCompletion.dispose() }
+            setup.start()
+        }
+    } ?: throw IOException("Relay connection timed out")
 }
 
 private class SocketLifetime(parent: Job) : AutoCloseable {

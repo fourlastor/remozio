@@ -24,7 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 
-internal enum class ReceiptCheckState { IDLE, CHECKING, UNAVAILABLE }
+internal enum class ReceiptCheckState { IDLE, CHECKING, UNAVAILABLE, IN_PROGRESS }
 
 @Composable
 internal fun PairingReceiptControl(mac: StoredMac, status: MutableState<ReceiptCheckState>, onChecked: () -> Unit) {
@@ -39,9 +39,11 @@ internal fun PairingReceiptControl(mac: StoredMac, status: MutableState<ReceiptC
         state = ReceiptCheckState.CHECKING
         operation = scope.launch {
             try {
-                if (app.pairingReceipts.checkAndReconcile(mac.recordID, onChecked)) {
-                    state = ReceiptCheckState.IDLE
-                } else state = ReceiptCheckState.UNAVAILABLE
+                state = when (app.pairingReceipts.checkAndReconcile(mac.recordID, onChecked)) {
+                    PairingReceiptOutcome.RESOLVED -> ReceiptCheckState.IDLE
+                    PairingReceiptOutcome.INCONCLUSIVE -> ReceiptCheckState.UNAVAILABLE
+                    PairingReceiptOutcome.IN_PROGRESS -> ReceiptCheckState.IN_PROGRESS
+                }
             } catch (cancelled: CancellationException) {
                 state = ReceiptCheckState.IDLE
                 throw cancelled
@@ -61,8 +63,9 @@ internal fun PairingReceiptControl(mac: StoredMac, status: MutableState<ReceiptC
         Text(stringResource(R.string.pairing_receipt_checking), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
     } else {
         if (state != ReceiptCheckState.IDLE) {
-            Text(stringResource(R.string.pairing_receipt_unavailable),
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            val message = if (state == ReceiptCheckState.IN_PROGRESS) R.string.pairing_receipt_in_progress
+                else R.string.pairing_receipt_unavailable
+            Text(stringResource(message), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         }
         TextButton(onClick = {
             if (context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) checkPairing()

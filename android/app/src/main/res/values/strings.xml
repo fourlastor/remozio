@@ -476,6 +476,7 @@
     <string name="pairing_setup_preview">Synthetic preview. No keys, enrollment, or approval.</string>
     <string name="pairing_receipt_check">Check pairing</string>
     <string name="pairing_receipt_checking">Checking the saved pairing…</string>
+    <string name="pairing_receipt_in_progress">A pairing check is already in progress.</string>
     <string name="pairing_receipt_unavailable">Could not confirm pairing. Keep this setup and try again when the Mac is available and up to date.</string>
     <string name="fcm_settings_title">Push provider</string>
     <string name="fcm_settings_reason">Import the Android client file from your Firebase project. Use google-services.json, not a service account key. Your pairings stay unchanged.</string>

@@ -1,7 +1,11 @@
 package dev.remozio.phone.transport
 
+import dev.remozio.protocol.ChannelScope
+import dev.remozio.protocol.PairingRecoveryFrame
+import dev.remozio.protocol.PairingRecoveryQuery
 import java.io.IOException
 import java.net.InetAddress
+import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
 import mockwebserver3.MockResponse
@@ -66,6 +70,110 @@ class RelayConnectorTest {
                 assertEquals("synthetic-secret", request.headers["CF-Access-Client-Secret"])
                 assertEquals(WebSocketUpgrade.PROTOCOL, request.headers["Sec-WebSocket-Protocol"])
             } finally { carrier.close(); withTimeout(5_000) { carrier.awaitClosed() }; owner.cancel() }
+        }
+    }
+
+    @Test fun changedPredecessorStopsTheUpgradeBeforeCredentialHeaders() = runBlocking {
+        Fixture().use { fixture ->
+            fixture.upgrade(object : WebSocketListener() {})
+            val owner = SupervisorJob()
+            var checked = false
+            try {
+                assertFailsWith<IOException> {
+                    fixture.connector.connectRecovery(CoroutineScope(owner), fixture.credential, PairingRecoveryRelayLease()) {
+                        checked = true
+                        throw IOException("Predecessor no longer eligible")
+                    }
+                }
+                assertTrue(checked)
+                assertEquals(0, fixture.server.requestCount)
+            } finally {
+                owner.cancel()
+                withTimeout(5_000) { owner.join() }
+            }
+        }
+    }
+
+    @Test fun revocationAfterAuthorizationClosesTheSocketBeforeTheUpgradeCanWrite() = runBlocking<Unit> {
+        Fixture().use { fixture ->
+            fixture.upgrade(object : WebSocketListener() {})
+            val owner = SupervisorJob()
+            val lease = PairingRecoveryRelayLease()
+            val authorized = CompletableDeferred<Unit>()
+            val resume = CompletableDeferred<Unit>()
+            try {
+                val attempt = async {
+                    assertFailsWith<IOException> {
+                        fixture.connector.connectRecovery(CoroutineScope(owner), fixture.credential, lease) {
+                            authorized.complete(Unit)
+                            resume.await()
+                        }
+                    }
+                }
+                withTimeout(5_000) { authorized.await() }
+                lease.close()
+                resume.complete(Unit)
+                withTimeout(5_000) { attempt.await() }
+                assertEquals(0, fixture.server.requestCount)
+            } finally {
+                lease.close()
+                resume.complete(Unit)
+                owner.cancel()
+                withTimeout(5_000) { owner.join() }
+            }
+        }
+    }
+
+    @Test fun revocationDuringRecoveryLookupClosesTheOpenRelayAndYieldsNoReply() = runBlocking<Unit> {
+        Fixture().use { fixture ->
+            val firstMessage = CompletableDeferred<ByteArray>()
+            val peerClosed = CompletableDeferred<Unit>()
+            fixture.upgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    firstMessage.complete(bytes.toByteArray())
+                }
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    peerClosed.complete(Unit)
+                }
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (t is IOException) peerClosed.complete(Unit) else peerClosed.completeExceptionally(t)
+                }
+            })
+            val owner = SupervisorJob()
+            val lease = PairingRecoveryRelayLease()
+            val carrier = fixture.connector.connectRecovery(CoroutineScope(owner), fixture.credential, lease) {}
+            val query = PairingRecoveryQuery(ByteArray(16) { 1 }, ByteArray(32) { 2 },
+                ChannelScope(ByteArray(16) { 3 }, ByteArray(16) { 4 }, ByteArray(16) { 5 }, ByteArray(16) { 6 }))
+            val reading = CompletableDeferred<Unit>()
+            try {
+                val lookup = async {
+                    try {
+                        PairingRecoveryChannel.exchange(query, ByteArray(32), carrier::send, {
+                            reading.complete(Unit)
+                            carrier.receive()
+                        }, { _, _, _ -> fail("Closed relay supplied a challenge") }, {})
+                    } catch (_: IOException) {
+                        null
+                    }
+                }
+                withTimeout(5_000) {
+                    val message = ByteBuffer.wrap(firstMessage.await())
+                    assertEquals(message.remaining() - Integer.BYTES, message.int)
+                    val body = ByteArray(message.remaining()).also(message::get)
+                    assertContentEquals(PairingRecoveryFrame.Lookup(query).encode(), body)
+                    reading.await()
+                    lease.close()
+                    peerClosed.await()
+                    assertNull(lookup.await())
+                    carrier.awaitClosed()
+                }
+                assertTrue(owner.isActive)
+            } finally {
+                lease.close()
+                carrier.close()
+                owner.cancel()
+                withTimeout(5_000) { owner.join() }
+            }
         }
     }
 

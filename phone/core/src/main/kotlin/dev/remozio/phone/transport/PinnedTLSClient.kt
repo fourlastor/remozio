@@ -32,10 +32,15 @@ class TLSClientProgress internal constructor(
  * The host owns ordered byte delivery, deadlines, enrollment invalidation, and output backpressure.
  * Calls serialize engine work but never wait for network input. Run delegated key tasks off the UI thread.
  */
-class PinnedTLSClient(
+class PinnedTLSClient private constructor(
     localKeys: Array<KeyManager>, peerSubjectPublicKeyInfo: ByteArray,
     private val applicationProtocol: String, private val maximumHandshakeBytes: Int,
+    private val recovery: PairingRecoveryTLSProvider?,
 ) : AutoCloseable {
+    constructor(localKeys: Array<KeyManager>, peerSubjectPublicKeyInfo: ByteArray, applicationProtocol: String,
+        maximumHandshakeBytes: Int,
+    ) : this(localKeys, peerSubjectPublicKeyInfo, applicationProtocol, maximumHandshakeBytes, null)
+
     private var engine: SSLEngine?
     private val incoming = ByteBuffer.allocate(BUFFER_BYTES)
     private val outgoing = ByteBuffer.allocate(BUFFER_BYTES)
@@ -64,7 +69,15 @@ class PinnedTLSClient(
             useClientMode = true
             enabledProtocols = arrayOf("TLSv1.3")
             sslParameters = sslParameters.apply { applicationProtocols = arrayOf(this@PinnedTLSClient.applicationProtocol) }
+            recovery?.configure(this)
         }
+    }
+
+    @Synchronized internal fun recoveryExporter(): ByteArray {
+        check(currentState == TLSClientState.OPEN && authenticated)
+        val bytes = checkNotNull(recovery).export(checkNotNull(engine))
+        if (bytes == null || bytes.size != 32) throw SSLException("Pairing recovery exporter unavailable")
+        return bytes
     }
 
     @Synchronized fun state(): TLSClientState = currentState
@@ -195,8 +208,12 @@ class PinnedTLSClient(
     }
     private fun progress() = TLSClientProgress(currentState, 0, emptyList(), emptyList())
 
-    private companion object {
-        const val BUFFER_BYTES = 65_536
-        const val MAX_CHUNK_BYTES = 32_768
+    companion object {
+        private const val BUFFER_BYTES = 65_536
+        private const val MAX_CHUNK_BYTES = 32_768
+
+        internal fun forPairingRecovery(keys: Array<KeyManager>, pin: ByteArray,
+            provider: PairingRecoveryTLSProvider,
+        ) = PinnedTLSClient(keys, pin, dev.remozio.protocol.PairingRecoveryFrame.APPLICATION_PROTOCOL, 1_048_576, provider)
     }
 }

@@ -3,6 +3,42 @@ import XCTest
 @testable import RemozioProtocol
 
 final class PairingRecoveryFrameTests: XCTestCase {
+    private struct RecoveryVectors: Decodable {
+        let exporter: String
+        let challenge: String
+        let signingInput: String
+        let transcript: String
+        let frames: [String: String]
+    }
+
+    func testSharedRecoveryFramesRoundTripIncludingSignedExpiry() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let vectors = try JSONDecoder().decode(RecoveryVectors.self,
+            from: Data(contentsOf: root.appendingPathComponent("vectors/pairing-recovery-frames-v1.json")))
+        func hex(_ value: String) throws -> Data {
+            let bytes = Array(value.utf8)
+            return try Data(stride(from: 0, to: bytes.count, by: 2).map { offset in
+                try XCTUnwrap(UInt8(String(decoding: bytes[offset..<offset + 2], as: UTF8.self), radix: 16))
+            })
+        }
+        let transcript = try PairingTranscript.decode(hex(vectors.transcript))
+        for (name, value) in vectors.frames {
+            let bytes = try hex(value)
+            let frame = try PairingRecoveryFrame.decode(bytes)
+            XCTAssertEqual(try frame.encode(), bytes, name)
+            switch frame {
+            case .lookup(let query):
+                XCTAssertEqual(try query.signingInput(exporter: hex(vectors.exporter), challenge: hex(vectors.challenge)),
+                    try hex(vectors.signingInput))
+            case .expired(let receipt):
+                XCTAssertTrue(try receipt.verify(transcript: transcript), name)
+            default:
+                XCTAssertFalse(name.hasPrefix("expired-"))
+            }
+        }
+    }
+
     func testLookupAndProofUseFixedLengths() throws {
         let query = try makeQuery()
         let lookup = try PairingRecoveryFrame.lookup(query).encode()

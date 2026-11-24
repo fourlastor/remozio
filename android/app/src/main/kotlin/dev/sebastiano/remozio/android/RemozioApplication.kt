@@ -22,6 +22,7 @@ import dev.sebastiano.remozio.android.enrollment.StoredPairingHost
 import dev.sebastiano.remozio.android.enrollment.StoredMacReader
 import dev.sebastiano.remozio.android.enrollment.PairingReceiptRecovery
 import dev.sebastiano.remozio.android.enrollment.androidPairingReceiptWire
+import dev.sebastiano.remozio.android.enrollment.androidRePairRecoveryWire
 import dev.sebastiano.remozio.android.updates.androidUpdateHost
 import dev.sebastiano.remozio.android.updates.MacUpdateProgressConnection
 import dev.sebastiano.remozio.android.updates.MacUpdateSchedulingConnection
@@ -199,7 +200,9 @@ class RemozioApplication : Application() {
         }
     }
     internal val pairingReceipts by lazy {
-        PairingReceiptRecovery(pairing, { parent, record -> androidPairingReceiptWire(this, parent, record) })
+        PairingReceiptRecovery(pairing, { parent, record -> androidPairingReceiptWire(this, parent, record) },
+            openRePair = { parent, access, budget -> androidRePairRecoveryWire(this, parent, pairing, access, budget) },
+            onSlowJoin = { elapsed -> android.util.Log.w("RemozioPairing", "Recovery I/O cleanup exceeded its attempt budget ($elapsed ms)") })
     }
     internal fun retirePairing(attempt: AndroidPairingAttempt): kotlinx.coroutines.Deferred<Result<Unit>> {
         attempt.close()

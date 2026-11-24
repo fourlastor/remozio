@@ -77,7 +77,7 @@ These checks do not establish Root installation, hardware custody, Pixel UI beha
 
 ## Signed expiry payload for re-pair
 
-This payload is for the separate recovery path in #901. The version 1 enrolled lookup above does not accept it. The codecs define and verify the payload. The recovery listener and Root producer use the lookup below. Phone retirement is a separate change.
+This payload is for the separate recovery path in #901. The version 1 enrolled lookup above does not accept it. The codecs define and verify the payload. The recovery listener and Root producer use the lookup below. Android routes saved incomplete re-pair attempts through that lookup after the original setup closes.
 
 The signed input is a canonical CBOR map with these fields.
 
@@ -132,3 +132,14 @@ The listener closes after one response. The lookup changes neither journal recor
 The phone keeps its preparation and keys on refusal and verifies any proof against the retained transcript.
 
 If a global failure or a failure after valid proof prevents a signed result, the connection can close without a frame. Treat that closure as inconclusive.
+
+On Android, the saved attempt keeps its existing prepared-record lease for the whole explicit check.
+A check can make up to three lookups in one 30-second network budget, with one- and two-second delays between attempts.
+Each attempt has at most eight seconds for network work. Direct discovery uses at most half of that attempt's budget.
+When the local enrollment owner invalidates the predecessor, it closes the affected relay socket and leaves direct recovery available. Local shutdown cannot recall headers the relay already received. Keep the prepared-record lease until cleanup joins, even when the network budget expires.
+If the route or exporter is unavailable, or every reply is inconclusive, Android keeps the exact preparation and keys.
+A signed commit uses the existing verified activation path.
+
+Before retiring an attempt, Android closes and joins its recovery I/O and then verifies the signed expiry again against the exact prepared row under the enrollment lock.
+The encrypted archive commits that candidate as removed before Android deletes its unused keys.
+After interruption, an unreadable archive leaves all keys and archive bytes intact. A committed removed row lets Android finish its own cleanup from a readable snapshot.
