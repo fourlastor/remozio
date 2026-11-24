@@ -69,12 +69,15 @@ final class AuthorityPairingV2Window: Sendable {
         }
     }
 
-    func disconnected(_ connection: UUID) {
+    /// Return true when this connection closes the window.
+    func disconnected(_ connection: UUID) -> Bool {
         state.withLock {
             switch $0 {
             case .proved(let owner, _) where owner == connection, .staging(let owner) where owner == connection:
                 $0 = .closed
-            default: break
+                return true
+            default:
+                return false
             }
         }
     }
