@@ -24,7 +24,7 @@ jobs:
           bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
           xctest=$(xcrun -f xctest); i=0
           while read -r t; do i=$((i+1))
-            timeout 1500 xcrun xctrace record --template 'Time Profiler' --output "prof/t$i.trace" --no-prompt \
+            xcrun xctrace record --template 'Time Profiler' --output "prof/t$i.trace" --no-prompt \
               --target-stdout "prof/out$i.log" --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/trace$i.log" 2>&1 || echo "trace $i exit $?"
             xcrun xctrace export --input "prof/t$i.trace" \
               --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > "prof/t$i.xml" 2>/dev/null || true
