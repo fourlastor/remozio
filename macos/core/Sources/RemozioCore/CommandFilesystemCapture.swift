@@ -68,6 +68,8 @@ public final class CommandFilesystemCapture {
             deadline: ContinuousClock.now + Self.phaseTimeout, caller: caller.filesystemCaller, checkCancellation: checkCancellation)
     }
 
+    // Keep checkProbe and checkCancellation free of I/O. The walk calls checkProbe
+    // with the caller credentials active. checkCancellation runs outside that scope.
     init(executablePath: Data, directoryPath: Data, deadline: ContinuousClock.Instant,
          caller: CommandFilesystemCaller, checkProbe: () throws -> Void = {},
          checkCancellation: () throws -> Void = {}) throws {
