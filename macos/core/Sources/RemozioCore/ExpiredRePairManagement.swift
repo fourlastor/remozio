@@ -1,6 +1,14 @@
 import Foundation
 import RemozioProtocol
 
+enum ExpiredRePairListError: Error {
+    case supportUnconfirmed
+}
+
+enum ExpiredRePairDiscardError: Error, Equatable {
+    case notSubmitted, replyUnconfirmed
+}
+
 /// A durable terminal re-pair stage reported by the local authority.
 public struct ExpiredRePairRecord: Equatable, Sendable, CustomReflectable {
     public let phoneID: Data

@@ -4,12 +4,16 @@ import Observation
 @MainActor @Observable
 public final class MacExpiredRePairControls {
     public enum Notice: Equatable {
-        case discarded, authorizationCancelled, noLongerListed, unconfirmed
+        case discarded, authorizationCancelled, notSubmitted, noLongerListed, unconfirmed
+    }
+
+    public enum Availability: Equatable, Sendable {
+        case unread, available, supportUnconfirmed, unavailable
     }
 
     /// An empty array means the authority reports no expired stages.
     public private(set) var records: [ExpiredRePairRecord]?
-    public private(set) var unavailable = false
+    public private(set) var availability: Availability = .unread
     public private(set) var notice: Notice?
 
     @ObservationIgnored private let load: @MainActor () async throws -> [ExpiredRePairRecord]
@@ -39,12 +43,17 @@ public final class MacExpiredRePairControls {
 
     public func refresh() async {
         await run {
+            self.notice = nil
             _ = await self.read()
         }
     }
 
     public func discardConfirmed(_ record: ExpiredRePairRecord) async {
-        guard records?.contains(record) == true else { return }
+        guard operation == nil, !Task.isCancelled else { return }
+        guard records?.contains(record) == true else {
+            notice = records == nil ? .notSubmitted : .noLongerListed
+            return
+        }
         await run {
             self.notice = nil
             do {
@@ -56,12 +65,15 @@ public final class MacExpiredRePairControls {
             } catch SetupAdministratorAuthorizationError.cancelled {
                 guard !Task.isCancelled else { return }
                 self.notice = .authorizationCancelled
-            } catch {
+            } catch ExpiredRePairDiscardError.replyUnconfirmed {
                 // A lost reply cannot tell us whether this request removed the record.
                 guard !Task.isCancelled else { return }
                 let current = await self.read()
                 guard !Task.isCancelled else { return }
                 self.notice = current?.contains(record) == false ? .noLongerListed : .unconfirmed
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.notice = .notSubmitted
             }
         }
     }
@@ -73,11 +85,20 @@ public final class MacExpiredRePairControls {
     }
 
     private func read() async -> [ExpiredRePairRecord]? {
-        let current = try? await load()
-        guard !Task.isCancelled else { return nil }
-        records = current
-        unavailable = current == nil
-        return current
+        do {
+            let current = try await load()
+            guard !Task.isCancelled else { return nil }
+            records = current
+            availability = .available
+        } catch {
+            guard !Task.isCancelled else { return nil }
+            records = nil
+            switch error {
+            case ExpiredRePairListError.supportUnconfirmed: availability = .supportUnconfirmed
+            default: availability = .unavailable
+            }
+        }
+        return records
     }
 
     private func run(_ work: @escaping @MainActor () async -> Void) async {

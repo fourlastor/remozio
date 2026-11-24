@@ -8,17 +8,17 @@ final class MacExpiredRePairControlsTests: XCTestCase {
         let controls = MacExpiredRePairControls(load: { [] }, discard: { _ in XCTFail("Unexpected discard") })
         await controls.refresh()
         XCTAssertEqual(controls.records, [])
-        XCTAssertFalse(controls.unavailable)
+        XCTAssertEqual(controls.availability, .available)
         XCTAssertNil(controls.notice)
     }
 
     @MainActor
-    func testUnsupportedOperationLeavesExpiredAttemptsUnavailable() async {
+    func testFailedHelloLeavesExpiredAttemptsUnavailable() async {
         let controls = MacExpiredRePairControls(load: { throw AuthorityPairingChannelError.unsupportedVersion },
             discard: { _ in XCTFail("Unexpected discard") })
         await controls.refresh()
         XCTAssertNil(controls.records)
-        XCTAssertTrue(controls.unavailable)
+        XCTAssertEqual(controls.availability, .unavailable)
         XCTAssertNil(controls.notice)
     }
 
@@ -43,7 +43,7 @@ final class MacExpiredRePairControlsTests: XCTestCase {
             discard: { selected in
                 XCTAssertEqual(selected, record)
                 discards += 1
-                throw AuthorityPairingChannelError.closed
+                throw ExpiredRePairDiscardError.replyUnconfirmed
             })
         await controls.refresh()
         await controls.discardConfirmed(record)
@@ -63,15 +63,53 @@ final class MacExpiredRePairControlsTests: XCTestCase {
                 return [record]
             }, discard: { _ in
                 discards += 1
-                throw AuthorityPairingChannelError.closed
+                throw ExpiredRePairDiscardError.replyUnconfirmed
             })
             await controls.refresh()
             await controls.discardConfirmed(record)
             XCTAssertEqual(discards, 1)
             XCTAssertEqual(controls.records, loseList ? nil : [record])
-            XCTAssertEqual(controls.unavailable, loseList)
+            XCTAssertEqual(controls.availability, loseList ? .unavailable : .available)
             XCTAssertEqual(controls.notice, .unconfirmed)
         }
+    }
+
+    @MainActor
+    func testPreSubmissionFailureDoesNotReconcileAndRefreshClearsNotice() async {
+        let record = Self.record(1)
+        var reads = 0
+        let controls = MacExpiredRePairControls(load: { reads += 1; return [record] },
+            discard: { _ in throw ExpiredRePairDiscardError.notSubmitted })
+        await controls.refresh()
+        await controls.discardConfirmed(record)
+        XCTAssertEqual(controls.records, [record])
+        XCTAssertEqual(controls.notice, .notSubmitted)
+        XCTAssertEqual(reads, 1)
+        await controls.refresh()
+        XCTAssertNil(controls.notice)
+        XCTAssertEqual(reads, 2)
+    }
+
+    @MainActor
+    func testCancelDuringDiscardIgnoresTheLateReply() async {
+        let record = Self.record(1), started = expectation(description: "Discard started")
+        var reads = 0
+        var resume: CheckedContinuation<Void, Error>?
+        let controls = MacExpiredRePairControls(load: { reads += 1; return [record] }, discard: { _ in
+            try await withCheckedThrowingContinuation { continuation in
+                resume = continuation
+                started.fulfill()
+            }
+        })
+        await controls.refresh()
+        let action = Task { await controls.discardConfirmed(record) }
+        await fulfillment(of: [started], timeout: 2)
+        controls.cancel()
+        resume?.resume(throwing: ExpiredRePairDiscardError.replyUnconfirmed)
+        await action.value
+        XCTAssertEqual(controls.records, [record])
+        XCTAssertNil(controls.notice)
+        XCTAssertEqual(reads, 1)
     }
 
     @MainActor

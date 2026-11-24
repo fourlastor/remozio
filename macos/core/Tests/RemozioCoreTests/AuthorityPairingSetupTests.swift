@@ -170,6 +170,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         enum Hold: Sendable { case none, stage, commit, revoke }
         let endpoint: AuthorityPairingXPCEndpoint
         let sends = Box(0), stageSends = Box(0), commitSends = Box(0), revocationSends = Box(0)
+        let discardSends = Box(0)
+        var supportsExpiredRePairs = true
         let hold = Box(Hold.none)
         let late = Box<(@Sendable () -> Void)?>(nil)
         private let transform: @Sendable (PairingClientCall, PairingClientReply) throws -> PairingClientReply
@@ -177,7 +179,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             endpoint = try fixture.endpoint(); self.transform = transform
         }
         func start(closed: @escaping @Sendable () -> Void) {}
-        func invoke(_ call: PairingClientCall, reply: @escaping @Sendable (PairingClientReply) -> Void) {
+        func invoke(_ call: PairingClientCall, onSend: () -> Void, reply: @escaping @Sendable (PairingClientReply) -> Void) {
+            onSend()
             sends.value += 1
             let complete: @Sendable (PairingClientReply) -> Void = { [self] value in
                 let result: PairingClientReply
@@ -201,7 +204,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .phoneManagementHello: endpoint.pairedPhoneHello { complete(.version($0)) }
             case .managePhone(let operation, let selection, let authorization):
                 if operation == .revoke { revocationSends.value += 1 }
-                endpoint.managePairedPhone(operation.rawValue, selection: selection, authorization: authorization) { complete(.bytes($0)) }
+                if operation == .discardExpiredRePair { discardSends.value += 1 }
+                let raw = operation == .listExpiredRePairs && !supportsExpiredRePairs ? UInt64.max : operation.rawValue
+                endpoint.managePairedPhone(raw, selection: selection, authorization: authorization) { complete(.bytes($0)) }
             }
         }
         func close() { endpoint.close() }
@@ -270,7 +275,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         func start(closed: @escaping @Sendable () -> Void) {
             connection.interruptionHandler = closed; connection.invalidationHandler = closed; connection.activate()
         }
-        func invoke(_ call: PairingClientCall, reply: @escaping @Sendable (PairingClientReply) -> Void) {
+        func invoke(_ call: PairingClientCall, onSend: () -> Void, reply: @escaping @Sendable (PairingClientReply) -> Void) {
             let complete: @Sendable (PairingClientReply) -> Void = { [self] value in
                 do { guard try policy.verifyCredentials(connection).processID == getpid() else { throw Failure.denied }; reply(value) }
                 catch { reply(.failed) }
@@ -278,6 +283,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in complete(.failed) }) as? any AuthorityAppXPCProtocol else {
                 complete(.failed); return
             }
+            onSend()
             switch call {
             case .hello: proxy.pairingHello { complete(.version($0)) }
             case .context: proxy.pairingContext { complete(.bytes($0)) }
@@ -665,6 +671,98 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try f.records(), 3)
         try f.assertCheckpoint()
         await channel.close()
+    }
+
+    private actor DiscardAdministrator: MacPairingAdministrator {
+        let failure: SetupAdministratorAuthorizationError?
+        private(set) var closed = false
+
+        init(failure: SetupAdministratorAuthorizationError? = nil) { self.failure = failure }
+
+        func authorization() async throws -> Data {
+            if let failure { throw failure }
+            return Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size)
+        }
+
+        func close() async { closed = true }
+    }
+
+    func testLegacyRootRejectsTheNewListOnItsOwnConnection() async throws {
+        let f = try Fixture()
+        let setup = try f.endpoint()
+        defer { setup.close() }
+        try hello(setup)
+        let transcript = try staged(setup, proposal: f.proposal())
+        XCTAssertNotNil(try commit(setup, transcript: transcript, fixture: f))
+
+        let legacy = try ClientDriver(f), management = try ClientDriver(f)
+        legacy.supportsExpiredRePairs = false
+        let isolated = AuthorityPairingChannel(driver: legacy, macID: f.mac, accountID: f.account)
+        let normal = AuthorityPairingChannel(driver: management, macID: f.mac, accountID: f.account)
+        defer { isolated.abort(); normal.abort() }
+        _ = try await isolated.start()
+        _ = try await normal.start()
+        let before = f.environment.invalidated.value
+        let controls = await MacExpiredRePairControls(load: { try await isolated.expiredRePairs() },
+            discard: { _ in XCTFail("Unsupported Root cannot discard") })
+        await controls.refresh()
+        let availability = await controls.availability
+        XCTAssertEqual(availability, .supportUnconfirmed)
+        XCTAssertEqual(f.environment.invalidated.value, before + 1)
+        let phones = try await normal.pairedPhonesForRePair()
+        let selection = try XCTUnwrap(phones.phones.first.flatMap { phones.selection(for: $0) })
+        let result = try await normal.revokePhone(selection, authorization: authorization)
+        XCTAssertEqual(result, .revokedOnMac)
+        XCTAssertEqual(management.revocationSends.value, 1)
+    }
+
+    func testDiscardAuthorizationCancellationAndDenialSendNothing() async throws {
+        let f = try Fixture()
+        for failure: SetupAdministratorAuthorizationError in [.cancelled, .denied(-60005)] {
+            let driver = try ClientDriver(f), administrator = DiscardAdministrator(failure: failure)
+            let channel = AuthorityPairingChannel(driver: driver, macID: f.mac, accountID: f.account)
+            defer { channel.abort() }
+            _ = try await channel.start()
+            do {
+                try await channel.discardExpiredRePair(expiredRecord(f), administrator: administrator)
+                XCTFail("Discard accepted without authorization")
+            } catch {
+                if failure == .cancelled {
+                    XCTAssertEqual(error as? SetupAdministratorAuthorizationError, .cancelled)
+                } else {
+                    XCTAssertEqual(error as? ExpiredRePairDiscardError, .notSubmitted)
+                }
+            }
+            XCTAssertEqual(driver.discardSends.value, 0)
+            let closed = await administrator.closed
+            XCTAssertTrue(closed)
+        }
+    }
+
+    func testDiscardAfterDispatchReportsLossAndSendsOnlyOnce() async throws {
+        let f = try Fixture(), administrator = DiscardAdministrator()
+        let driver = try ClientDriver(f, transform: { call, reply in
+            if case .managePhone(.discardExpiredRePair, _, _) = call { return .failed }
+            return reply
+        })
+        let channel = AuthorityPairingChannel(driver: driver, macID: f.mac, accountID: f.account)
+        defer { channel.abort() }
+        _ = try await channel.start()
+        do {
+            try await channel.discardExpiredRePair(expiredRecord(f), administrator: administrator)
+            XCTFail("A lost discard reply cannot confirm the result")
+        } catch {
+            XCTAssertEqual(error as? ExpiredRePairDiscardError, .replyUnconfirmed)
+        }
+        XCTAssertEqual(driver.discardSends.value, 1)
+        let closed = await administrator.closed
+        XCTAssertTrue(closed)
+    }
+
+    private func expiredRecord(_ f: Fixture) -> ExpiredRePairRecord {
+        ExpiredRePairRecord(macID: f.mac, accountID: f.account, phoneID: Data(repeating: 9, count: 16),
+            originalExpiryUnixMilliseconds: 2_000, reason: .deadlineElapsed,
+            setupID: Data(repeating: 3, count: 16), transcriptDigest: Data(repeating: 4, count: 32))
     }
 
     func testPairedPhoneRevocationIsCheckpointedAndRejectsOldSelection() async throws {
@@ -2009,6 +2107,65 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         XCTAssertEqual(event.kind, .recovery)
         XCTAssertEqual(event.reason, .userCancelled)
         XCTAssertEqual(event.peerDeviceID, attempt.transcript.phone.scope.phoneID)
+    }
+
+    func testExpiredListReturnsRetiredStageThroughTheEndpointCodec() throws {
+        let f = try Fixture(), attempt = try stage(f, proposal(f).0)
+        let replacementIncarnation = UUID()
+        try writes(f) { try $0.closeRetiredRecoveryStages(incarnation: replacementIncarnation) }
+        let before = try f.continuity.read()
+        let connection = try endpoint(f), version = Box<UInt64>(0), reply = Box<Data?>(nil)
+        defer { connection.close() }
+        connection.pairedPhoneHello { version.value = $0 }
+        XCTAssertEqual(version.value, 1)
+        connection.managePairedPhone(PairedPhoneOperation.listExpiredRePairs.rawValue, selection: Data(),
+            authorization: Data()) { reply.value = $0 }
+        let records = try ExpiredRePairSnapshot.decode(XCTUnwrap(reply.value), macID: f.mac, accountID: f.account).records
+        XCTAssertEqual(records.count, 1)
+        let record = try XCTUnwrap(records.first)
+        XCTAssertEqual(record.phoneID, attempt.transcript.phone.scope.phoneID)
+        XCTAssertEqual(record.reason, .retiredIncarnation)
+        XCTAssertEqual(record.originalExpiryUnixMilliseconds, attempt.transcript.expiresAtUnixMillis)
+        XCTAssertEqual(record.setupID, attempt.transcript.setupID)
+        XCTAssertEqual(try f.continuity.read(), before)
+    }
+
+    func testDiscardStaleSelectionKeepsReplacementAndAddsNoAuditEvent() throws {
+        let f = try Fixture(), candidate = try proposal(f).0
+        let old = try stage(f, candidate)
+        f.environment.time.value = try old.recoveryStage().deadline
+        XCTAssertTrue(try f.access.isExpired(old))
+        let stale = try XCTUnwrap(f.access.expiredRePairs().records.first)
+        let replacement = try stage(f, candidate)
+        XCTAssertNotEqual(stale.setupID, replacement.transcript.setupID)
+        let before = try f.continuity.read()
+        let connection = try endpoint(f), reply = Box<Data?>(nil)
+        defer { connection.close() }
+        connection.pairedPhoneHello { _ in }
+        connection.managePairedPhone(PairedPhoneOperation.discardExpiredRePair.rawValue, selection: stale.selection,
+            authorization: authorization) { reply.value = $0 }
+        XCTAssertNil(reply.value)
+        XCTAssertEqual(try retained(f, replacement)?.state, .pending)
+        XCTAssertEqual(try retained(f, replacement)?.transcriptDigest, try replacement.transcript.digest())
+        XCTAssertEqual(try f.continuity.read(), before)
+        XCTAssertEqual(try f.access.maintenanceAdmission.stagedReservations(), 0)
+    }
+
+    func testDiscardHonorsClosedMaintenanceAdmission() throws {
+        let f = try Fixture(), attempt = try stage(f, proposal(f).0)
+        f.environment.time.value = try attempt.recoveryStage().deadline
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        let record = try XCTUnwrap(f.access.expiredRePairs().records.first)
+        let before = try f.continuity.read()
+        let connection = try endpoint(f), reply = Box<Data?>(nil)
+        defer { connection.close() }
+        connection.pairedPhoneHello { _ in }
+        f.access.maintenanceAdmission.close()
+        connection.managePairedPhone(PairedPhoneOperation.discardExpiredRePair.rawValue, selection: record.selection,
+            authorization: authorization) { reply.value = $0 }
+        XCTAssertNil(reply.value)
+        XCTAssertEqual(try retained(f, attempt)?.state, .deadlineElapsed)
+        XCTAssertEqual(try f.continuity.read(), before)
     }
 
     func testThirtyThreeFailedOrdinaryPairingsDoNotConsumeRecoverySlots() throws {

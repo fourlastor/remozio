@@ -354,6 +354,11 @@ struct PairedPhonesSheet: View {
         let identifier: String
     }
 
+    private struct DiscardConfirmation {
+        let record: ExpiredRePairRecord
+        let identifier: String
+    }
+
     let rePairControls: MacPairingControls
     @Environment(\.dismiss) private var dismiss
     @State private var rePairRequest: RePairRequest?
@@ -361,7 +366,7 @@ struct PairedPhonesSheet: View {
     @State private var snapshot: PairedPhoneSnapshot?
     @State private var confirmation: Confirmation?
     @State private var expiredRePairs = MacExpiredRePairControls(openChannel: AuthorityPairingChannel.forCurrentAccount)
-    @State private var discardConfirmation: ExpiredRePairRecord?
+    @State private var discardConfirmation: DiscardConfirmation?
     @State private var showingDiscardConfirmation = false
     @State private var unconfirmed: PairedPhoneSelection?
     @State private var showingConfirmation = false
@@ -458,13 +463,13 @@ struct PairedPhonesSheet: View {
             Text("Phone \(item.identifier) will lose access to this Mac. Pair it again to restore access.")
         }
         .confirmationDialog("Discard this expired re-pair attempt?", isPresented: $showingDiscardConfirmation,
-                            titleVisibility: .visible, presenting: discardConfirmation) { record in
+                            titleVisibility: .visible, presenting: discardConfirmation) { item in
             Button("Discard", role: .destructive) {
-                run { await expiredRePairs.discardConfirmed(record) }
+                run { await expiredRePairs.discardConfirmed(item.record) }
             }
             Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("The phone will no longer receive expiry proof for this attempt. It will keep the preparation until you pair it again or remove the preparation on the phone.")
+        } message: { item in
+            Text("This Mac will no longer tell phone \(item.identifier) that the attempt expired. The phone keeps its setup until you pair it again or remove the setup on the phone.")
         }
         .onChange(of: showingDiscardConfirmation) { _, showing in
             if !showing { discardConfirmation = nil }
@@ -486,15 +491,18 @@ struct PairedPhonesSheet: View {
                         HStack {
                             VStack(alignment: .leading) {
                                 Text("Phone \(identifier)")
-                                Text("Original expiry \(expiry, format: .dateTime.year().month().day().hour().minute())")
-                                    .font(.caption)
-                                if record.reason == .retiredIncarnation {
-                                    Text("The authority changed before this attempt finished.").font(.caption)
+                                switch record.reason {
+                                case .deadlineElapsed:
+                                    Text("Pairing time expired").font(.caption)
+                                    Text("Original expiry \(expiry, format: .dateTime.year().month().day().hour().minute())")
+                                        .font(.caption)
+                                case .retiredIncarnation:
+                                    Text("Remozio restarted before the attempt finished.").font(.caption)
                                 }
                             }
                             Spacer()
                             Button("Discard…") {
-                                discardConfirmation = record
+                                discardConfirmation = DiscardConfirmation(record: record, identifier: identifier)
                                 showingDiscardConfirmation = true
                             }
                             .accessibilityLabel(Text("Discard expired re-pair attempt for phone \(identifier)"))
@@ -504,8 +512,15 @@ struct PairedPhonesSheet: View {
                 }
             }
             .frame(maxHeight: 200)
-        } else if expiredRePairs.unavailable {
-            Text("Expired re-pair attempts are unavailable.").fixedSize(horizontal: false, vertical: true)
+        } else {
+            switch expiredRePairs.availability {
+            case .unread, .available: EmptyView()
+            case .supportUnconfirmed:
+                Text("This version of Remozio may need an update to show expired re-pair attempts.")
+                    .fixedSize(horizontal: false, vertical: true)
+            case .unavailable:
+                Text("Expired re-pair attempts are unavailable.").fixedSize(horizontal: false, vertical: true)
+            }
         }
         if let notice = expiredRePairs.notice {
             Text(discardMessage(notice)).fixedSize(horizontal: false, vertical: true)
@@ -516,6 +531,7 @@ struct PairedPhonesSheet: View {
         switch notice {
         case .discarded: String(localized: "Expired re-pair attempt discarded.")
         case .authorizationCancelled: String(localized: "Authorization was cancelled.")
+        case .notSubmitted: String(localized: "The discard request was not sent. No change was made.")
         case .noLongerListed: String(localized: "The expired re-pair attempt is no longer listed.")
         case .unconfirmed: String(localized: "Could not confirm that the expired re-pair attempt was discarded.")
         }
@@ -618,6 +634,7 @@ struct PairedPhonesSheet: View {
             snapshot = nil
             unconfirmed = selection
             announce(String(localized: "Could not confirm whether the phone was revoked. Check its status before trying again."))
+            await expiredRePairs.refresh()
             return
         }
         await refresh()

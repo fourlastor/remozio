@@ -139,12 +139,14 @@ The [measured TLS record](../docs/experiments/evidence/2026-10-14-pairing-setup-
 ## Discard an expired re-pair attempt
 
 Paired Phones lists attempts after the Mac records that they expired or that the authority retired.
-Each row identifies the phone and shows the original deadline. An elapsed deadline by itself does not add a row.
+Each row identifies the phone and tells you why the attempt ended. If its time elapsed, the row
+also shows the original deadline. The Mac records that an attempt ended before it shows a row.
 
 Discard requires confirmation and administrator authorization. It removes one exact attempt on this Mac.
 The phone will no longer receive expiry proof for that attempt. It keeps its preparation until you pair it
 again or remove the preparation on the phone. A proof from a lookup that the Mac authorized before
 the removal can still arrive and remains valid.
 
-If the Mac loses the reply, it checks whether the attempt is still listed. An absent row does not
-confirm which operation removed it. The Mac does not repeat the discard automatically.
+If the discard fails before the app sends it, the app reports that it made no change.
+If the app loses the reply after sending the request, it checks whether the attempt is still listed.
+An absent row does not confirm which operation removed it. The app does not repeat the discard automatically.
