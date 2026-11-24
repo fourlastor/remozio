@@ -326,4 +326,59 @@ final class MachineUpdateActivationRecordTests: XCTestCase {
             XCTAssertEqual(requirement.writeVersions, [3])
         }
     }
+    // MARK: Canonical bytes cache
+
+    func testActivationRecordCachesTheFreshJSONEncodingAndKeepsEqualityAndCoding() throws {
+        let s = try scope()
+        let input = try canonicalJSON(XCTUnwrap(JSONSerialization.jsonObject(with: s.record.encoded) as? [String: Any]))
+        let value = try MachineUpdateActivationRecord.decode(input)
+        XCTAssertEqual(value, s.record)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let fresh = try encoder.encode(value)
+        XCTAssertEqual(try value.encoded, fresh)
+        XCTAssertEqual(try value.encoded, input)
+        XCTAssertEqual(try value.encoded, try value.encoded)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: fresh) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["formatVersion", "attemptID", "revision", "macID", "installationID", "updateID",
+            "generation", "candidateDigest", "inventoryDigest", "admissionDigest", "machineAdmission", "phase"])
+
+        let other = try MachineUpdateActivationRecord.decode(replaceJSON(value, key: "revision", value: UUID().uuidString))
+        XCTAssertNotEqual(try other.encoded, try value.encoded)
+        XCTAssertNotEqual(other, value)
+        let cancelled = try value.advancing(to: .cancelled)
+        XCTAssertNotEqual(try cancelled.encoded, try value.encoded)
+
+        let text = try XCTUnwrap(String(data: input, encoding: .utf8))
+        for noncanonical in [Data((" " + text).utf8), Data(text.replacingOccurrences(of: ",", with: ", ").utf8)] {
+            XCTAssertThrowsError(try MachineUpdateActivationRecord.decode(noncanonical)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testSchedulingCandidateCachesTheFreshJSONEncodingAndKeepsEqualityAndCoding() throws {
+        let s = try scope()
+        let input = try canonicalJSON(XCTUnwrap(JSONSerialization.jsonObject(with: s.candidate.encoded) as? [String: Any]))
+        let value = try UpdateSchedulingCandidateRecord.decode(input)
+        XCTAssertEqual(value, s.candidate)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let fresh = try encoder.encode(value)
+        XCTAssertEqual(try value.encoded, fresh)
+        XCTAssertEqual(try value.encoded, input)
+        XCTAssertEqual(try value.encoded, try value.encoded)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: fresh) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["formatVersion", "macID", "installationID", "inventoryRevision", "preparation",
+            "generation", "revision", "selected"])
+
+        let other = try candidate(s, selected: false)
+        XCTAssertNotEqual(try other.encoded, try value.encoded)
+        XCTAssertNotEqual(other, value)
+
+        let text = try XCTUnwrap(String(data: input, encoding: .utf8))
+        for noncanonical in [Data((" " + text).utf8), Data(text.replacingOccurrences(of: ",", with: ", ").utf8)] {
+            XCTAssertThrowsError(try UpdateSchedulingCandidateRecord.decode(noncanonical)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
 }

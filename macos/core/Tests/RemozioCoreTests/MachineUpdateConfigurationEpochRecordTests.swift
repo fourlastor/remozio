@@ -127,4 +127,35 @@ final class MachineUpdateConfigurationEpochRecordTests: XCTestCase {
     private func encode(_ fields: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
     }
+    // MARK: Canonical bytes cache
+
+    func testConfigurationRecordCachesTheFreshJSONEncodingAndKeepsEqualityAndCoding() throws {
+        let input = try encode(fields())
+        let value = try MachineUpdateConfigurationEpochRecord.decode(input)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let fresh = try encoder.encode(value)
+        XCTAssertEqual(try value.encoded, fresh)
+        XCTAssertEqual(try value.encoded, input)
+        XCTAssertEqual(try value.encoded, try value.encoded)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: fresh) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["formatVersion", "id", "revision", "activationAttempt", "macID", "installationID",
+            "updateID", "candidateDigest", "inventoryDigest", "admissionDigest", "installedReleaseDigest",
+            "sourceMachineDigest", "accounts", "operands"])
+        XCTAssertEqual(try MachineUpdateConfigurationEpochRecord.decode(input), value)
+
+        let other = try MachineUpdateConfigurationEpochRecord.decode(
+            encode(fields(operandDigest: Data(repeating: 4, count: 32).base64EncodedString())))
+        XCTAssertNotEqual(try other.encoded, try value.encoded)
+        XCTAssertNotEqual(other, value)
+        let publishing = try value.applying(.begin)
+        XCTAssertNotEqual(try publishing.encoded, try value.encoded)
+        XCTAssertEqual(try MachineUpdateConfigurationEpochRecord.decode(publishing.encoded), publishing)
+
+        let text = try XCTUnwrap(String(data: input, encoding: .utf8))
+        for noncanonical in [Data((" " + text).utf8), Data(text.replacingOccurrences(of: ",", with: ", ").utf8)] {
+            XCTAssertThrowsError(try MachineUpdateConfigurationEpochRecord.decode(noncanonical)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
 }

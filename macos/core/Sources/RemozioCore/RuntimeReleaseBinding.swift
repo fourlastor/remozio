@@ -22,6 +22,27 @@ struct RuntimeReleaseBinding: Codable, Equatable, Sendable, CustomStringConverti
     let updateID: Data
     let startupPolicyDigest: Data
     let completionPolicyDigest: Data
+    /// Excluded from CodingKeys and from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case activationAttempt
+        case macID
+        case installationID
+        case accountID
+        case candidateDigest
+        case sourceInventoryDigest
+        case admissionDigest
+        case sourceAccountDigest
+        case runtimeReferenceDigest
+        case sourcePolicyRevision
+        case sourcePolicyDigest
+        case previousInstalledReleaseDigest
+        case installedReleaseDigest
+        case updateID
+        case startupPolicyDigest
+        case completionPolicyDigest
+    }
     var description: String { "RuntimeReleaseBinding(redacted)" }
     var debugDescription: String { description }
 
@@ -97,12 +118,12 @@ struct RuntimeReleaseBinding: Codable, Equatable, Sendable, CustomStringConverti
                previousInstalledReleaseDigest, installedReleaseDigest, updateID, startupPolicyDigest,
                completionPolicyDigest].allSatisfy({ $0.count == 32 }) else { throw RuntimePreparationError.invalidRecord }
     }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate(); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw RuntimePreparationError.invalidRecord }
         return bytes
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw RuntimePreparationError.invalidRecord }

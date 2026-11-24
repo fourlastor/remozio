@@ -40,6 +40,25 @@ struct MachineUpdateConfigurationEpochRecord: Codable, Equatable, Sendable, Cust
     let accounts: [Account]
     let operands: [Operand]
     let publication: MachineUpdatePublicationProgress?
+    /// Excluded from CodingKeys and from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case id
+        case revision
+        case activationAttempt
+        case macID
+        case installationID
+        case updateID
+        case candidateDigest
+        case inventoryDigest
+        case admissionDigest
+        case installedReleaseDigest
+        case sourceMachineDigest
+        case accounts
+        case operands
+        case publication
+    }
     var carriesProvenance: Bool { formatVersion == 3 || formatVersion == 4 }
     var description: String { "MachineUpdateConfigurationEpochRecord(redacted)" }
 
@@ -162,11 +181,11 @@ struct MachineUpdateConfigurationEpochRecord: Codable, Equatable, Sendable, Cust
     private static func ordered(_ a: Operand, _ b: Operand) -> Bool {
         a.kind == b.kind ? a.account.lexicographicallyPrecedes(b.account) : a.kind < b.kind
     }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate(); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard bytes.count <= Self.maximumBytes else { throw PreparationStoreError.capacity }; return bytes
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw PreparationStoreError.corruptRecord }
