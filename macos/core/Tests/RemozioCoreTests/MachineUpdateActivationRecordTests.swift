@@ -358,7 +358,7 @@ final class MachineUpdateActivationRecordTests: XCTestCase {
 
     func testSchedulingCandidateCachesTheFreshJSONEncodingAndKeepsEqualityAndCoding() throws {
         let s = try scope()
-        let input = try canonicalJSON(XCTUnwrap(JSONSerialization.jsonObject(with: s.candidate.encoded) as? [String: Any]))
+        let input = try s.candidate.encoded  // The candidate holds arrays and nulls, which the canonicalJSON helper does not model.
         let value = try UpdateSchedulingCandidateRecord.decode(input)
         XCTAssertEqual(value, s.candidate)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
