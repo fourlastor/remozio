@@ -172,27 +172,25 @@ func pair(identity: PairingIdentity, store: PairingCommitStore, listen: String, 
         defer { stream.close() }
         let session = PairingAuthoritySession(identity: identity, store: store, stream: stream, peerPoint: point,
                                               console: console, now: { remozio_tls_now_ms() })
-        do {
-            let outcome: PairingSessionOutcome
+        let outcome = Result { () throws(PairingSessionFailure) -> PairingSessionOutcome in
             if let invitation, let proofDeadline {
-                outcome = try session.runV2(invitation: invitation, proofDeadline: proofDeadline,
-                                            exporter: stream.invitationExporter)
-            } else {
-                outcome = try session.run()
+                return try session.runV2(invitation: invitation, proofDeadline: proofDeadline,
+                                         exporter: stream.invitationExporter)
             }
-            switch outcome {
-            case .enrolled(let setupID, let phoneID):
-                print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))). Receipt sent.")
-                return 0
-            case .enrolledReceiptUndelivered(let setupID, let phoneID, let reason):
-                print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))), but the receipt was not delivered: \(reason).")
-                print("Not retried. The phone keeps the setup pending; `list` shows the enrollment.")
-                return 3
-            case .enrolledStateUnknown(let setupID, let error):
-                print("Enrolled state unknown for setup \(hex(setupID)): \(error). No receipt sent; not retried.")
-                return 4
-            }
-        } catch let failure as PairingSessionFailure {
+            return try session.run()
+        }
+        switch outcome {
+        case .success(.enrolled(let setupID, let phoneID)):
+            print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))). Receipt sent.")
+            return 0
+        case .success(.enrolledReceiptUndelivered(let setupID, let phoneID, let reason)):
+            print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))), but the receipt was not delivered: \(reason).")
+            print("Not retried. The phone keeps the setup pending; `list` shows the enrollment.")
+            return 3
+        case .success(.enrolledStateUnknown(let setupID, let error)):
+            print("Enrolled state unknown for setup \(hex(setupID)): \(error). No receipt sent; not retried.")
+            return 4
+        case .failure(let failure):
             print("Setup failed: \(describe(failure.error)).")
             // Before a transcript, the only client frame in v2 is its proposal. No credential bytes are logged.
             if version2 && !failure.transcriptSent {
