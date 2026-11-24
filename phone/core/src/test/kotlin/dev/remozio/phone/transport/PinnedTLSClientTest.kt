@@ -1,5 +1,6 @@
 package dev.remozio.phone.transport
 
+import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.net.Socket
@@ -81,14 +82,16 @@ class PinnedTLSClientTest {
     }
 
     @Test fun bytecodeDoesNotLinkTheOptionalUnwrapAgainField() {
-        val type = PinnedTLSClient::class.java
         val bytecode = StringWriter()
         val printer = PrintWriter(bytecode)
         val javap = ToolProvider.findFirst("javap").orElseThrow()
-        val classpath = Path.of(type.protectionDomain.codeSource.location.toURI()).toString()
-        val classes = Files.walk(Path.of(classpath)).use { files ->
-            files.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".class") }
-                .sorted().map(Path::toString).toList()
+        val productionOutputs = checkNotNull(System.getProperty("remozio.test.phoneCoreClasses"))
+            .split(File.pathSeparator).map { Path.of(it) }.filter { Files.isDirectory(it) }
+        val classes = productionOutputs.flatMap { output ->
+            Files.walk(output).use { files ->
+                files.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".class") }
+                    .sorted().map(Path::toString).toList()
+            }
         }
         assertFalse("No compiled phone/core classes found", classes.isEmpty())
         for (batch in classes.chunked(32)) {
