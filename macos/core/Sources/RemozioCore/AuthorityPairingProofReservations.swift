@@ -98,6 +98,7 @@ final class AuthorityPairingProofReservations: Sendable {
     }
 
     private struct State {
+        var budget = PairingRegistrationBudget()
         var connectionIDs: Set<UUID> = []
         // Keep an exporter fingerprint for replay rejection after its raw bytes leave pending.
         var exporterDigests: Set<SHA256.Digest> = []
@@ -105,8 +106,9 @@ final class AuthorityPairingProofReservations: Sendable {
     }
 
     static let maximumPending = 4
-    // Keep the replay checks for the link's lifetime. Refuse further registrations at this bound.
-    static let maximumRegistrations = 256
+    // Each link lasts at most one window. The budget permits at most burst + ceil(rate × duration)
+    // registrations, or 2,408 with a 300-second window. The ledger keeps full-link replay protection.
+    static let maximumRegistrations = 3_000
     private let window: AuthorityPairingV2Window
     private let link: AuthorityPairingProofLink
     private let now: @Sendable () throws -> AuthorityMoment
@@ -143,12 +145,18 @@ final class AuthorityPairingProofReservations: Sendable {
     }
 
     func register(connection: UUID, acceptedAt: UInt64, peerPoint: Data, exporter: Data) throws -> Candidate {
+        guard peerPoint.count == 65, exporter.count == 32 else { throw AuthorityPairingSetupError.unavailable }
+        let chargedAt = try state.withLock {
+            let moment = try now()
+            guard !$0.retired, $0.budget.spend(at: moment) else { throw AuthorityPairingSetupError.unavailable }
+            return moment
+        }
         try checkCurrentAndPrune()
         return try state.withLock {
             let received = try now()
-            guard !$0.retired, pendingCount < Self.maximumPending,
-                  $0.connectionIDs.count < Self.maximumRegistrations, !$0.connectionIDs.contains(connection),
-                  peerPoint.count == 65, peerPoint.first == 4, exporter.count == 32 else {
+            guard received.epoch == chargedAt.epoch, received.milliseconds >= chargedAt.milliseconds,
+                  !$0.retired, pendingCount < Self.maximumPending, peerPoint.first == 4,
+                  $0.connectionIDs.count < Self.maximumRegistrations, !$0.connectionIDs.contains(connection) else {
                 throw AuthorityPairingSetupError.unavailable
             }
             let exporterDigest = SHA256.hash(data: exporter)

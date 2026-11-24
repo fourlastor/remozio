@@ -11,6 +11,7 @@ public enum AuthorityPairingSetupError: Error, Equatable {
 
 /// Root-private setup inputs. Provisioning supplies the existing transport pin; setup never discovers or replaces it.
 public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConvertible {
+    static let maximumLifetimeMilliseconds: UInt64 = 300_000
     public let transportPublicKey: Data
     public let lifetimeMilliseconds: UInt64
     public let canonicalBytes: Data
@@ -18,7 +19,7 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
     public init(transportPublicKey: Data, lifetimeMilliseconds: UInt64 = 120_000) throws {
         guard transportPublicKey.count == 65, transportPublicKey.first == 4,
               (try? P256.Signing.PublicKey(x963Representation: transportPublicKey)) != nil,
-              (1...300_000).contains(lifetimeMilliseconds) else { throw AuthorityPairingSetupError.invalidConfiguration }
+              (1...Self.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds) else { throw AuthorityPairingSetupError.invalidConfiguration }
         self.transportPublicKey = transportPublicKey; self.lifetimeMilliseconds = lifetimeMilliseconds
         canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(transportPublicKey),
             2: .unsigned(lifetimeMilliseconds)]), limits: Self.limits)
