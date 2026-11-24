@@ -19,7 +19,6 @@ public final class PairingSetupListener: @unchecked Sendable {
         let channel: NetworkByteChannel
         var task: Task<Void, Never>?
         var proofTimer: Task<Void, Never>?
-        var proved = false
         init(_ channel: NetworkByteChannel) { self.channel = channel }
     }
     private let listener: NWListener
@@ -28,7 +27,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let invitation: PairingInvitation
     private let v2: PairingSetupV2Ingress?
     private let applicationProtocol: String
-    private var unproved: [UUID] = []
+    private var v2Admissions = PairingSetupV2Admissions()
     private var sources: [String: (until: ContinuousClock.Instant, count: Int)] = [:]
     private var expiry: Task<Void, Never>?
     private let maximumConnections: Int
@@ -138,7 +137,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     private func accept(_ connection: NWConnection) {
         let id = UUID()
         let accepted = ContinuousClock.now
-        let deadline = accepted.advanced(by: .seconds(3))
+        let deadline = accepted.advanced(by: PairingSetupV2Admissions.proofTimeout)
         let applicationProtocol = applicationProtocol
         var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
@@ -147,15 +146,11 @@ public final class PairingSetupListener: @unchecked Sendable {
                 guard slots.count < maximumConnections else { return nil }
             } else {
                 guard admitSource(connection.endpoint, at: accepted) else { return nil }
-                if unproved.count == 4 {
-                    // Keep canceled work bounded while its actual handlers drain.
-                    guard retired.count < 4, let oldest = unproved.first,
-                          let owned = slots.removeValue(forKey: oldest) else { return nil }
-                    unproved.removeFirst()
-                    retired[oldest] = owned
-                    evicted = owned
+                switch v2Admissions.admit(id, deadline: deadline, draining: retired.count) {
+                case .rejected: return nil
+                case .admitted(let victim):
+                    if let victim { evicted = retireProof(victim) }
                 }
-                unproved.append(id)
             }
             let value = Slot(NetworkByteChannel(connection: connection) {
                 Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
@@ -191,7 +186,7 @@ public final class PairingSetupListener: @unchecked Sendable {
                             challenge: AuthorityPairingSetupAccess.secureRandom(32), exporter: Self.exporter(metadata),
                             reserve: { [weak self] proof in
                                 guard let self else { throw PairingSetupChannelError.closed }
-                                try self.reserveProof(proof, deadline: deadline, reserve: windowV2.reserve)
+                                try self.reserveProof(proof, reserve: windowV2.reserve)
                             })
                     } else { proof = nil }
                     let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
@@ -223,33 +218,46 @@ public final class PairingSetupListener: @unchecked Sendable {
         return true
     }
 
-    private func reserveProof(_ proof: PairingSetupV2Proof, deadline: ContinuousClock.Instant,
+    private func reserveProof(_ proof: PairingSetupV2Proof,
                               reserve: (PairingSetupV2Proof) throws -> Void) throws {
         let id = proof.connection
         let slot = try lock.withLock {
-            guard !closed, ContinuousClock.now < deadline, let slot = slots[id], !slot.proved else {
+            guard !closed, let slot = slots[id], v2Admissions.beginVerification(id, at: ContinuousClock.now) else {
                 throw PairingSetupChannelError.rejected
             }
             return slot
         }
-        try reserve(proof)
-        // An eviction or close can win while Authority is verifying. The handler retires that reservation on exit.
-        try lock.withLock {
-            guard !closed, ContinuousClock.now < deadline, slots[id] === slot, !slot.proved else {
-                throw PairingSetupChannelError.rejected
+        do {
+            try reserve(proof)
+            try lock.withLock {
+                guard !closed, slots[id] === slot, v2Admissions.completeVerification(id, at: ContinuousClock.now) else {
+                    throw PairingSetupChannelError.rejected
+                }
+                slot.proofTimer?.cancel(); slot.proofTimer = nil
             }
-            slot.proved = true
-            slot.proofTimer?.cancel(); slot.proofTimer = nil
-            unproved.removeAll { $0 == id }
+        } catch {
+            lock.withLock {
+                if v2Admissions.remove(id) { retireProof(id) }
+            }
+            throw error
         }
     }
 
     private func expireProof(_ id: UUID) {
-        let slot = lock.withLock { () -> Slot? in
-            guard let slot = slots[id], !slot.proved else { return nil }
-            return slot
+        let expired: Slot? = lock.withLock {
+            guard v2Admissions.expire(id, at: ContinuousClock.now) else { return nil }
+            return retireProof(id)
         }
-        if let slot { cancel(slot) }
+        if let expired { cancel(expired) }
+    }
+
+    /// Called under the listener lock. Keep ownership until the handler and its disconnect callback return.
+    @discardableResult
+    private func retireProof(_ id: UUID) -> Slot? {
+        guard let slot = slots.removeValue(forKey: id) else { return nil }
+        slot.proofTimer?.cancel(); slot.proofTimer = nil
+        retired[id] = slot
+        return slot
     }
 
     private func cancel(_ slot: Slot) { slot.channel.abort(); slot.task?.cancel() }
@@ -258,7 +266,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         lock.withLock {
             (slots[id] ?? retired[id])?.proofTimer?.cancel()
             slots[id] = nil; retired[id] = nil
-            unproved.removeAll { $0 == id }
+            v2Admissions.remove(id)
         }
     }
 
@@ -268,7 +276,7 @@ public final class PairingSetupListener: @unchecked Sendable {
             closed = true
             expiry?.cancel(); expiry = nil
             for (id, slot) in slots { retired[id] = slot }
-            slots.removeAll(); unproved.removeAll(); sources.removeAll()
+            slots.removeAll(); v2Admissions.removeAll(); sources.removeAll()
             return Array(retired.values)
         }
         guard let owned else { return }
