@@ -168,6 +168,15 @@ class JobSelectionTests(unittest.TestCase):
         self.assertEqual(len(gated), len(JOBS.JOBS))
 
 
+    def test_only_pull_request_runs_cancel_an_older_run_of_their_group(self):
+        text = WORKFLOW.read_text()
+        concurrency = re.search(r'^concurrency:\n((?:  .*\n)+)', text, re.MULTILINE)
+        self.assertIsNotNone(concurrency)
+        lines = [line.strip() for line in concurrency.group(1).splitlines() if not line.strip().startswith('#')]
+        self.assertIn("group: checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}", lines)
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", lines)
+        self.assertEqual(text.count('cancel-in-progress:'), 1)
+
     def test_the_mac_build_builds_only_the_debug_app_on_a_pull_request_that_changes_no_release_input(self):
         text = WORKFLOW.read_text()
         self.assertEqual(text.count('REMOZIO_MAC_APP_CONFIGURATIONS'), 1)
