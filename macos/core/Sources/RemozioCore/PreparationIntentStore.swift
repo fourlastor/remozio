@@ -3680,6 +3680,7 @@ public final class PreparationIntentStore {
         try transaction(write: false) { try loadStableMachineUpdate(candidate: candidate) }
     }
 
+    #if DEBUG
     /// Test-only, never called in Sources. Runs `body` inside one ordinary read transaction on this connection so tests
     /// can load the stable frame repeatedly, run a statement on this same connection, and read the journal mode.
     struct StableFrameCacheProbe {
@@ -3700,6 +3701,7 @@ public final class PreparationIntentStore {
                 }))
         }
     }
+    #endif
 
     /// Captures the exact account rows and sealed release in one read transaction.
     func stableRuntimeSource(candidate: SignedReleaseEvidence) throws -> MachineUpdateStableRuntimeSource {
@@ -5752,7 +5754,7 @@ public final class PreparationIntentStore {
     /// exact candidate key. Every condition is checked again on each hit. Errors are never stored.
     private func cachedStableMachineUpdateFrame(candidateKey: Data?) -> StableMachineUpdateFrame? {
         guard let candidateKey, let cached = stableFrameCache, active, !transactionWrites, let db,
-              sqlite3_get_autocommit(db) == 0, cached.serial == transactionSerial,
+              sqlite3_get_autocommit(db) == 0, sqlite3_txn_state(db, nil) == SQLITE_TXN_READ, cached.serial == transactionSerial,
               cached.changes == sqlite3_total_changes64(db), cached.candidate == candidateKey else { return nil }
         return cached.frame
     }
@@ -5768,7 +5770,8 @@ public final class PreparationIntentStore {
         observeStoreRead?(.frame)
         observeStableFrameCache?(.miss)
         let frame = try loadUncachedStableMachineUpdateFrame(candidate: release)
-        if let key, active, !transactionWrites, let db, sqlite3_get_autocommit(db) == 0 {
+        if let key, active, !transactionWrites, let db, sqlite3_get_autocommit(db) == 0,
+           sqlite3_txn_state(db, nil) == SQLITE_TXN_READ {
             stableFrameCache = (transactionSerial, sqlite3_total_changes64(db), key, frame)
         }
         return frame

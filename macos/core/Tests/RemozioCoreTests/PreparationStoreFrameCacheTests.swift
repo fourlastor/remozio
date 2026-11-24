@@ -39,43 +39,121 @@ final class PreparationStoreFrameCacheTests: XCTestCase {
             dependencyCodeDirectoryHashes: dependencies)
     }
 
-    /// The premise: while this connection holds a read transaction, another connection cannot commit. If the store left
-    /// journal_mode=DELETE (for example for WAL without the snapshot reasoning being re-checked), this test fails.
-    func testReadTransactionLockBlocksAnotherConnectionsCommitWhileTheCacheIsActive() throws {
-        try fixture { f in
-            let machine = try f.machine()
-            let seen = try events(machine) {
-                try machine.withStableFrameCacheProbe { probe in
-                    XCTAssertEqual(try probe.journalMode().lowercased(), "delete")
-                    let first = try probe.load(f.candidate)
-                    try withSecondConnection(f.databasePath) { db in
-                        XCTAssertEqual(sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
-                        XCTAssertEqual(sqlite3_exec(db, "DELETE FROM update_scheduling_candidate_v1", nil, nil, nil), SQLITE_OK)
-                        XCTAssertEqual(sqlite3_exec(db, "COMMIT", nil, nil, nil) & 0xff, SQLITE_BUSY)
-                        XCTAssertEqual(sqlite3_exec(db, "ROLLBACK", nil, nil, nil), SQLITE_OK)
-                    }
-                    try probe.load(f.candidate).requireSame(as: first)
-                }
-            }
-            XCTAssertEqual(seen, [.miss, .hit])
-            XCTAssertNoThrow(try machine.stableMachineUpdateSnapshot(candidate: f.candidate))
+    /// A copy of the current committed database, taken through SQLite so no torn file is ever read.
+    private func copyCommittedDatabase(_ f: RetainedMaterialWriterFixture, to path: String) throws {
+        try withSecondConnection(f.databasePath) { db in
+            sqlite3_busy_timeout(db, 1000)
+            let quoted = path.replacingOccurrences(of: "'", with: "''")
+            XCTAssertEqual(sqlite3_exec(db, "VACUUM INTO '\(quoted)'", nil, nil, nil), SQLITE_OK)
         }
     }
 
-    /// readFresh shape: two read transactions on one connection with a commit from another connection between them.
+    private func names(_ db: OpaquePointer, _ sql: String) throws -> [String] {
+        var row: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &row, nil) == SQLITE_OK, let row else { throw PreparationStoreError.corruptRecord }
+        defer { sqlite3_finalize(row) }
+        var values: [String] = []
+        while sqlite3_step(row) == SQLITE_ROW { values.append(String(cString: sqlite3_column_text(row, 0))) }
+        return values
+    }
+
+    /// Stages, on connection `db`, the rows of every table that differs from the earlier committed copy. Every staged
+    /// row is a byte-identical row the store itself committed before, so the result is a valid store state.
+    /// Returns the restored table names. The caller commits.
+    private func stageRestore(_ db: OpaquePointer, from copy: String) throws -> [String] {
+        let quoted = copy.replacingOccurrences(of: "'", with: "''")
+        XCTAssertEqual(sqlite3_exec(db, "ATTACH DATABASE '\(quoted)' AS earlier", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
+        var restored: [String] = []
+        for table in try names(db, "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name") {
+            let differs = try names(db, """
+                SELECT 1 FROM (SELECT * FROM main.\(table) EXCEPT SELECT * FROM earlier.\(table)) UNION ALL
+                SELECT 1 FROM (SELECT * FROM earlier.\(table) EXCEPT SELECT * FROM main.\(table)) LIMIT 1
+                """)
+            guard !differs.isEmpty else { continue }
+            XCTAssertEqual(sqlite3_exec(db, "DELETE FROM main.\(table)", nil, nil, nil), SQLITE_OK)
+            XCTAssertEqual(sqlite3_exec(db, "INSERT INTO main.\(table) SELECT * FROM earlier.\(table)", nil, nil, nil), SQLITE_OK)
+            restored.append(table)
+        }
+        return restored
+    }
+
+    /// Commits a real writer's change on the store's own connection, keeping a copy of the state before it. Afterwards
+    /// the database holds state B and the copy holds state A; both are states the store committed itself.
+    private func retainWithEarlierCopy(_ f: RetainedMaterialWriterFixture, _ machine: PreparationIntentStore,
+        _ body: (_ copy: String, _ before: MachineUpdateStableReleaseSnapshot) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("frame-cache-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copy = directory.appendingPathComponent("earlier.sqlite").path
+        let before = try machine.stableMachineUpdateSnapshot(candidate: f.candidate)
+        try copyCommittedDatabase(f, to: copy)
+        let entry = try machine.retainedSetupInitialRuntimeEntry(owner: f.owner, candidate: f.candidate)
+        _ = try machine.retainRetainedSetupRuntimeMaterial(f.material.reference,
+            expected: .init(runtime: entry.runtime, activation: entry.activation), candidate: f.candidate,
+            directory: f.directory, admission: f.admission, fileCustodyAccepted: true, verifyScoped: { _, _ in })
+        XCTAssertThrowsError(try machine.stableMachineUpdateSnapshot(candidate: f.candidate).requireSame(as: before),
+            "The retained-material writer no longer changes a row the stable frame covers") {
+            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+        }
+        try body(copy, before)
+    }
+
+    /// The premise, proven: while this connection holds a read transaction with the frame cached, another connection's
+    /// valid commit gets SQLITE_BUSY after its busy timeout. The same commit succeeds once the read transaction ends.
+    /// If the store left journal_mode=DELETE (for example for WAL without the snapshot reasoning being re-checked), this
+    /// test fails.
+    func testReadTransactionLockBlocksAnotherConnectionsCommitWhileTheCacheIsActive() throws {
+        try fixture { f in
+            let machine = try f.machine()
+            try retainWithEarlierCopy(f, machine) { copy, before in
+                try withSecondConnection(f.databasePath) { db in
+                    XCTAssertEqual(sqlite3_busy_timeout(db, 50), SQLITE_OK)
+                    let seen = try events(machine) {
+                        try machine.withStableFrameCacheProbe { probe in
+                            XCTAssertEqual(try probe.journalMode().lowercased(), "delete")
+                            let first = try probe.load(f.candidate)
+                            try probe.load(f.candidate).requireSame(as: first)
+                            XCTAssertFalse(try stageRestore(db, from: copy).isEmpty)
+                            let started = Date()
+                            XCTAssertEqual(sqlite3_exec(db, "COMMIT", nil, nil, nil) & 0xff, SQLITE_BUSY)
+                            XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.04, "B did not wait for its busy timeout")
+                            XCTAssertEqual(sqlite3_get_autocommit(db), 0, "B's transaction must stay open for the retry")
+                            try probe.load(f.candidate).requireSame(as: first)
+                        }
+                    }
+                    XCTAssertEqual(seen, [.miss, .hit, .hit])
+                    XCTAssertEqual(sqlite3_exec(db, "COMMIT", nil, nil, nil), SQLITE_OK)
+                    XCTAssertEqual(sqlite3_exec(db, "DETACH DATABASE earlier", nil, nil, nil), SQLITE_OK)
+                }
+                try machine.stableMachineUpdateSnapshot(candidate: f.candidate).requireSame(as: before)
+            }
+        }
+    }
+
+    /// readFresh shape: two read transactions on one connection with a valid commit from another connection between
+    /// them. The second transaction misses, reads the committed rows, and the comparison reports a stale revision.
     func testRacingCommitBetweenTwoReadTransactionsIsStillDetected() throws {
         try fixture { f in
             let machine = try f.machine()
-            let seen = try events(machine) {
-                _ = try machine.stableMachineUpdateSnapshot(candidate: f.candidate)
-                try withSecondConnection(f.databasePath) { db in
-                    XCTAssertEqual(sqlite3_exec(db, "DELETE FROM update_scheduling_candidate_v1", nil, nil, nil), SQLITE_OK)
+            try retainWithEarlierCopy(f, machine) { copy, before in
+                var first: MachineUpdateStableReleaseSnapshot?, second: MachineUpdateStableReleaseSnapshot?
+                let seen = try events(machine) {
+                    first = try machine.stableMachineUpdateSnapshot(candidate: f.candidate)
+                    try withSecondConnection(f.databasePath) { db in
+                        XCTAssertFalse(try stageRestore(db, from: copy).isEmpty)
+                        XCTAssertEqual(sqlite3_exec(db, "COMMIT", nil, nil, nil), SQLITE_OK)
+                        XCTAssertEqual(sqlite3_exec(db, "DETACH DATABASE earlier", nil, nil, nil), SQLITE_OK)
+                    }
+                    second = try machine.stableMachineUpdateSnapshot(candidate: f.candidate)
                 }
-                XCTAssertThrowsError(try machine.stableMachineUpdateSnapshot(candidate: f.candidate)) {
-                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                XCTAssertEqual(seen, [.miss, .miss])
+                let read = try XCTUnwrap(second), cached = try XCTUnwrap(first)
+                XCTAssertThrowsError(try read.requireSame(as: cached)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
                 }
+                try read.requireSame(as: before)
             }
-            XCTAssertEqual(seen, [.miss, .miss])
         }
     }
 
@@ -139,6 +217,31 @@ final class PreparationStoreFrameCacheTests: XCTestCase {
             }
             XCTAssertEqual(seen, [.miss, .miss])
             XCTAssertNoThrow(try machine.stableMachineUpdateSnapshot(candidate: f.candidate))
+        }
+    }
+
+    /// `PRAGMA user_version =` and DDL leave total_changes64 unchanged, but they move the transaction to WRITE. Even a
+    /// rewrite of the same user_version must miss.
+    func testOwnConnectionSchemaWriteWithoutRowChangesMisses() throws {
+        for statement in ["PRAGMA user_version = %d", "CREATE TABLE main.frame_cache_probe_v1(value INTEGER)"] {
+            try fixture { f in
+                let machine = try f.machine()
+                let version = try f.scalar("PRAGMA user_version")
+                let seen = try events(machine) {
+                    XCTAssertThrowsError(try machine.withStableFrameCacheProbe { probe in
+                        let first = try probe.load(f.candidate)
+                        try probe.execute(statement.replacingOccurrences(of: "%d", with: String(version)))
+                        if statement.hasPrefix("PRAGMA") {
+                            try probe.load(f.candidate).requireSame(as: first)
+                        } else {
+                            _ = try? probe.load(f.candidate)
+                        }
+                        throw Sentinel.rollback
+                    }) { XCTAssertTrue($0 is Sentinel) }
+                }
+                XCTAssertEqual(seen, [.miss, .miss], statement)
+                XCTAssertNoThrow(try machine.stableMachineUpdateSnapshot(candidate: f.candidate))
+            }
         }
     }
 
