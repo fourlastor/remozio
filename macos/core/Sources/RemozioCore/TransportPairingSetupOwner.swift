@@ -7,7 +7,7 @@ protocol TransportPairingPeer: Sendable {
     var isClosed: Bool { get async }
     var provedConnection: UUID? { get async }
     var proofPublicationDeadline: ContinuousClock.Instant? { get async }
-    func rejectConfirmedProof()
+    func retireVerifiedProof()
     func proposal() async throws -> PairingPhoneProposal
     func stage(_ transcript: PairingTranscript) async throws
     func receiveProof() async throws -> Data
@@ -18,7 +18,7 @@ protocol TransportPairingPeer: Sendable {
 extension TransportPairingPeer {
     var provedConnection: UUID? { get async { nil } }
     var proofPublicationDeadline: ContinuousClock.Instant? { get async { nil } }
-    func rejectConfirmedProof() {}
+    func retireVerifiedProof() {}
 }
 extension PairingSetupNetworkSession: TransportPairingPeer {}
 protocol TransportPairingIngress: Sendable {
@@ -117,6 +117,7 @@ public actor TransportPairingSetupOwner {
     private let factory: Factory
     private let verifyAccount: @Sendable () throws -> Void
     private let openProofClient: OpenProofClient
+    private let publicationTime: @Sendable () -> ContinuousClock.Instant
     private let lifetime = PairingControlLifetime()
     private var invitation: PairingInvitation?
     private var rePair: RePairInvitation?
@@ -144,6 +145,7 @@ public actor TransportPairingSetupOwner {
         self.configuration = configuration
         self.rePairAdmission = rePairAdmission
         openProofClient = AuthorityPairingProofClient.open(configuration:windowID:onClose:)
+        publicationTime = { ContinuousClock.now }
         let holder = PairingIdentityHolder(identity), processID = getpid(), uid = configuration.transportUID
         factory = { invitation, event, handler in
             try NativePairingIngress(identity: holder.identity, invitation: invitation, configuration: configuration, event: event, handler: handler)
@@ -155,9 +157,10 @@ public actor TransportPairingSetupOwner {
     // Logical ingress controls cannot prove native code signing, role accounts or TLS identity.
     init(configuration: TransportPairingControlConfiguration, rePairAdmission: TransportRePairAdmission = TransportRePairAdmission(),
          factory: @escaping Factory, verifyAccount: @escaping @Sendable () throws -> Void = {},
-         openProofClient: @escaping OpenProofClient = AuthorityPairingProofClient.open(configuration:windowID:onClose:)) {
+         openProofClient: @escaping OpenProofClient = AuthorityPairingProofClient.open(configuration:windowID:onClose:),
+         publicationTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         self.configuration = configuration; self.factory = factory; self.verifyAccount = verifyAccount
-        self.rePairAdmission = rePairAdmission; self.openProofClient = openProofClient
+        self.rePairAdmission = rePairAdmission; self.openProofClient = openProofClient; self.publicationTime = publicationTime
     }
     deinit { openingTimer?.cancel(); lifetime.close() }
     public func begin(_ invitation: PairingInvitation) async throws -> UInt16 {
@@ -339,7 +342,7 @@ public actor TransportPairingSetupOwner {
         let provedConnection = await peer.provedConnection
         let id = provedConnection ?? UUID()
         let limit = requiresProof ? 1 : configuration.maximumCandidates
-        var published = false
+        defer { if provedConnection != nil { peer.retireVerifiedProof() } }
         do {
             try active()
             guard requiresProof == (provedConnection != nil), entries.count < limit, let invitation else {
@@ -353,15 +356,13 @@ public actor TransportPairingSetupOwner {
                   proposal.phone.scope.macID == invitation.macID, proposal.phone.scope.accountID == invitation.accountID else {
                 throw TransportPairingControlError.invalidMessage
             }
-            try PairingSetupNetworkSession.requirePublicationDeadline(proofDeadline)
+            try PairingSetupNetworkSession.requirePublicationDeadline(proofDeadline, at: publicationTime())
             guard lifetime.register(id, abort: { peer.abort() }) else { throw TransportPairingControlError.closed }
             entries[id] = Entry(id: id, peer: peer, proposal: proposal)
-            published = true
             while let entry = entries[id], entry.phase != .receiptSent, !(await peer.isClosed) {
                 try active(); try await Task.sleep(for: .milliseconds(100))
             }
         } catch {
-            if provedConnection != nil, !published { peer.rejectConfirmedProof() }
             await finish(id); peer.abort(); await peer.close(); throw error
         }
         await finish(id)

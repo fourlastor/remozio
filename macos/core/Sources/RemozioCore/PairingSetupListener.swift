@@ -35,7 +35,7 @@ struct PairingSetupV2Ingress: Sendable {
                 verify: { proposal, _, tag in
                     try await authority.verify(candidate: candidate.id, proposal: proposal.encode(), tag: tag, deadline: deadline)
                 }, confirm: { try await authority.confirm(candidate: candidate.id, deadline: deadline) },
-                invalidateLink: authority.close, retire: { await authority.retire(candidate: candidate.id, confirmed: $0) })
+                invalidateLink: authority.close, retire: { await authority.retire(candidate: candidate.id, requiresAcknowledgement: $0) })
         }
         guard let localReserve, let localDisconnect, exporter.count == 32 else { throw PairingSetupChannelError.rejected }
         let challenge = try AuthorityPairingSetupAccess.secureRandom(32)
@@ -65,6 +65,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     private var v2Admissions = PairingSetupV2Admissions()
     private var sources: [String: (until: ContinuousClock.Instant, count: Int)] = [:]
     private var expiry: Task<Void, Never>?
+    private let proofTime: @Sendable () -> ContinuousClock.Instant
     private let maximumConnections: Int
     private let handshakeTimeoutMilliseconds: UInt64
     private let setupTimeoutMilliseconds: UInt64
@@ -87,7 +88,8 @@ public final class PairingSetupListener: @unchecked Sendable {
 
     init(identity: SecIdentity, invitation: PairingInvitation, binding: DirectApprovalListener.Binding,
          maximumConnections: Int, handshakeTimeoutMilliseconds: UInt64, setupTimeoutMilliseconds: UInt64,
-         v2: PairingSetupV2Ingress?, event: @escaping @Sendable (DirectListenerEvent) -> Void,
+         v2: PairingSetupV2Ingress?, proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+         event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
               (1...300_000).contains(setupTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
@@ -102,7 +104,7 @@ public final class PairingSetupListener: @unchecked Sendable {
               let local = sec_identity_create(identity) else { throw DirectListenerError.invalidIdentity }
         self.invitation = invitation; self.maximumConnections = maximumConnections
         self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.setupTimeoutMilliseconds = setupTimeoutMilliseconds
-        self.handler = handler; self.event = event; self.v2 = v2
+        self.handler = handler; self.event = event; self.v2 = v2; self.proofTime = proofTime
         let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
         self.applicationProtocol = applicationProtocol
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
@@ -244,13 +246,17 @@ public final class PairingSetupListener: @unchecked Sendable {
                         peerPoint: point, timeoutMilliseconds: timeout, v2: proof)
                     confirmed = proof != nil
                     do { try Task.checkCancellation() }
-                    catch { session.rejectConfirmedProof(); await session.closeAndWait(); throw error }
+                    catch { session.retireVerifiedProof(); await session.closeAndWait(); throw error }
                     do { try await handler(session) }
                     catch { await session.closeAndWait(); throw error }
                     await session.closeAndWait()
                 } catch {}
                 await channel.close()
                 await registeredProof?.retire(confirmed)
+                if confirmed {
+                    registeredProof?.invalidateLink()
+                    self?.close()
+                }
                 self?.release(id)
             }
             return true
@@ -282,7 +288,7 @@ public final class PairingSetupListener: @unchecked Sendable {
 
     private func requireVerification(_ id: UUID) throws {
         try lock.withLock {
-            guard !closed, slots[id] != nil, v2Admissions.isVerifying(id, at: ContinuousClock.now) else {
+            guard !closed, slots[id] != nil, v2Admissions.isVerifying(id, at: proofTime()) else {
                 throw PairingSetupChannelError.rejected
             }
         }
@@ -290,7 +296,7 @@ public final class PairingSetupListener: @unchecked Sendable {
 
     private func completeVerification(_ id: UUID) throws {
         try lock.withLock {
-            guard !closed, let slot = slots[id], v2Admissions.completeVerification(id, at: ContinuousClock.now) else {
+            guard !closed, let slot = slots[id], v2Admissions.completeVerification(id, at: proofTime()) else {
                 throw PairingSetupChannelError.rejected
             }
             slot.proofTimer?.cancel(); slot.proofTimer = nil

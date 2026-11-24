@@ -217,9 +217,12 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
             _ = try fixture.register(reservations, exporter: Data(repeating: UInt8(index), count: 32))
         }
         XCTAssertThrowsError(try fixture.register(reservations))
+        XCTAssertEqual(reservations.pendingCount, capacity)
         fixture.clock.advance(to: 3_100)
         XCTAssertThrowsError(try fixture.register(reservations, acceptedAt: 3_100, exporter: Data(repeating: 0, count: 32)))
+        XCTAssertEqual(reservations.pendingCount, 0)
         XCTAssertNoThrow(try fixture.register(reservations, acceptedAt: 3_100))
+        XCTAssertEqual(reservations.pendingCount, 1)
     }
 
     func testReplayLedgerCannotGrowPastTheLifetimeRegistrationLimit() throws {

@@ -28,25 +28,34 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         configure(connection)
     }
 
-    static func open(configuration: ApprovalTransportConfiguration, windowID: Data,
-                     onClose: @escaping @Sendable () -> Void) async throws -> AuthorityPairingProofClient {
-        let policy = configuration.authorityPolicy
-        let bootstrap = try AuthorityXPCChannel(serviceName: configuration.authorityServiceName,
-            peerPolicy: policy, onClose: onClose)
-        return try await open(bootstrap: bootstrap, windowID: windowID, policy: policy, onClose: onClose,
-                              configure: policy.configure)
+    struct Bootstrap {
+        let channel: AuthorityXPCChannel
+        let policy: XPCPeerPolicy
+        let configure: @Sendable (NSXPCConnection) -> Void
     }
 
-    static func open(bootstrap: AuthorityXPCChannel, windowID: Data, policy: XPCPeerPolicy,
-                     onClose: @escaping @Sendable () -> Void, configure: (NSXPCConnection) -> Void) async throws -> AuthorityPairingProofClient {
+    static func open(configuration: ApprovalTransportConfiguration, windowID: Data,
+                     onClose: @escaping @Sendable () -> Void) async throws -> AuthorityPairingProofClient {
+        try await open(configuration: configuration, windowID: windowID, onClose: onClose) { supplied, ended in
+            let policy = supplied.authorityPolicy
+            return try Bootstrap(channel: AuthorityXPCChannel(serviceName: supplied.authorityServiceName,
+                peerPolicy: policy, onClose: ended), policy: policy, configure: policy.configure)
+        }
+    }
+
+    static func open(configuration: ApprovalTransportConfiguration, windowID: Data, onClose: @escaping @Sendable () -> Void,
+                     bootstrap makeBootstrap: (ApprovalTransportConfiguration, @escaping @Sendable () -> Void) throws -> Bootstrap)
+        async throws -> AuthorityPairingProofClient {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
+        let peer = try makeBootstrap(configuration, onClose)
+        let bootstrap = peer.channel
         do {
             try await bootstrap.start()
             guard let endpoint = try await bootstrap.openPairingProof() else { throw AuthorityXPCError.failed }
-            let client = AuthorityPairingProofClient(endpoint: endpoint, peerPolicy: policy, onClose: {
+            let client = AuthorityPairingProofClient(endpoint: endpoint, peerPolicy: peer.policy, onClose: {
                 Task { await bootstrap.close() }
                 onClose()
-            }, configure: configure)
+            }, configure: peer.configure)
             try await client.start(windowID: windowID)
             return client
         } catch {
@@ -89,9 +98,17 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
     }
 
     func verify(candidate: UUID, proposal: Data, tag: Data, deadline: ContinuousClock.Instant) async throws {
-        guard case .allowed(true) = try await call(deadline: deadline, send: { proxy, reply in
-            proxy.verifyCandidate(AuthorityPairingProofWire.bytes(candidate), proposal: proposal, tag: tag) { reply(.allowed($0)) }
-        }) else { throw AuthorityXPCError.failed }
+        let reply: Reply
+        do {
+            reply = try await call(deadline: deadline, candidateOnly: true) { proxy, reply in
+                proxy.verifyCandidate(AuthorityPairingProofWire.bytes(candidate), proposal: proposal, tag: tag) { reply(.allowed($0)) }
+            }
+        } catch {
+            // Authority may have accepted the proof before its reply became unavailable.
+            await retire(candidate: candidate, requiresAcknowledgement: true)
+            throw error
+        }
+        guard case .allowed(true) = reply else { throw AuthorityXPCError.failed }
     }
 
     func confirm(candidate: UUID, deadline: ContinuousClock.Instant) async throws {
@@ -105,14 +122,14 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         }
     }
 
-    func retire(candidate: UUID, confirmed: Bool) async {
+    func retire(candidate: UUID, requiresAcknowledgement: Bool) async {
         let cleanup = Task {
-            try await call(deadline: ContinuousClock.now.advanced(by: .seconds(1)), candidateOnly: !confirmed) { proxy, reply in
+            try await call(deadline: ContinuousClock.now.advanced(by: .seconds(1)), candidateOnly: !requiresAcknowledgement) { proxy, reply in
                 proxy.retireCandidate(AuthorityPairingProofWire.bytes(candidate)) { reply(.allowed($0)) }
             }
         }
         guard case .some(.allowed(true)) = try? await cleanup.value else {
-            if confirmed { close() }
+            if requiresAcknowledgement { close() }
             return
         }
     }

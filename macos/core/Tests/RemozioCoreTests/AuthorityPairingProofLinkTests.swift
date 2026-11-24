@@ -259,6 +259,14 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
     }
 
     func testTransportOwnerOpensAndBindsNativeLinkAndClosesOnInterruption() async throws {
+        try await exerciseTransportOwner(rejectPublication: false)
+    }
+
+    func testTransportOwnerRetiresTheLinkWhenPublicationIsTooLate() async throws {
+        try await exerciseTransportOwner(rejectPublication: true)
+    }
+
+    private func exerciseTransportOwner(rejectPublication: Bool) async throws {
         let authority = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey()
         let macID = Data(repeating: 1, count: 16), accountID = Data(repeating: 2, count: 16)
         let invitation = try PairingInvitation(macID: macID, accountID: accountID, label: "Proof fixture",
@@ -288,14 +296,20 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let bootstrapConnection = NSXPCConnection(listenerEndpoint: fixture.listener.endpoint)
         let driver = NativeAuthorityXPC(connection: bootstrapConnection, policy: fixture.policy,
                                        configure: { $0.setCodeSigningRequirement(fixture.requirement) })
+        let attemptedPublication = Mutex(false)
         let owner = TransportPairingSetupOwner(configuration: pairing, factory: { _, _, _ in throw FixtureError.retiredRole },
-            openProofClient: { _, windowID, onClose in
-                let bootstrap = AuthorityXPCChannel(driver: driver, onClose: onClose)
-                return try await AuthorityPairingProofClient.open(bootstrap: bootstrap, windowID: windowID,
-                    policy: fixture.policy, onClose: onClose, configure: { $0.setCodeSigningRequirement(fixture.requirement) })
+            openProofClient: { configuration, windowID, onClose in
+                try await AuthorityPairingProofClient.open(configuration: configuration, windowID: windowID, onClose: onClose) { supplied, ended in
+                    XCTAssertEqual(supplied.canonicalBytes, approval.canonicalBytes)
+                    let bootstrap = AuthorityXPCChannel(driver: driver, onClose: ended)
+                    return .init(channel: bootstrap, policy: fixture.policy, configure: { $0.setCodeSigningRequirement(fixture.requirement) })
+                }
+            }, publicationTime: {
+                attemptedPublication.withLock { $0 = true }
+                return ContinuousClock.now.advanced(by: .seconds(rejectPublication ? 4 : 0))
             })
         defer { owner.abort() }
-        _ = try await owner.beginV2(.init(id: full.windowID, invitation: invitation, replacement: nil,
+        let port = try await owner.beginV2(.init(id: full.windowID, invitation: invitation, replacement: nil,
             lifetimeMilliseconds: full.lifetimeMilliseconds), identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport),
             authorityConfiguration: approval)
         let reservations = try XCTUnwrap(bound.withLock { $0 })
@@ -304,18 +318,34 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         _ = try reservations.register(connection: UUID(), acceptedAt: acceptedAt, peerPoint: nextPeer, exporter: Data(repeating: 9, count: 32))
         XCTAssertEqual(reservations.pendingCount, 1)
 
-        driver.close()
-        let cleared = try await waitFor { reservations.pendingCount == 0 }
-        XCTAssertTrue(cleared)
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        let phone: Task<Void, Error>?
+        if rejectPublication {
+            phone = Task { try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full) }
+        } else {
+            phone = nil
+            fixture.links.close()
+        }
+        defer { phone?.cancel() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         var closed = false
         while ContinuousClock.now < deadline {
-            do { _ = try await owner.snapshot() }
-            catch TransportPairingControlError.closed { closed = true; break }
+            do {
+                let snapshot = try await owner.snapshot()
+                if rejectPublication, !snapshot.candidates.isEmpty {
+                    XCTFail("The Transport owner published a candidate after its deadline")
+                    break
+                }
+            } catch TransportPairingControlError.closed { closed = true; break }
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(closed)
+        if rejectPublication { XCTAssertTrue(attemptedPublication.withLock { $0 }) }
         await owner.closeAndWait()
+        if let phone, case .success = await phone.result {
+            XCTFail("The candidate received a pairing receipt after its deadline")
+        }
+        let cleared = try await waitFor { reservations.pendingCount == 0 }
+        XCTAssertTrue(cleared)
         XCTAssertThrowsError(try window.export(at: clock.now()))
     }
 

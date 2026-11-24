@@ -109,7 +109,7 @@ public actor PairingSetupNetworkSession {
                 try active()
                 try Self.requirePublicationDeadline(v2.publicationDeadline)
             } catch {
-                rejectConfirmedProof()
+                retireVerifiedProof()
                 throw error
             }
             provedConnection = v2.connection
@@ -123,10 +123,10 @@ public actor PairingSetupNetworkSession {
         }
         proposalValue = proposal; state = .proposed
     }
-    nonisolated func rejectConfirmedProof() { invalidateProofLink() }
+    nonisolated func retireVerifiedProof() { invalidateProofLink() }
 
-    static func requirePublicationDeadline(_ deadline: ContinuousClock.Instant?) throws {
-        if let deadline, ContinuousClock.now >= deadline { throw PairingSetupChannelError.rejected }
+    static func requirePublicationDeadline(_ deadline: ContinuousClock.Instant?, at now: ContinuousClock.Instant = ContinuousClock.now) throws {
+        if let deadline, now >= deadline { throw PairingSetupChannelError.rejected }
     }
 
     private func requirePeer(_ proposal: PairingPhoneProposal) throws {
