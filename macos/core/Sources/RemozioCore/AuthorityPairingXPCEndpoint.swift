@@ -152,6 +152,9 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
                 let status = try access.revokePhone(selection, authorize: { [authorize] in try authorize(authorization) })
                 return Data([UInt8(status.rawValue)])
+            case .listExpiredRePairs:
+                guard selection.isEmpty, authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+                return try access.expiredRePairs().encode()
             case .discardExpiredRePair:
                 guard selection.count == 48, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
                     throw AuthorityPairingSetupError.invalidConfirmation

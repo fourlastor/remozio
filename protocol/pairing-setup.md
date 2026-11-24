@@ -135,3 +135,16 @@ The native/JVM loopback experiment uses real TLS and disposable software keys. I
 Its authority receipt is a software fixture. It does not prove Root durability, administrator consent, Pixel biometrics, or installed account separation.
 
 The [measured TLS record](../docs/experiments/evidence/2026-10-14-pairing-setup-tls.json) retains the four native/JVM results and source hashes.
+
+## Discard an expired re-pair attempt
+
+Paired Phones lists attempts after the Mac records that they expired or that the authority retired.
+Each row identifies the phone and shows the original deadline. An elapsed deadline by itself does not add a row.
+
+Discard requires confirmation and administrator authorization. It removes one exact attempt on this Mac.
+The phone will no longer receive expiry proof for that attempt. It keeps its preparation until you pair it
+again or remove the preparation on the phone. A proof from a lookup that the Mac authorized before
+the removal can still arrive and remains valid.
+
+If the Mac loses the reply, it checks whether the attempt is still listed. An absent row does not
+confirm which operation removed it. The Mac does not repeat the discard automatically.

@@ -113,7 +113,7 @@ public actor AuthorityPairingChannel {
     private var context: AuthorityPairingContext?
     private var staged: PairingTranscript?
     private var managesPhones = false
-    private var authorizingRevocation = false
+    private var authorizingPhoneMutation = false
     private var pending: (id: UUID, continuation: CheckedContinuation<PairingClientReply, any Error>)?
     private var timer: Task<Void, Never>?
 
@@ -169,19 +169,10 @@ public actor AuthorityPairingChannel {
 
     /// Call after explicit confirmation. The rights live only through this single mutation.
     public func revokePhone(_ selection: PairedPhoneSelection) async throws -> PhoneRevocationStatus {
-        guard managesPhones, state == .open, !authorizingRevocation else { throw AuthorityPairingChannelError.closed }
+        guard managesPhones, state == .open, !authorizingPhoneMutation else { throw AuthorityPairingChannelError.closed }
         try requireScope(selection)
-        authorizingRevocation = true
-        let administrator = NativePairingAdministrator()
-        defer { authorizingRevocation = false }
-        do {
-            let authorization = try await administrator.authorization()
-            let status = try await revokePhone(selection, authorization: authorization)
-            await administrator.close()
-            return status
-        } catch {
-            await administrator.close()
-            throw error
+        return try await withPhoneAdministrator { channel, authorization in
+            try await channel.revokePhone(selection, authorization: authorization)
         }
     }
 
@@ -198,6 +189,40 @@ public actor AuthorityPairingChannel {
         try requireScope(selection)
         try await requirePhoneManagement()
         return try decodeStatus(bytes(await perform(.managePhone(.status, selection.encode(), Data()))))
+    }
+
+    func expiredRePairs() async throws -> [ExpiredRePairRecord] {
+        try await requirePhoneManagement()
+        return try ExpiredRePairSnapshot.decode(bytes(await perform(.managePhone(.listExpiredRePairs, Data(), Data()))),
+            macID: macID, accountID: accountID).records
+    }
+
+    func discardExpiredRePair(_ record: ExpiredRePairRecord) async throws {
+        guard record.macID == macID, record.accountID == accountID else { throw AuthorityPairingChannelError.wrongAccount }
+        try await requirePhoneManagement()
+        try await withPhoneAdministrator { channel, authorization in
+            let reply = try channel.bytes(await channel.perform(.managePhone(.discardExpiredRePair, record.selection, authorization)))
+            guard reply == Data([1]) else { channel.close(); throw AuthorityPairingChannelError.invalidMessage }
+        }
+    }
+
+    private func withPhoneAdministrator<Value>(
+        _ operation: (isolated AuthorityPairingChannel, Data) async throws -> Value
+    ) async throws -> Value {
+        guard state == .open, !authorizingPhoneMutation else { throw AuthorityPairingChannelError.closed }
+        authorizingPhoneMutation = true
+        defer { authorizingPhoneMutation = false }
+        let administrator = NativePairingAdministrator()
+        do {
+            let authorization = try await administrator.authorization()
+            try Task.checkCancellation()
+            let value = try await operation(self, authorization)
+            await administrator.close()
+            return value
+        } catch {
+            await administrator.close()
+            throw error
+        }
     }
 
     private func requirePhoneManagement() async throws {
