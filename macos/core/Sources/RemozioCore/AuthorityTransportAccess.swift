@@ -99,6 +99,13 @@ final class AuthorityTransportAccess: Sendable {
         })
     }
 
+    func pairingLookup(_ query: PairingRecoveryQuery, signingInput: Data, proof: Data,
+                       handler: AuthorityPairingLookupProvider) throws -> PairingRecoveryFrame {
+        try journal.withValidatedRequests(validate: { try self.requireCurrent($0) }) { owner in
+            try handler(owner, query, signingInput, proof, { try self.requireCurrent($0) })
+        }
+    }
+
     func phonePushRegistration(binding: AuthorityPeerBinding, frame: PhonePushRegistrationFrame,
                                handler: AuthorityPhonePushRegistrationProvider) throws -> PhonePushRegistrationFrame {
         try journal.withValidatedRequests(validate: { transaction in

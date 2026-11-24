@@ -27,6 +27,7 @@ public actor AuthorityTrustFeed {
     private var auditAdvertised = false
     private var emptyTrustSnapshot = false
     private var recoveryLink: (id: UUID, channel: AuthorityXPCChannel)?
+    private var pairingLookups: [UUID: AuthorityXPCChannel] = [:]
     private var registrationLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var timer: Task<Void, Never>?
     private var retiredTimer: Task<Void, Never>?
@@ -60,6 +61,7 @@ public actor AuthorityTrustFeed {
     }
     deinit {
         lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort(); recoveryLink?.channel.abort(); auditLink?.channel.abort(); routingLink?.channel.abort(); updateSchedulingLink?.channel.abort()
+        for value in pairingLookups.values { value.abort() }
         let host = host, lease = lease
         Task { await host?.authorityDisconnected(lease) }
     }
@@ -179,6 +181,34 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedRequestExchange
         } catch { await close(); throw error }
     }
+    /// Each network exchange owns a separate Root connection and one challenge.
+    func withPairingLookup<Value: Sendable>(
+        _ body: @Sendable (AuthorityXPCChannel) async throws -> Value
+    ) async throws -> Value {
+        try requirePairingLookupAuthority()
+        let id = UUID()
+        let link = try factory({})
+        pairingLookups[id] = link
+        inFlightOperations += 1
+        defer { pairingLookups[id] = nil; finishOperation() }
+        do {
+            try await link.start()
+            try await link.requirePairingLookupSupport()
+            try requirePairingLookupAuthority()
+            let value = try await body(link)
+            try requirePairingLookupAuthority()
+            await link.close()
+            return value
+        } catch {
+            await link.close()
+            throw error
+        }
+    }
+
+    func requirePairingLookupAuthority() throws {
+        _ = try activeChannel()
+    }
+
     /// Receipt recovery shares the same ordered authority connection and current trust revision.
     public func pairingReceipt(_ peer: DirectApprovalPeer, revision: UUID, setupID: Data) async throws -> Data? {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID, setupID.count == 16 else {
@@ -440,6 +470,7 @@ public actor AuthorityTrustFeed {
             if let id = auditLink?.id { retireAuditLink(id) }
             if let id = routingLink?.id { retireRoutingLink(id) }
             if let id = updateSchedulingLink?.id { retireUpdateSchedulingLink(id) }
+            for link in pairingLookups.values { link.abort() }
             let pending = waiters; waiters.removeAll()
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
         }

@@ -390,6 +390,60 @@ public final class ApprovalRequestCoordinator {
             verifyHost: { tx in try verifyHost(tx); try tx.requireDirectApprovalBinding(binding) }, sign: sign)
     }
 
+    /// Returns only proof for the exact authenticated attempt in the verified journal.
+    func recoverPairing(_ query: PairingRecoveryQuery, signingInput: Data, proof: Data,
+                        authorityPublicKey: Data, now: () throws -> AuthorityMoment,
+                        verifyHost: (JournalTransaction) throws -> Void,
+                        sign: (Data) throws -> Data) throws -> PairingRecoveryFrame {
+        guard query.scope.macID == mac, query.scope.accountID == account else { return .refused }
+        struct Evidence {
+            let transcript: PairingTranscript
+            let expiryReason: PairingExpiryReason?
+        }
+        func retained(_ tx: JournalTransaction) throws -> Evidence? {
+            try verifyHost(tx)
+            let transcript: PairingTranscript
+            let expiryReason: PairingExpiryReason?
+            if let committed = try tx.committedPairing(setupID: query.setupID,
+                    authenticatedPhoneID: query.scope.phoneID,
+                    authenticatedEnrollmentEpoch: query.scope.enrollmentEpoch) {
+                transcript = committed
+                expiryReason = nil
+            } else {
+                guard let stage = try tx.recoveryStage(setupID: query.setupID),
+                      let reason = stage.state.expiryReason else { return nil }
+                transcript = stage.transcript
+                expiryReason = reason
+            }
+            guard transcript.phone.scope == query.scope, transcript.macAuthorityKey == authorityPublicKey,
+                  try transcript.digest() == query.transcriptDigest else { return nil }
+            return Evidence(transcript: transcript, expiryReason: expiryReason)
+        }
+
+        try checkClock(now())
+        guard let evidence = try read(retained),
+              let key = try? P256.Signing.PublicKey(x963Representation: evidence.transcript.transportKey.publicKey),
+              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: proof),
+              key.isValidSignature(signature, for: signingInput) else { return .refused }
+        let result: PairingRecoveryFrame
+        if let reason = evidence.expiryReason {
+            let input = try PairingExpiryReceipt.signingInput(transcript: evidence.transcript, reason: reason)
+            let receipt = try PairingExpiryReceipt(transcript: evidence.transcript, reason: reason, signature: sign(input))
+            guard try receipt.verify(transcript: evidence.transcript) else { return .refused }
+            result = .expired(receipt)
+        } else {
+            let signature = try sign(evidence.transcript.signingInput(purpose: .macCommit))
+            guard try evidence.transcript.verify(signature: signature, publicKey: authorityPublicKey,
+                    purpose: .macCommit) else { return .refused }
+            result = .committed(signature: signature)
+        }
+
+        try checkClock(now())
+        guard let current = try read(retained), current.expiryReason == evidence.expiryReason,
+              try current.transcript.encode() == evidence.transcript.encode() else { return .refused }
+        return result
+    }
+
     private func retainedPairingReceipt(setupID: Data, phoneID: Data, epoch: Data, authorityPublicKey: Data,
                                        verifyHost: (JournalTransaction) throws -> Void, sign: (Data) throws -> Data) throws -> Data? {
         func retained(_ tx: JournalTransaction) throws -> PairingTranscript? {

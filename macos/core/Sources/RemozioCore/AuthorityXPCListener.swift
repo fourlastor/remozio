@@ -100,6 +100,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
     private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+    private let pairingLookupHandler: AuthorityPairingLookupHandler?
     private let receipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let routingExchange: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)?
     private let updateSchedulingExchange: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)?
@@ -120,6 +121,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                 pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
                 exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
                 pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
+                pairingLookup: AuthorityPairingLookupHandler? = nil,
                 phonePushRegistration: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)? = nil,
                 phonePushRecovery: (@Sendable (AuthorityPeerBinding, PhonePushRecoveryFrame) throws -> PhonePushRecoveryFrame)? = nil,
                 phoneAudit: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)? = nil,
@@ -135,6 +137,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         self.activityJournal = activityJournal
         policy = peerPolicy; self.macID = macID; self.accountID = accountID
         self.verifyHandshakePolicy = verifyHandshakePolicy; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
+        self.pairingLookupHandler = pairingLookup
         self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting; self.updateSchedulingExchange = phoneUpdateScheduling
         super.init()
         policy.configure(listener)
@@ -150,6 +153,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                             pendingRequestIDs: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding) throws -> [Data])? = nil,
                             exchangeRequest: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
                             pairingReceipt: AuthorityPairingReceiptProvider? = nil,
+                            pairingLookup: AuthorityPairingLookupProvider? = nil,
                             phonePushRegistration: AuthorityPhonePushRegistrationProvider? = nil,
                             phonePushRecovery: AuthorityPhonePushRecoveryProvider? = nil,
                             phoneAudit: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneAuditFrame,
@@ -180,6 +184,12 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         if let pairingReceipt {
             receiptHandler = { binding, setupID in try access.pairingReceipt(binding: binding, setupID: setupID, handler: pairingReceipt) }
         } else { receiptHandler = nil }
+        let pairingLookupHandler: AuthorityPairingLookupHandler?
+        if let pairingLookup {
+            pairingLookupHandler = { query, input, proof in
+                try access.pairingLookup(query, signingInput: input, proof: proof, handler: pairingLookup)
+            }
+        } else { pairingLookupHandler = nil }
         let registrationHandler: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)?
         if let phonePushRegistration {
             registrationHandler = { binding, frame in try access.phonePushRegistration(binding: binding, frame: frame, handler: phonePushRegistration) }
@@ -210,7 +220,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             maximumOperations: maximumOperations, activityJournal: journal, verifyHandshakePolicy: { try access.verifyCurrent() },
             snapshot: { try access.snapshot() }, validate: { try access.validate($0) },
             requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler,
-            pairingReceipt: receiptHandler, phonePushRegistration: registrationHandler, phonePushRecovery: recoveryHandler, phoneAudit: auditHandler, phoneRouting: routingHandler, phoneUpdateScheduling: updateSchedulingHandler, wakeHints: wakeHints)
+            pairingReceipt: receiptHandler, pairingLookup: pairingLookupHandler, phonePushRegistration: registrationHandler, phonePushRecovery: recoveryHandler, phoneAudit: auditHandler, phoneRouting: routingHandler, phoneUpdateScheduling: updateSchedulingHandler, wakeHints: wakeHints)
     }
     deinit { listener.invalidate(); registry.close() }
     public func start() throws {
@@ -230,7 +240,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                 let endpoint = try AuthorityXPCEndpoint(connection: connection, peerPolicy: policy, macID: macID, accountID: accountID,
                     budget: budget, activityJournal: activityJournal, verifyHandshakePolicy: verifyHandshakePolicy, onHandshake: { [weak registry] in registry?.handshake(id) },
                     onClose: { [weak registry] in registry?.remove(id) }, snapshot: snapshot, validate: validate, requestFrame: frame,
-                    pendingRequestIDs: pendingRequests, exchangeRequest: exchange, pairingReceipt: receipt, phonePushRegistration: pushRegistration, phonePushRecovery: pushRecovery, phoneAudit: auditExchange, phoneRouting: routingExchange, phoneUpdateScheduling: updateSchedulingExchange, wakeHints: wakeHints)
+                    pendingRequestIDs: pendingRequests, exchangeRequest: exchange, pairingReceipt: receipt, pairingLookup: pairingLookupHandler, phonePushRegistration: pushRegistration, phonePushRecovery: pushRecovery, phoneAudit: auditExchange, phoneRouting: routingExchange, phoneUpdateScheduling: updateSchedulingExchange, wakeHints: wakeHints)
                 let owner = NativeAuthorityConnection(connection: connection, endpoint: endpoint)
                 guard registry.install(owner, id: id) else { return false }
                 return true

@@ -77,7 +77,7 @@ These checks do not establish Root installation, hardware custody, Pixel UI beha
 
 ## Signed expiry payload for re-pair
 
-This payload is for the separate recovery path in #901. The version 1 enrolled lookup above does not accept it. The codecs define and verify the payload. The recovery listener, Root producer, and phone retirement are separate changes.
+This payload is for the separate recovery path in #901. The version 1 enrolled lookup above does not accept it. The codecs define and verify the payload. The recovery listener and Root producer use the lookup below. Phone retirement is a separate change.
 
 The signed input is a canonical CBOR map with these fields.
 
@@ -96,3 +96,37 @@ The signed input is a canonical CBOR map with these fields.
 The outer map is limited to 1 KiB and contains the canonical input as bytes at key 0 and a raw 64-byte P-256 signature at key 1. Reject unknown fields and noncanonical inputs. Like other Root signatures, this format accepts both high-S and low-S signatures. A claim can have multiple valid receipt byte sequences. Use the setup ID and transcript digest to identify the attempt. Both reason values attest that the exact attempt can no longer commit. The retired-incarnation reason does not assert that the wall deadline passed.
 
 Verify all claims against the retained re-pair transcript. Verify the signature with its pinned Root authority key and the dedicated signing input. An ordinary pairing transcript is ineligible. Swift and Kotlin share the signed, malformed, and signature or binding rejection cases in `vectors/pairing-expiry-receipt-v1.json`.
+
+## Recovery lookup for a phone without an active enrollment
+
+The Mac offers the separate ALPN `remozio-pairing-recovery/1` on the existing Transport listener.
+Both direct and relay connections use TLS 1.3 with resumption, tickets, and early data disabled.
+The phone pins the Mac transport key from its retained transcript. Transport checks the candidate certificate and confines the connection to recovery.
+Recovery has its own admission limit within the existing listener limit.
+An older Transport or Root can leave the route unavailable. Enrolled receipt lookup keeps its version 1 binding and selectors.
+
+Each message has a four-byte unsigned big-endian length followed by a tag byte and the fields below.
+The total message length after the prefix is at most 1,025 bytes.
+
+| Tag | Direction | Body |
+| --- | --- | --- |
+| 0 | Phone to Mac | 16-byte setup ID, 32-byte transcript digest, and four 16-byte IDs in scope order |
+| 1 | Mac to phone | 32-byte random challenge |
+| 2 | Phone to Mac | 64-byte raw P-256 proof |
+| 3 | Mac to phone | Empty refusal |
+| 4 | Mac to phone | 64-byte raw `MAC_COMMIT` signature |
+| 5 | Mac to phone | Signed expiry receipt encoded as above |
+
+The scope order is Mac ID, account ID, phone ID, and candidate epoch.
+The proof signs the UTF-8 string `dev.remozio.pairing.recovery-lookup/1`, one zero byte, a 32-byte TLS exporter, the challenge, and the lookup body.
+Use the exporter label `EXPORTER-dev.remozio.pairing.recovery-lookup/1` with empty context.
+Root issues one challenge for each well-formed lookup. It consumes that challenge once and binds it to the handshake deadline.
+Root verifies the Transport caller and its current code policy before reading the verified journal.
+It matches the exact transcript and verifies the proof under its retained candidate transport key.
+Root rechecks the record, the caller policy, and the active lease before returning a signed result.
+
+Root returns `MAC_COMMIT` only for the exact eligible committed enrollment.
+It returns expiry proof only after maintenance or startup publishes a durable terminal state.
+A pending stage stays inconclusive after its deadline. Absence and failed proof use the same refusal.
+The listener closes after one response. The lookup changes neither journal records nor the enrollment.
+The phone keeps its preparation and keys on refusal and verifies any proof against the retained transcript.

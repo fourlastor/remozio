@@ -47,17 +47,20 @@ public struct DirectApprovalPeer: Sendable {
 struct DirectPeerSnapshot: Sendable {
     let macID: Data
     private let peers: [Data: DirectApprovalPeer]
-    init(_ values: [DirectApprovalPeer]) throws {
-        guard let first = values.first, values.count <= 1024 else { throw DirectListenerError.invalidConfiguration }
+    init(_ values: [DirectApprovalPeer], recoveryMacID: Data? = nil) throws {
+        let scope = values.first?.scope
+        guard let macID = scope?.macID ?? recoveryMacID, macID.count == 16, values.count <= 1024 else {
+            throw DirectListenerError.invalidConfiguration
+        }
         var peers: [Data: DirectApprovalPeer] = [:]
         var phones = Set<Data>()
         for peer in values {
-            guard peer.scope.macID == first.scope.macID, peer.scope.accountID == first.scope.accountID,
+            guard peer.scope.macID == macID, peer.scope.accountID == scope?.accountID,
                   phones.insert(peer.scope.phoneID).inserted else { throw DirectListenerError.invalidConfiguration }
             let point = try P256.Signing.PublicKey(derRepresentation: peer.transportPublicKey).x963Representation
             guard peers.updateValue(peer, forKey: point) == nil else { throw DirectListenerError.invalidConfiguration }
         }
-        macID = first.scope.macID; self.peers = peers
+        self.macID = macID; self.peers = peers
     }
     var serviceName: String { "Remozio-" + LowercaseHexadecimal.encode(macID) }
 
@@ -98,6 +101,7 @@ struct DirectPeerSnapshot: Sendable {
 /// The handler must recheck current enrollment and request authority; TLS grants neither approval nor execution.
 public final class DirectApprovalListener: @unchecked Sendable {
     public enum Binding: Sendable { case localNetwork, loopback }
+    typealias RecoveryHandler = @Sendable (NetworkByteChannel, Data, UInt64, ContinuousClock.Instant) async throws -> Void
     private final class Slot: @unchecked Sendable {
         let channel: NetworkByteChannel
         let work: OwnedTaskHandoff
@@ -119,6 +123,8 @@ public final class DirectApprovalListener: @unchecked Sendable {
     private let peers: DirectPeerSnapshot
     private let maximumConnections: Int
     private let connectionBudget: AuthorityXPCWorkBudget
+    private let recoveryBudget: AuthorityXPCWorkBudget?
+    private let recovery: RecoveryHandler?
     private let timeoutMilliseconds: UInt64
     private let handler: @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void
     private let event: @Sendable (DirectListenerEvent) -> Void
@@ -147,12 +153,17 @@ public final class DirectApprovalListener: @unchecked Sendable {
          maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15000, enablePhoneRouting: Bool = false, enablePhoneAudit: Bool = false, enablePhoneUpdateScheduling: Bool = false,
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void,
-         sharedWorkBudget: AuthorityXPCWorkBudget) throws {
+         sharedWorkBudget: AuthorityXPCWorkBudget, recoveryMacID: Data? = nil,
+         sharedRecoveryBudget: AuthorityXPCWorkBudget? = nil, recovery: RecoveryHandler? = nil) throws {
         connectionBudget = sharedWorkBudget
         guard (1...64).contains(maximumConnections), (1...60_000).contains(timeoutMilliseconds) else {
             throw DirectListenerError.invalidConfiguration
         }
-        let snapshot = try DirectPeerSnapshot(peers)
+        self.recovery = recovery
+        recoveryBudget = try recovery.map { _ in
+            try sharedRecoveryBudget ?? AuthorityXPCWorkBudget(maximum: min(2, maximumConnections))
+        }
+        let snapshot = try DirectPeerSnapshot(peers, recoveryMacID: recoveryMacID)
         self.peers = snapshot; self.maximumConnections = maximumConnections
         self.timeoutMilliseconds = timeoutMilliseconds; self.handler = handler; self.event = event
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
@@ -167,8 +178,16 @@ public final class DirectApprovalListener: @unchecked Sendable {
                                      enablePhoneUpdateScheduling: enablePhoneUpdateScheduling) {
             sec_protocol_options_add_tls_application_protocol(options, purpose.applicationProtocol)
         }
+        if recovery != nil {
+            sec_protocol_options_add_tls_application_protocol(options, PairingRecoveryFrame.applicationProtocol)
+        }
+        let recoveryEnabled = recovery != nil
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
-            complete(snapshot.peer(metadata: metadata) != nil)
+            if recoveryEnabled && PairingRecoveryTLS.isRecovery(metadata) {
+                complete(PairingSetupListener.candidatePoint(metadata: metadata) != nil)
+            } else {
+                complete(snapshot.peer(metadata: metadata) != nil)
+            }
         }, queue)
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
         if binding == .loopback { parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any) }
@@ -224,10 +243,17 @@ public final class DirectApprovalListener: @unchecked Sendable {
     }
     private func accept(_ connection: NWConnection) {
         let snapshot = peers
+        let recovery = recovery, recoveryBudget = recoveryBudget
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(timeoutMilliseconds)))
+        let uptimeDeadline = DispatchTime.now().uptimeNanoseconds + timeoutMilliseconds * 1_000_000
         let id = UUID()
         let owned = lock.withLock { () -> Slot? in
             guard started, !closed, slots.count < maximumConnections, connectionBudget.acquire() else { return nil }
-            let slot = Slot(NetworkByteChannel(connection: connection) { snapshot.peer(connection: $0) != nil }, budget: connectionBudget)
+            let channel = NetworkByteChannel(connection: connection) { connection in
+                if recovery != nil, PairingRecoveryTLS.metadata(connection) != nil { return true }
+                return snapshot.peer(connection: connection) != nil
+            }
+            let slot = Slot(channel, budget: connectionBudget)
             slots[id] = slot; return slot
         }
         guard let slot = owned else { connection.cancel(); return }
@@ -237,6 +263,14 @@ public final class DirectApprovalListener: @unchecked Sendable {
             do {
                 try await channel.start(timeoutMilliseconds: timeout)
                 try Task.checkCancellation()
+                if let recovery, let metadata = PairingRecoveryTLS.metadata(connection) {
+                    guard let recoveryBudget, recoveryBudget.acquire() else { throw DirectListenerError.invalidConfiguration }
+                    defer { recoveryBudget.release() }
+                    let exporter = try PairingRecoveryTLS.exporter(metadata)
+                    try await recovery(channel, exporter, uptimeDeadline, deadline)
+                    await channel.close()
+                    return
+                }
                 guard let peer = snapshot.peer(connection: connection), let purpose = snapshot.purpose(connection: connection) else {
                     throw DirectListenerError.invalidIdentity
                 }

@@ -190,6 +190,7 @@ public final class AuthorityService: @unchecked Sendable {
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
                 exchangeRequest: exchangeHandler, pairingReceipt: requestProviders?.pairingReceipt,
+                pairingLookup: requestProviders?.pairingLookupProvider(clock: self.requestClock),
                 phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: auditHandler, phoneRouting: routingHandler,
                 phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
