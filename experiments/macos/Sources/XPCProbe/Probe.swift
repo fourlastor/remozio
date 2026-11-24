@@ -173,6 +173,8 @@ final class ProbeService: NSObject, ProbeProtocol {
         fflush(stdout)
         reply(binding)
     }
+    func pairingLookupVersion(reply: @escaping @Sendable (UInt64, UInt64) -> Void) { reply(0, 0) }
+    func pairingLookup(_ request: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func pairingReceiptVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
     func pairingReceipt(_ binding: Data, setupID: Data, reply: @escaping @Sendable (Data?) -> Void) {
         print("RECEIPT_RECEIVED \(String(decoding: setupID, as: UTF8.self))")
