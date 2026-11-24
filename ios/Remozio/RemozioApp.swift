@@ -7,6 +7,13 @@ struct RemozioApp: App {
         WindowGroup {
             // Compose draws under the status bar and home indicator and pads its own content by those insets.
             SharedRoot().ignoresSafeArea()
+                #if DEBUG
+                .overlay(alignment: .topTrailing) {
+                    if let endpoint = PairingPreviewEntry.endpoint(ProcessInfo.processInfo.environment["REMOZIO_PAIRING_PREVIEW_ENDPOINT"]) {
+                        PairingPreviewEntry(endpoint: endpoint)
+                    }
+                }
+                #endif
         }
     }
 }

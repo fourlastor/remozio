@@ -13,6 +13,7 @@
 		5043DC6C40DF1988D99CB9B9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */; };
 		88D740E14B4220542913CDEF /* PairingNetworkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1600D206AE69D1DE39E29212 /* PairingNetworkTests.swift */; };
 		8CF8E03572D3D7F4B28888C6 /* PairingNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CBD09BF426A72F6FEB822C /* PairingNetwork.swift */; };
+		BE84602DD2FF2DE5C1D8B1AE /* PairingPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C77241815487DBA225ED88D /* PairingPreview.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -33,6 +34,7 @@
 		19CBD09BF426A72F6FEB822C /* PairingNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingNetwork.swift; sourceTree = "<group>"; };
 		2202062E01A74FF9DF950CD2 /* RemozioTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = RemozioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemozioApp.swift; sourceTree = "<group>"; };
+		7C77241815487DBA225ED88D /* PairingPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingPreview.swift; sourceTree = "<group>"; };
 		9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -63,6 +65,7 @@
 				11D517B1E34851969CE37AB7 /* Info.plist */,
 				0C2B9B3D2383749B5182B9BB /* NativePhoneServices.swift */,
 				19CBD09BF426A72F6FEB822C /* PairingNetwork.swift */,
+				7C77241815487DBA225ED88D /* PairingPreview.swift */,
 				5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */,
 			);
 			path = Remozio;
@@ -216,6 +219,7 @@
 			files = (
 				26E93B227B5F808579A594F0 /* NativePhoneServices.swift in Sources */,
 				8CF8E03572D3D7F4B28888C6 /* PairingNetwork.swift in Sources */,
+				BE84602DD2FF2DE5C1D8B1AE /* PairingPreview.swift in Sources */,
 				2D80731155D29E8D4ECD3541 /* RemozioApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

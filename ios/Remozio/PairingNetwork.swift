@@ -190,6 +190,10 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     private var open = false
     private var peerEnded = false
     private var receiving = false
+    #if DEBUG
+    private let exporterLock = NSLock()
+    private var invitationExporter: Data?
+    #endif
 
     init(target: Target, pin: Data, applicationProtocol: String, identity: @escaping () throws -> SecIdentity) {
         self.target = target
@@ -341,10 +345,25 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
         }
         let security = metadata.securityProtocolMetadata
         guard sec_protocol_metadata_get_negotiated_tls_protocol_version(security) == .TLSv13,
-              let negotiated = sec_protocol_metadata_get_negotiated_protocol(security),
-              String(cString: negotiated) == applicationProtocol else {
+              let negotiated = sec_protocol_metadata_copy_negotiated_protocol(security) else {
             return finish("wrong TLS version or protocol")
         }
+        defer { free(UnsafeMutableRawPointer(mutating: negotiated)) }
+        guard String(cString: negotiated) == applicationProtocol else {
+            return finish("wrong TLS version or protocol")
+        }
+        #if DEBUG
+        if applicationProtocol == IosPairingV2Preview.shared.applicationProtocol {
+            let label = IosPairingV2Preview.shared.exporterLabel
+            guard !sec_protocol_metadata_get_early_data_accepted(security),
+                  let secret = sec_protocol_metadata_create_secret(security, label.utf8.count, label, 32) else {
+                return finish("pairing exporter unavailable")
+            }
+            let bytes = DispatchData._unconditionallyBridgeFromObjectiveC(secret)
+            guard bytes.count == 32 else { return finish("invalid pairing exporter length") }
+            exporterLock.withLock { invitationExporter = Data(bytes) }
+        }
+        #endif
         open = true
         events?.opened()
     }
@@ -354,6 +373,12 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
         finished = true
         browser?.cancel(); browser = nil
         connection?.cancel(); connection = nil
+        #if DEBUG
+        exporterLock.withLock {
+            invitationExporter?.resetBytes(in: 0..<32)
+            invitationExporter = nil
+        }
+        #endif
         clientIdentity = nil
         let observer = events
         events = nil
@@ -375,3 +400,16 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
         return spkiPrefix + point == pin
     }
 }
+
+#if DEBUG
+extension NetworkPairingTransport: IosPairingV2Transport {
+    func takeInvitationExporter() -> KotlinByteArray? {
+        exporterLock.withLock {
+            guard var bytes = invitationExporter else { return nil }
+            invitationExporter = nil
+            defer { bytes.resetBytes(in: 0..<bytes.count) }
+            return PairingBytesKt.pairingBytes(data: bytes)
+        }
+    }
+}
+#endif
