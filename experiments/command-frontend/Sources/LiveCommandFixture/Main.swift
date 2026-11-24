@@ -14,6 +14,12 @@ private enum Failure: Error { case assertion(String) }
 private func require(_ condition: Bool, _ message: String) throws {
     if !condition { throw Failure.assertion(message) }
 }
+private func traceStale(_ mode: String, _ phase: @autoclosure () -> String) {
+    guard mode == "stale", getenv("REMOZIO_CI_STALE_TRACE") != nil else { return }
+    let uptime = DispatchTime.now().uptimeNanoseconds / 1_000_000
+    FileHandle.standardError.write(Data("STALE_TRACE uptimeMilliseconds=\(uptime) \(phase())\n".utf8))
+}
+
 private let mac = Data(repeating: 1, count: 16)
 private let account = Data(repeating: 2, count: 16)
 private func targetArguments(mode: String, target: String, marker: String) -> [String] {
@@ -71,9 +77,16 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
     var supportsCurrentJobQueries: Bool { session.supportsCurrentJobQueries }
     func requestCurrentJob(timeoutMilliseconds: UInt32) throws -> Bool {
         let sent = try session.requestCurrentJob(timeoutMilliseconds: timeoutMilliseconds)
-        if sent { queryCount += 1 }; return sent
+        if sent {
+            queryCount += 1
+            traceStale(mode, "frontend current-job sent count=\(queryCount)")
+        }
+        return sent
     }
-    func invalidateCurrentJobQuery() { session.invalidateCurrentJobQuery() }
+    func invalidateCurrentJobQuery() {
+        traceStale(mode, "frontend current-job invalidated")
+        session.invalidateCurrentJobQuery()
+    }
     func pollStreamEvent(timeoutMilliseconds: UInt32, nonblocking: Bool) throws -> CommandExecutionStreamEvent? {
         let previousPhase = nestedPhase
         defer {
@@ -83,18 +96,37 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
         }
         if historicalStop == nil && !buffered.isEmpty { return buffered.removeFirst() }
         let event = try session.pollStreamEvent(timeoutMilliseconds: timeoutMilliseconds, nonblocking: nonblocking)
+        if mode == "stale" {
+            switch event {
+            case .opened?: traceStale(mode, "frontend opened")
+            case .outputEnded?: traceStale(mode, "frontend output ended")
+            case .terminal?: traceStale(mode, "frontend verified terminal")
+            case .jobState(let observation)?:
+                if case .continued = observation.state { traceStale(mode, "frontend continued observation") }
+            case .currentJob(let observation)?:
+                switch observation.state {
+                case .unknown: traceStale(mode, "frontend current-job unknown")
+                case .stopped: traceStale(mode, "frontend current-job stopped")
+                case .running: traceStale(mode, "frontend current-job running")
+                }
+            default: break
+            }
+        }
         if case .jobState(let observation)? = event, case .stopped = observation.state { originalStopEvents += 1 }
         if mode == "stale", case .jobState(let observation)? = event, case .stopped = observation.state,
            historicalStop == nil && continuations == 0 {
             historicalStop = event
+            traceStale(mode, "frontend historical stop received")
             try require(session.forwardSignal(UInt32(SIGCONT)), "overtaking actual continuation")
             continuations += 1
+            traceStale(mode, "frontend SIGCONT sent")
             return nil
         }
         if case .currentJob(let observation)? = event, case .stopped = observation.state { stoppedQueries += 1 }
         if mode == "stale", case .currentJob(let observation)? = event, case .running = observation.state {
             runningQueries += 1
             try require(session.forwardInput(Data("FINISH\n".utf8)) == 7, "finish actual stale target")
+            traceStale(mode, "frontend FINISH sent")
         }
         if mode == "nested", case .currentJob(let observation)? = event {
             if nestedPhase == 2, case .unknown = observation.state {
@@ -110,6 +142,7 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
             if output.count > 4096 { output.removeFirst(output.count - 4096) }
             if !reportedResume && output.range(of: Data("TARGET_RESUMED".utf8)) != nil {
                 reportedResume = true
+                traceStale(mode, "frontend target resume output observed")
             }
             if mode == "nested" {
                 if nestedPhase == 0 && output.range(of: Data("READY_MARKER".utf8)) != nil {
@@ -132,6 +165,7 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
             try require(buffered.count <= 128, "bounded delayed frames")
             if reportedResume {
                 self.historicalStop = nil
+                traceStale(mode, "frontend historical stop released")
                 return historicalStop
             }
             return nil
@@ -182,6 +216,7 @@ private struct Probe {
     }
 
     private static func frontend(mode: String, target: String, marker: String, nestedTarget: String) throws -> CommandFrontendExit {
+        traceStale(mode, "frontend started")
         var failedCleanup = false
         let runtime = CommandFrontendRuntime(reportCleanupFailure: { _ in failedCleanup = true })
         defer { try? runtime.close() }
@@ -213,6 +248,7 @@ private struct Probe {
             userID: geteuid(), auditSessionID: nil, macID: mac, accountID: account, submissionLimits: limits,
             configuration: configuration, currentJobQueries: true)
         guard case .admitted(let session) = response else { throw Failure.assertion("admission") }
+        traceStale(mode, "frontend admission verified")
         defer { session.close() }
         let observed = ObservedChannel(session, report: report, mode: mode, keyboard: master, nestedTarget: nestedTarget, marker: marker)
         let relay = try CommandFrontendRelay(channel: observed, terminal: terminal)
@@ -221,7 +257,9 @@ private struct Probe {
         let settings = try CommandFrontendCallerSettings(preferences: [:], defaultIOMode: .pty,
             defaultDisconnectBehavior: .terminate, defaultReadiness: configuration)
         let result = try CommandFrontendMain.runLoop(relay: relay, runtime: runtime, settings: settings)
+        traceStale(mode, "frontend loop returned")
         try relay.close(); try runtime.close()
+        traceStale(mode, "frontend cleanup returned")
         let checked: Bool
         if mode == "nested" {
             checked = observed.nestedPhase == 7 && observed.nestedUnknownQueries == 1 && observed.runningQueries == 1 &&
@@ -309,6 +347,7 @@ private struct Probe {
         defer { arguments.forEach { free($0) } }
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { $0 } + [nil]
         try require(remozio_fixture_spawn_supervisor(supervisor, &argv, port, marker, &supervisorPID, &output) == 0, "spawn owned supervisor")
+        traceStale(mode, "authority supervisor spawned")
         defer { _ = Darwin.close(output) }
         var reaped = false, status: Int32 = 0, report = Data(), admitted = 0, requestID: Data?
         var failure: Error?
@@ -331,6 +370,7 @@ private struct Probe {
                         let request = try journal.admitCommand(command, draft: draft, expression: expression, userID: geteuid(),
                             auditSessionID: nil, now: { try clock.now() }, receiptTimeMs: nil)
                         admitted += 1; requestID = request.requestID
+                        traceStale(mode, "authority admission \(admitted)")
                         let body = try DecisionPayload(macID: mac, accountID: account, requestID: request.requestID,
                             requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
                             phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: 6, count: 16),
@@ -340,6 +380,7 @@ private struct Probe {
                         _ = try journal.withRequests { try $0.consume(canonicalDecision: body, signature: signature,
                             authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
                             now: clock.now(), receiptTimeMs: nil) }
+                        traceStale(mode, "authority decision consumed")
                         try journal.beginCommandExecution(requestID: request.requestID, monitorPath: monitor, childPath: child,
                             preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: { capture in
                                 try require(capture.target.uid == geteuid() && capture.target.gid == getgid() &&
@@ -353,11 +394,15 @@ private struct Probe {
                                 return CommandExecutionRuntime(child: entry, childRevision: token, monitor: entry, monitorRevision: token,
                                     frontendRevision: token, callerExpression: expression, userID: capture.requester.effectiveUID, sessionID: nil)
                             }, launcher: { _ in { } })
+                        traceStale(mode, "authority execution launched")
                     }
                 }
                 if !reaped {
                     let found = waitpid(supervisorPID, &status, WNOHANG)
-                    if found == supervisorPID { reaped = true }
+                    if found == supervisorPID {
+                        reaped = true
+                        traceStale(mode, "authority supervisor reaped status=\(status)")
+                    }
                     else if found < 0 && errno != EINTR {
                         if errno == ECHILD { reaped = true }
                         throw Failure.assertion("supervisor wait")

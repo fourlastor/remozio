@@ -1,4 +1,7 @@
+from contextlib import redirect_stderr
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import select
@@ -7,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run-macos-live-frontend.py"
@@ -64,6 +67,60 @@ class TimeoutCleanupTests(unittest.TestCase):
                     child.wait(timeout=10)
                 child.stdout.close()
                 child.stderr.close()
+
+
+class StaleTraceTests(unittest.TestCase):
+    evidence = {
+        "nativeSupervisorStatus": 13 << 8,
+        "oneOriginalAdmission": True,
+        "separateAuthorityAndFrontend": True,
+        "actualMonitorAndTargetReaped": True,
+        "durableVerifiedOutcome": True,
+        "frontend": {
+            "frontendCleanupCompleted": True,
+            "freshStoppedQueries": 0,
+            "freshRunningQueries": 1,
+            "originalContinuations": 1,
+        },
+    }
+
+    def invoke(self, output, *, actions, returncode=0):
+        process = Mock(returncode=returncode)
+        process.poll.return_value = returncode
+        process.communicate.return_value = output, b"STALE_TRACE frontend started\nother fixture log\n"
+        helpers = {name: Path("/unused") for name in ["supervisor", "monitor", "child", "target"]}
+        stderr = io.StringIO()
+        failure = None
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": actions}), redirect_stderr(stderr), \
+                patch.object(RUNNER.subprocess, "Popen", return_value=process) as popen:
+            try:
+                RUNNER.invoke(Path("/unused"), helpers, "stale")
+            except (ValueError, RuntimeError) as error:
+                failure = error
+        return popen.call_args.kwargs["env"], stderr.getvalue(), failure
+
+    def test_ci_success_keeps_trace_quiet(self):
+        env, trace, failure = self.invoke(json.dumps(self.evidence).encode(), actions="true")
+        self.assertEqual(env["REMOZIO_CI_STALE_TRACE"], "1")
+        self.assertEqual(trace, "")
+        self.assertIsNone(failure)
+
+    def test_ci_evidence_failure_reports_only_phase_trace(self):
+        env, trace, failure = self.invoke(b"{}", actions="true")
+        self.assertEqual(env["REMOZIO_CI_STALE_TRACE"], "1")
+        self.assertEqual(trace, "STALE_TRACE frontend started\n")
+        self.assertIsInstance(failure, RuntimeError)
+
+    def test_ci_process_failure_includes_trace_in_existing_error(self):
+        _, trace, failure = self.invoke(b"", actions="true", returncode=1)
+        self.assertEqual(trace, "")
+        self.assertIn("STALE_TRACE frontend started", str(failure))
+
+    def test_local_run_keeps_trace_disabled(self):
+        env, trace, failure = self.invoke(b"{}", actions="false")
+        self.assertNotIn("REMOZIO_CI_STALE_TRACE", env)
+        self.assertEqual(trace, "")
+        self.assertIsInstance(failure, RuntimeError)
 
 
 class SourceEvidenceTests(unittest.TestCase):
