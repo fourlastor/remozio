@@ -114,6 +114,7 @@ public final class ApprovalRequestCoordinator {
         var statusRevision: UInt64 = 0
         var retained: RetainedApprovalRequest?
         var command: RetainedCommandCapture?
+        let callerRequest: CommandAdmittedRequest?
         var activity: ReleaseActivityToken?
         let category: AuditCategory
         var byteCount: Int
@@ -548,9 +549,8 @@ public final class ApprovalRequestCoordinator {
             command.close(); throw error
         }
         // Admission is complete. Reply loss must not enter rejection cleanup or close the retained command.
-        if command.admissionProfile?.supportsAdmissionResults == true, let state = entries[payload.requestID]?.state {
-            let identity = CommandAdmittedRequest(requestID: state.requestID, requestDigest: state.requestDigest, challenge: state.challenge)
-            do { try sendAdmissionOutcome(.admitted(identity), command: command, reply: reply) }
+        if command.admissionProfile?.supportsAdmissionResults == true, let callerRequest = entries[payload.requestID]?.callerRequest {
+            do { try sendAdmissionOutcome(.admitted(callerRequest), command: command, reply: reply) }
             catch { /* The client observes uncertainty. The admitted request keeps its normal lifetime. */ }
         }
         return payload
@@ -647,6 +647,9 @@ public final class ApprovalRequestCoordinator {
               expiryNotifications[payload.requestID] == nil else {
             throw ApprovalCoordinatorError.capacityExceeded
         }
+        let callerRequest = try command.map { _ in
+            CommandAdmittedRequest(requestID: payload.requestID, requestToken: try random(32), challenge: payload.challenge)
+        }
         let retained = try RetainedApprovalRequest(payload: payload, phase: .queued, admittedAt: draft.firstObservedAt,
             deadlineMilliseconds: draft.deadlineMilliseconds)
         let category = category(payload.contract.requestKind)
@@ -672,7 +675,7 @@ public final class ApprovalRequestCoordinator {
             revision: 1, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
             contract: payload.contract, permittedActions: Set(payload.permittedActions), observationID: observationID,
             estimatedLifetimeMilliseconds: draft.estimatedLifetimeMilliseconds, lateObservation: draft.lateObservation,
-            retained: retained, command: command, activity: activity, category: category, byteCount: bytes)
+            retained: retained, command: command, callerRequest: callerRequest, activity: activity, category: category, byteCount: bytes)
         transferred = true
         retainedBytes += bytes
         return payload
@@ -1238,15 +1241,13 @@ public final class ApprovalRequestCoordinator {
         try checkClock(now)
         guard var entry = entries[requestID], entry.state.phase == .authorized,
               let retained = entry.retained, retained.payload.contract.requestKind == .command,
-              let command = entry.command else { throw ApprovalCoordinatorError.notPending }
+              let command = entry.command, let callerRequest = entry.callerRequest else { throw ApprovalCoordinatorError.notPending }
         let outcome = try read { try $0.consumptionOutcome(requestID: requestID) }
         guard let outcome, outcome.phase == .authorized, outcome.revision == 0,
               outcome.receipt.event.category == .command, outcome.receipt.decision.action.choice == .execute,
               outcome.receipt.decision.requestDigest == entry.state.requestDigest,
               outcome.receipt.decision.challenge == entry.state.challenge else { throw ApprovalCoordinatorError.notPending }
-        let identity = CommandAdmittedRequest(requestID: entry.state.requestID,
-            requestDigest: entry.state.requestDigest, challenge: entry.state.challenge)
-        let resources = try command.takeExecutionResources(request: identity)
+        let resources = try command.takeExecutionResources(request: callerRequest)
         entry.command = nil
         entries[requestID] = entry
         return resources
@@ -1340,10 +1341,8 @@ public final class ApprovalRequestCoordinator {
 
     /// A lost private reply cannot undo the committed transition or authorize another invocation.
     private func notifyCommandTerminal(_ entry: Entry, outcome: CommandTerminalOutcome) {
-        guard let command = entry.command else { return }
-        let identity = CommandAdmittedRequest(requestID: entry.state.requestID,
-            requestDigest: entry.state.requestDigest, challenge: entry.state.challenge)
-        try? command.sendTerminalOutcome(outcome, request: identity)
+        guard let command = entry.command, let callerRequest = entry.callerRequest else { return }
+        try? command.sendTerminalOutcome(outcome, request: callerRequest)
     }
 
     /// Root publisher state only. Private provider data cannot be projected onto an ordinary phone response.

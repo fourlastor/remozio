@@ -28,7 +28,7 @@ sequenceDiagram
 ```
 
 The query uses the original admitted channel. It carries no PID, executable, approval, or replacement authority.
-Each reply includes the existing request digest, challenge, submission digest, caller binding, and negotiated profile through the stream binding.
+Each reply includes the existing request token, challenge, submission digest, caller binding, and negotiated profile through the stream binding.
 Each direction keeps its consecutive channel sequence. A fresh query contains a random 32-byte nonce.
 Only one query can be outstanding. A send with zero progress retains its unsent nonce.
 A reply with a wrong nonce, replay, or regressed stopped revision retires the original session.

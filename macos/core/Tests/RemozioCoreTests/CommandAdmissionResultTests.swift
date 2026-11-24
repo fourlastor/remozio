@@ -29,7 +29,7 @@ final class CommandAdmissionResultTests: XCTestCase {
         XCTAssertThrowsError(try CommandAdmissionResultPayload.decode(bytes, profile: profile, original: original()))
     }
     func testAllKnownOutcomesRoundTripWithOnlyExactBusyRetryClasses() throws {
-        let request = CommandAdmittedRequest(requestID: Data(repeating: 6, count: 16), requestDigest: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
+        let request = CommandAdmittedRequest(requestID: Data(repeating: 6, count: 16), requestToken: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
         var outcomes: [CommandAdmissionOutcome] = [.admitted(request), .uncertain(.admissionRejected), .uncertain(.duplicateSubmission), .uncertain(.storageFailure)]
         for raw: UInt64 in 1...4 { outcomes.append(.notAdmitted(CommandAdmissionRejectionReason(rawValue: raw)!, CommandAdmissionRetryClass(rawValue: raw)!)) }
         for raw: UInt64 in 10...14 { outcomes.append(.notAdmitted(CommandAdmissionRejectionReason(rawValue: raw)!, .never)) }

@@ -404,11 +404,34 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     let raw = try receiver(reply, maximum: 4096).receiveAdmissionReply(timeoutMilliseconds: 1000)
                     defer { raw.caller.close() }
                     let result = try CommandAdmissionResultPayload.decode(raw.payload, profile: profile, original: submission)
-                    XCTAssertEqual(result.outcome, .admitted(.init(requestID: request.requestID,
-                        requestDigest: try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits), challenge: request.challenge)))
+                    guard case .admitted(let admitted) = result.outcome else { return XCTFail("Expected an admitted request") }
+                    XCTAssertEqual(admitted.requestID, request.requestID)
+                    XCTAssertEqual(admitted.challenge, request.challenge)
+                    XCTAssertEqual(admitted.requestToken.count, 32)
+                    XCTAssertNotEqual(admitted.requestToken,
+                        try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits))
                     XCTAssertEqual(result.retryClass, .never)
                 }
             }
+        }
+    }
+
+    func testRepeatedCommandInvocationsReceiveIndependentOpaqueAdmissionTokens() throws {
+        let fixture = try CommandRequestFixture(checkpointed: true)
+        var tokens = Set<Data>()
+        for index: UInt8 in [0x30, 0x50] {
+            let binding = CapturedSubmission(id: Data(repeating: index, count: 16),
+                nonce: Data(repeating: index + 1, count: 32), callerBinding: assemblyBinding)
+            let reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply, binding: binding)
+            let request = try admitCommand(command, fixture: fixture)
+            let result = try ownerAdmission(reply, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = result.outcome else { return XCTFail("Expected an admitted request") }
+            XCTAssertEqual(admitted.requestID, request.requestID)
+            XCTAssertEqual(admitted.challenge, request.challenge)
+            XCTAssertEqual(admitted.requestToken.count, 32)
+            XCTAssertNotEqual(admitted.requestToken, try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits))
+            XCTAssertTrue(tokens.insert(admitted.requestToken).inserted)
         }
     }
 
@@ -4612,7 +4635,7 @@ extension MachCommandCallerReceiverTests {
                             outcome: CommandAdmissionOutcome? = nil, terminal: CommandTerminalOutcome = .exited(7),
                             outputInterrupted: Bool = false) throws -> (Data, Data) {
         let request = CommandAdmittedRequest(requestID: Data(repeating: 6, count: 16),
-            requestDigest: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
+            requestToken: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
         let admission = CommandAdmissionResultPayload(profile: profile, submission: submission.binding,
             submissionDigest: Data(SHA256.hash(data: submission.canonicalBytes)), outcome: outcome ?? .admitted(request))
         return (try admission.canonicalBytes, try CommandTerminalResultPayload(profile: profile, original: submission,
@@ -4852,7 +4875,10 @@ extension MachCommandCallerReceiverTests {
                 let state = try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: reason, now: now, receiptTimeMs: nil) }
                 let terminal = try ownerTerminal(terminalPort, submission: submission, admission: admission)
                 XCTAssertEqual(terminal.outcome, expected); XCTAssertEqual(terminal.request.requestID, request.requestID)
-                XCTAssertEqual(terminal.request.requestDigest, state.requestDigest); XCTAssertEqual(terminal.request.challenge, state.challenge)
+                guard case .admitted(let admitted) = admission.outcome else { return XCTFail("Expected an admitted request") }
+                XCTAssertEqual(terminal.request, admitted)
+                XCTAssertNotEqual(terminal.request.requestToken, state.requestDigest)
+                XCTAssertEqual(terminal.request.challenge, state.challenge)
                 XCTAssertEqual(terminal.submission, submission.binding); XCTAssertTrue(state.phase.isTerminal)
                 try expectAssemblyResourcesRetired(received); XCTAssertEqual(try sendReferences(terminalPort.port), 1)
                 XCTAssertThrowsError(try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: reason, now: now, receiptTimeMs: nil) })
@@ -4869,7 +4895,12 @@ extension MachCommandCallerReceiverTests {
             let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
             let receipt = try ownerDecision(request, fixture: fixture, decline: true)
             XCTAssertEqual(receipt.event.outcome, .noDispatch)
-            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .denied)
+            XCTAssertEqual(receipt.decision.requestDigest, try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits))
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("Expected an admitted request") }
+            let terminal = try ownerTerminal(terminalPort, submission: submission, admission: admission)
+            XCTAssertEqual(terminal.outcome, .denied)
+            XCTAssertEqual(terminal.request, admitted)
+            XCTAssertNotEqual(terminal.request.requestToken, receipt.decision.requestDigest)
             XCTAssertEqual(try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID)?.phase }, .declined)
             try expectAssemblyResourcesRetired(received)
             XCTAssertThrowsError(try ownerDecision(request, fixture: fixture, decline: true))
@@ -5096,7 +5127,8 @@ extension MachCommandCallerReceiverTests {
             try resources.sendTerminalOutcome(.unknown)
             let result = try ownerTerminal(terminalPort, submission: submission, admission: admission)
             XCTAssertEqual(result.outcome, .unknown)
-            XCTAssertEqual(result.request.requestDigest, resources.request.requestDigest)
+            XCTAssertEqual(result.request.requestToken, resources.request.requestToken)
+            XCTAssertNotEqual(result.request.requestToken, try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits))
             XCTAssertEqual(result.request.challenge, request.challenge)
             XCTAssertEqual(result.submission, submission.binding)
             XCTAssertEqual(try sendReferences(terminalPort.port), 1)
@@ -6142,7 +6174,7 @@ extension MachCommandCallerReceiverTests {
 extension MachCommandCallerReceiverTests {
     private func streamBinding(_ profile: CommandHandshakeProfile, _ submission: CommandSubmission) -> CommandStreamBinding {
         .init(profile: profile, submission: submission.binding, submissionDigest: Data(SHA256.hash(data: submission.canonicalBytes)),
-            request: .init(requestID: Data(repeating: 6, count: 16), requestDigest: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32)))
+            request: .init(requestID: Data(repeating: 6, count: 16), requestToken: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32)))
     }
     private static func waitQueued(_ operation: () throws -> Bool) throws {
         let deadline = Date().addingTimeInterval(5)
@@ -7869,6 +7901,47 @@ extension MachCommandCallerReceiverTests {
             terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
         let received = try receiver(endpoint, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 1000)
         return (try assemble(received, schema: schema, admissionProfile: profile), submission, profile)
+    }
+
+    func testMappedAdmissionAndRetirementKeepTheOpaqueTokenAcrossStdioLayouts() throws {
+        let inputNull = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        let outputNull = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(inputNull); _ = Darwin.close(outputNull) }
+        guard inputNull >= 0, outputNull >= 0 else { throw MachCommandCallerError.unavailable }
+
+        for wire: UInt64 in [8, 9] {
+            for mask in 0...7 {
+                let fixture = try CommandRequestFixture(owned: true, commandSchema: 3)
+                let owner = try XCTUnwrap(fixture.authority)
+                let inputPath = fixture.root.appendingPathComponent("token-fixture-input")
+                try Data("synthetic".utf8).write(to: inputPath)
+                let inputFile = Darwin.open(inputPath.path, O_RDONLY | O_CLOEXEC)
+                defer { _ = Darwin.close(inputFile) }
+                var pipeFDs: [Int32] = [-1, -1]
+                guard inputFile >= 0, pipe(&pipeFDs) == 0 else { throw MachCommandCallerError.unavailable }
+                defer { for fd in pipeFDs { _ = Darwin.close(fd) } }
+                let admissionPort = try Endpoint(), terminalPort = try Endpoint()
+                let (command, submission, profile) = try ownerMappedCommand(admission: admissionPort, terminal: terminalPort,
+                    input: mask & 1 == 0 ? inputNull : inputFile,
+                    output: mask & 2 == 0 ? outputNull : pipeFDs[1], error: mask & 4 == 0 ? outputNull : pipeFDs[1],
+                    wire: wire, ioMode: wire == 8 ? .pty : .pipes)
+                let request = try admitOwnedCommand(command, fixture: fixture)
+                let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+                guard case .admitted(let admitted) = admission.outcome else { return XCTFail("Expected an admitted request") }
+                let signedDigest = try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits)
+                XCTAssertEqual(admitted.requestToken.count, 32)
+                XCTAssertNotEqual(admitted.requestToken, signedDigest)
+
+                let retirementTime = fixture.now(120)
+                let state = try owner.withRequests {
+                    try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: retirementTime, receiptTimeMs: nil)
+                }
+                XCTAssertEqual(state.requestDigest, signedDigest)
+                let result = try ownerTerminal(terminalPort, submission: submission, admission: admission)
+                XCTAssertEqual(result.outcome, .cancelledBeforeStart)
+                XCTAssertEqual(result.request, admitted)
+            }
+        }
     }
 
     func testMappedProfileRejectsWrongCaptureSchemaAndIOModeBeforeAdmission() throws {

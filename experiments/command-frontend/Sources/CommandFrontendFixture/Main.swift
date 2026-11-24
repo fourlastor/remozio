@@ -201,7 +201,7 @@ private struct Probe {
                     try require(submission.binding.id != firstBinding.id && submission.binding.nonce != firstBinding.nonce &&
                         submission.binding.callerBinding != firstBinding.callerBinding, "reused binding")
                     let request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),
-                        requestDigest: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
+                        requestToken: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
                     guard let outputs = receipt.outputs else { throw Failure.assertion("outputs") }
                     let reply = try outputs.takeTerminalReply()
                     defer { reply.close() }
