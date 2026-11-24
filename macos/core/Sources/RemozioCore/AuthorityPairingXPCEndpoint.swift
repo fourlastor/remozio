@@ -61,6 +61,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         deinit { close() }
     }
     private var expiryTimer: DispatchSourceTimer?
+    private var v2Window: AuthorityPairingV2Window?
 
     convenience init(connection: NSXPCConnection, policy: XPCPeerPolicy, access: AuthorityPairingSetupAccess,
                      budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void,
@@ -105,7 +106,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func close() {
         let notify = lock.withLock {
             guard !closed else { return false }
-            closed = true; ready = false; clearAttempt(); return true
+            closed = true; ready = false; v2Window?.close(); clearAttempt(); return true
         }
         if notify { invalidate() }
     }
@@ -190,8 +191,43 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         return try body()
     }
 
-    func stagePairing(_ proposal: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+    // Exercise v2 through the logical owner. The installed XPC protocol still negotiates v1.
+    func openPairingV2(label: String, predecessor: PairedPhoneSelection?, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
+            guard attempt == nil, v2Window == nil else { throw AuthorityPairingSetupError.unavailable }
+            let window = try access.openV2Window(label: label, predecessor: predecessor)
+            let bytes = try access.exportV2Window(window)
+            v2Window = window
+            startExpiryTimer()
+            return bytes
+        }
+    }
+
+    func reservePairingV2(_ proof: PairingSetupV2Proof) throws {
+        let completed = try work {
+            guard let v2Window else { throw AuthorityPairingSetupError.unavailable }
+            try access.reserveV2(v2Window, proof: proof)
+        }
+        completed.completion.close()
+    }
+
+    func disconnectPairingV2(_ connection: UUID) {
+        lock.withLock { v2Window?.disconnected(connection) }
+    }
+
+    func stagePairingV2(_ proposal: Data, connection: UUID, authorization: Data,
+                        reply: @escaping @Sendable (Data?) -> Void) {
+        stagePairing(proposal, connection: connection, authorization: authorization, reply: reply)
+    }
+
+    func stagePairing(_ proposal: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        stagePairing(proposal, connection: nil, authorization: authorization, reply: reply)
+    }
+
+    private func stagePairing(_ proposal: Data, connection: UUID?, authorization: Data,
+                              reply: @escaping @Sendable (Data?) -> Void) {
+        respond(reply) {
+            guard (v2Window == nil) == (connection == nil) else { throw AuthorityPairingSetupError.unavailable }
             guard attempt == nil, proposal.count <= 132_000,
                   authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingSetupError.unavailable }
             try authorize(authorization)
@@ -202,7 +238,13 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             defer { if !transferred { activity?.close(); stage.close() } }
             let replyStage = try stage.retained()
             state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
-            let staged = try access.stage(proposal, authorize: { [authorize] in try authorize(authorization) })
+            let recheck = { [authorize] in try authorize(authorization) }
+            let staged: PairingEnrollmentAttempt
+            if let v2Window, let connection {
+                staged = try access.stageV2(v2Window, connection: connection, proposalBytes: proposal, authorize: recheck)
+            } else {
+                staged = try access.stage(proposal, authorize: recheck)
+            }
             let bytes = try staged.transcript.encode()
             try state.withLock {
                 guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
@@ -220,13 +262,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             }
             // An ambiguous commit must reconcile its durable receipt. This connection cannot blindly commit again.
             clearAttempt()
+            defer { v2Window?.close() }
             return try access.commit(pending, setupID: setupID, confirmedDigest: confirmedDigest, proof: biometricProof,
-                authorize: { [authorize] in try authorize(authorization) })
+                window: v2Window, authorize: { [authorize] in try authorize(authorization) })
         }
     }
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) {
         do {
-            let completed = try work { clearAttempt() }
+            let completed = try work { v2Window?.close(); clearAttempt() }
             defer { completed.completion.close() }
             send { reply(true) }
         }
@@ -279,6 +322,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         state.withLock { $0.activity = nil }; stage?.close()
     }
     private func startExpiryTimer() {
+        guard expiryTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         // Recheck the continuous authority clock after wake instead of extending setup by sleep duration.
         timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1), leeway: .milliseconds(100))
@@ -287,9 +331,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
     func expireStagedIfNeeded() {
         lock.withLock {
-            guard !closed, !busy, let attempt else { return }
-            do { if try access.isExpired(attempt) { clearAttempt() } }
-            catch { clearAttempt() }
+            guard !closed, !busy else { return }
+            do {
+                if let v2Window { try access.expireV2WindowIfDue(v2Window) }
+                if let attempt, try access.isExpired(attempt) { clearAttempt() }
+            } catch {
+                v2Window?.close()
+                clearAttempt()
+            }
         }
     }
 

@@ -11,6 +11,14 @@ private struct PairingNetworkStream: ApprovalByteStream {
     func close() async { await channel.close() }
 }
 
+struct PairingSetupV2Connection: Sendable {
+    let windowID: Data
+    let connection: UUID
+    let challenge: Data
+    let exporter: Data
+    let reserve: @Sendable (PairingSetupV2Proof) throws -> Void
+}
+
 /// One unpaired TLS candidate. The signed app must independently confirm and authorize Root staging and commit.
 /// No setup message can enter the enrolled request exchange through this owner.
 public actor PairingSetupNetworkSession {
@@ -18,6 +26,7 @@ public actor PairingSetupNetworkSession {
     private let stream: any ApprovalByteStream
     private let invitation: PairingInvitation
     private let peerPoint: Data
+    private(set) var provedConnection: UUID?
     private let abortIO: @Sendable () -> Void
     private let underlyingClosed: @Sendable () async -> Bool
     private let cancellation = ChannelCancellation()
@@ -37,19 +46,21 @@ public actor PairingSetupNetworkSession {
     }
     deinit { timer?.cancel(); reader?.cancel() }
     static func acceptStarted(channel: NetworkByteChannel, invitation: PairingInvitation, peerPoint: Data,
-                              timeoutMilliseconds: UInt64) async throws -> Self {
+                              timeoutMilliseconds: UInt64, v2: PairingSetupV2Connection? = nil) async throws -> Self {
         try await accept(stream: PairingNetworkStream(channel: channel), invitation: invitation, peerPoint: peerPoint,
-            timeoutMilliseconds: timeoutMilliseconds, abortIO: { channel.abort() }, underlyingClosed: { await channel.isClosed })
+            timeoutMilliseconds: timeoutMilliseconds, v2: v2, abortIO: { channel.abort() }, underlyingClosed: { await channel.isClosed })
     }
     // Injected streams prove state and framing only, never native peer identity.
     static func accept(stream: any ApprovalByteStream, invitation: PairingInvitation, peerPoint: Data,
-                       timeoutMilliseconds: UInt64 = 300_000, abortIO: @escaping @Sendable () -> Void = {},
+                       timeoutMilliseconds: UInt64 = 300_000, v2: PairingSetupV2Connection? = nil,
+                       abortIO: @escaping @Sendable () -> Void = {},
                        underlyingClosed: @escaping @Sendable () async -> Bool = { false }) async throws -> Self {
-        let owner = Self(stream: stream, invitation: invitation, peerPoint: peerPoint, abortIO: abortIO, underlyingClosed: underlyingClosed)
-        do { try await owner.open(timeoutMilliseconds: timeoutMilliseconds); return owner }
+        let owner = Self(stream: stream, invitation: invitation, peerPoint: peerPoint,
+                         abortIO: abortIO, underlyingClosed: underlyingClosed)
+        do { try await owner.open(timeoutMilliseconds: timeoutMilliseconds, v2: v2); return owner }
         catch { await owner.closeAndWait(); throw error }
     }
-    private func open(timeoutMilliseconds: UInt64) async throws {
+    private func open(timeoutMilliseconds: UInt64, v2: PairingSetupV2Connection?) async throws {
         guard (1...300_000).contains(timeoutMilliseconds), peerPoint.count == 65 else { throw PairingSetupChannelError.rejected }
         timer = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(Int64(timeoutMilliseconds))) } catch { return }
@@ -57,12 +68,33 @@ public actor PairingSetupNetworkSession {
         }
         try await stream.awaitOpen(timeoutMilliseconds: min(timeoutMilliseconds, 60_000))
         startReader()
-        try await write(.hello)
-        guard case .proposal(let value) = try await read(), value.transportKey.publicKey == peerPoint,
-              value.phone.scope.macID == invitation.macID, value.phone.scope.accountID == invitation.accountID else {
-            throw PairingSetupChannelError.rejected
+        let proposal: PairingPhoneProposal
+        if let v2 {
+            guard v2.exporter.count == 32 else {
+                throw PairingSetupChannelError.rejected
+            }
+            try await writeBytes(PairingSetupPreludeV2.challenge(v2.challenge).encode())
+            let bytes = try await readBytes(maximum: PairingSetupPreludeV2.maximumBytes)
+            guard case .proposal(let value, let tag) = try PairingSetupPreludeV2.decode(bytes) else {
+                throw PairingSetupChannelError.rejected
+            }
+            try requirePeer(value)
+            try v2.reserve(.init(windowID: v2.windowID, connection: v2.connection, peerPoint: peerPoint,
+                challenge: v2.challenge, exporter: v2.exporter, proposal: value, tag: tag))
+            try active()
+            provedConnection = v2.connection
+            proposal = value
+        } else {
+            try await write(.hello)
+            guard case .proposal(let value) = try await read() else { throw PairingSetupChannelError.rejected }
+            try requirePeer(value)
+            proposal = value
         }
-        proposalValue = value; state = .proposed
+        proposalValue = proposal; state = .proposed
+    }
+    private func requirePeer(_ proposal: PairingPhoneProposal) throws {
+        guard proposal.transportKey.publicKey == peerPoint, proposal.phone.scope.macID == invitation.macID,
+              proposal.phone.scope.accountID == invitation.accountID else { throw PairingSetupChannelError.rejected }
     }
     /// Reports owner closure only. It grants no enrollment or action authority.
     public var isClosed: Bool {
@@ -149,7 +181,10 @@ public actor PairingSetupNetworkSession {
         guard state != .closed, cancellation.ifActive({}) else { throw PairingSetupChannelError.closed }
     }
     private func write(_ frame: PairingSetupFrame) async throws {
-        try active(); let bytes = try frame.encode()
+        try await writeBytes(frame.encode())
+    }
+    private func writeBytes(_ bytes: Data) async throws {
+        try active()
         let size = UInt32(bytes.count)
         var output = Data([UInt8(size >> 24), UInt8((size >> 16) & 255), UInt8((size >> 8) & 255), UInt8(size & 255)])
         output.append(bytes)
@@ -159,17 +194,20 @@ public actor PairingSetupNetworkSession {
         }
     }
     private func read() async throws -> PairingSetupFrame {
+        try await PairingSetupFrame.decode(readBytes(maximum: PairingSetupFrame.maximumBytes))
+    }
+    private func readBytes(maximum: Int) async throws -> Data {
         var length: Int?
         while true {
             try active()
             let available = pending.count - offset
             if length == nil, available >= 4 {
                 let value = pending[offset..<offset + 4].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-                guard value > 0, value <= PairingSetupFrame.maximumBytes else { throw PairingSetupChannelError.rejected }
+                guard value > 0, value <= maximum else { throw PairingSetupChannelError.rejected }
                 length = Int(value)
             }
             if let length, available >= length + 4 {
-                let result = try PairingSetupFrame.decode(pending.subdata(in: offset + 4..<offset + 4 + length))
+                let result = pending.subdata(in: offset + 4..<offset + 4 + length)
                 try active(); offset += length + 4
                 if offset == pending.count { pending.removeAll(keepingCapacity: true); offset = 0 }
                 return result

@@ -12,6 +12,7 @@ public struct MacPairingSessionSnapshot: Sendable {
     public let phase: MacPairingSessionPhase
     public let invitation: PairingInvitation?
     public let rePairInvitation: RePairInvitation?
+    public let invitationV2: PairingInvitationV2?
     public let candidates: [TransportPairingCandidate]
     public let selectedPhoneID: Data?
     public let comparisonCode: String?
@@ -36,6 +37,20 @@ protocol MacPairingTransportControl: Sendable {
     nonisolated func abort()
     func close() async
 }
+struct MacPairingV2PublicWindow: Sendable {
+    let id: Data
+    let invitation: PairingInvitation
+    let replacement: PairingReplacement?
+    let lifetimeMilliseconds: UInt64
+}
+
+/// The logical fixture binds the same Authority and Transport owners as the v2 listener.
+struct MacPairingV2Control: Sendable {
+    let open: @Sendable (String, PairedPhoneSelection?) async throws -> PairingInvitationV2
+    let listen: @Sendable (MacPairingV2PublicWindow) async throws -> Void
+    let stage: @Sendable (PairingPhoneProposal, UUID, Data) async throws -> PairingTranscript
+}
+
 protocol MacPairingAdministrator: Sendable {
     func authorization() async throws -> Data
     func close() async
@@ -64,6 +79,7 @@ public actor MacPairingSession {
     private let transport: any MacPairingTransportControl
     private let administrator: any MacPairingAdministrator
     private let predecessor: PairedPhoneSelection?
+    private let v2: MacPairingV2Control?
     private let cancellation = ChannelCancellation()
     private let unixMilliseconds: @Sendable () -> UInt64
     private let elapsedMilliseconds: @Sendable () -> UInt64
@@ -71,6 +87,7 @@ public actor MacPairingSession {
     private var context: AuthorityPairingContext?
     private var invitation: PairingInvitation?
     private var rePairInvitation: RePairInvitation?
+    private var invitationV2: PairingInvitationV2?
     private var candidates: [TransportPairingCandidate] = []
     private var selected: TransportPairingCandidate?
     private var transcript: PairingTranscript?
@@ -93,15 +110,17 @@ public actor MacPairingSession {
         transport = try TransportPairingChannel(configuration: transportConfiguration)
         administrator = NativePairingAdministrator()
         self.predecessor = predecessor
+        v2 = nil
         unixMilliseconds = { UInt64(max(0, Date().timeIntervalSince1970 * 1000)) }
         elapsedMilliseconds = { UInt64(ProcessInfo.processInfo.systemUptime * 1000) }
     }
     // Logical drivers cannot establish installed identity, native administrator consent or hardware custody.
     init(root: any MacPairingRootControl, transport: any MacPairingTransportControl, administrator: any MacPairingAdministrator,
-         predecessor: PairedPhoneSelection? = nil,
+         predecessor: PairedPhoneSelection? = nil, v2: MacPairingV2Control? = nil,
          unixMilliseconds: @escaping @Sendable () -> UInt64, elapsedMilliseconds: @escaping @Sendable () -> UInt64) {
         self.root = root; self.transport = transport; self.administrator = administrator
         self.predecessor = predecessor
+        self.v2 = v2
         self.unixMilliseconds = unixMilliseconds; self.elapsedMilliseconds = elapsedMilliseconds
     }
     deinit { root.abort(); transport.abort() }
@@ -112,7 +131,25 @@ public actor MacPairingSession {
         do {
             let context = try await root.start(); try active()
             let invitation = try context.invitation(label: label)
-            if let predecessor {
+            if let v2 {
+                let elapsed = elapsedMilliseconds()
+                let exported = try await v2.open(label, predecessor); try active()
+                guard try exported.invitation.encode() == invitation.encode(),
+                      exported.replacement == (try predecessor?.predecessor),
+                      exported.lifetimeMilliseconds == context.lifetimeMilliseconds else {
+                    throw MacPairingSessionError.invalidState
+                }
+                let result = elapsed.addingReportingOverflow(exported.lifetimeMilliseconds)
+                guard !result.overflow else { throw MacPairingSessionError.expired }
+                deadline = result.partialValue
+                try await v2.listen(.init(id: exported.windowID, invitation: invitation, replacement: exported.replacement,
+                                          lifetimeMilliseconds: exported.lifetimeMilliseconds))
+                try active(); try checkDeadline()
+                invitationV2 = exported
+                if let replacement = exported.replacement {
+                    rePairInvitation = RePairInvitation(invitation: invitation, predecessor: replacement)
+                }
+            } else if let predecessor {
                 guard try await root.canRePair(predecessor) else { throw MacPairingSessionError.ineligiblePredecessor }
                 try active()
                 let rePair = try RePairInvitation(invitation: invitation, predecessor: predecessor.predecessor)
@@ -137,6 +174,7 @@ public actor MacPairingSession {
             try checkDeadline()
             let current = try await transport.current(); try active()
             candidates = current.candidates.filter { matchesSession($0.proposal) }
+            if !candidates.isEmpty { invitationV2 = nil }
             if let selected {
                 guard let candidate = candidates.first(where: { $0.id == selected.id }),
                       try candidate.proposal.encode() == selected.proposal.encode() else { throw MacPairingSessionError.changedCandidate }
@@ -167,7 +205,13 @@ public actor MacPairingSession {
                 guard try await root.canRePair(predecessor) else { throw MacPairingSessionError.ineligiblePredecessor }
                 try active()
             }
-            let staged = try await root.stage(actual.proposal, authorization: authorization); try active()
+            let staged: PairingTranscript
+            if let v2 {
+                staged = try await v2.stage(actual.proposal, GatewayHostSnapshot.uuid(candidateID), authorization)
+            } else {
+                staged = try await root.stage(actual.proposal, authorization: authorization)
+            }
+            try active(); try checkDeadline()
             try actual.proposal.validate(staged); try invitation.validateMacClaims(in: staged)
             if let predecessor, GatewayHostSnapshot.bytes(predecessor.revision) != staged.expectedTrustRevision {
                 throw MacPairingSessionError.ineligiblePredecessor
@@ -177,7 +221,7 @@ public actor MacPairingSession {
             let remaining = min(context.lifetimeMilliseconds, staged.expiresAtUnixMillis - wall)
             let (end, overflow) = elapsed.addingReportingOverflow(remaining)
             guard !overflow else { throw MacPairingSessionError.expired }
-            selected = actual; transcript = staged; deadline = end; proof = nil; humanConfirmed = false
+            selected = actual; transcript = staged; deadline = min(deadline ?? end, end); proof = nil; humanConfirmed = false
             try await transport.stage(candidateID: candidateID, transcript: staged); try active(); try checkDeadline()
             phase = .comparing
             return snapshot()
@@ -266,6 +310,7 @@ public actor MacPairingSession {
         await releaseChannels()
     }
     private func releaseChannels() async {
+        invitationV2 = nil
         root.abort()
         // A new re-pair awaits the helper's drain for that predecessor before beginning setup.
         transport.abort()
@@ -276,7 +321,8 @@ public actor MacPairingSession {
     public func snapshot() -> MacPairingSessionSnapshot {
         let elapsed = elapsedMilliseconds()
         let remaining = deadline.map { $0 > elapsed ? $0 - elapsed : 0 }
-        return .init(phase: phase, invitation: invitation, rePairInvitation: rePairInvitation, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
+        return .init(phase: phase, invitation: v2 == nil ? invitation : nil, rePairInvitation: v2 == nil ? rePairInvitation : nil,
+            invitationV2: phase == .waitingForPhone ? invitationV2 : nil, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
             comparisonCode: try? transcript?.verificationCode(), remainingMilliseconds: remaining, phoneProofAvailable: proof != nil)
     }
 }

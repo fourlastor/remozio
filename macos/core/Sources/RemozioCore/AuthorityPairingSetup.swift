@@ -124,6 +124,40 @@ final class AuthorityPairingSetupAccess: Sendable {
             limits: .init(maxBytes: 512, maxDepth: 1, maxItems: 15))
     }
 
+    func openV2Window(label: String, predecessor: PairedPhoneSelection?) throws -> AuthorityPairingV2Window {
+        try verifyCurrent()
+        if let predecessor, try !canRePair(predecessor) { throw AuthorityPairingSetupError.unsupportedReplacement }
+        let invitation = try PairingInvitation(macID: macID, accountID: accountID, label: label,
+            authorityPublicKey: authorityPublicKey, transportPublicKey: configuration.transportPublicKey,
+            minimumEnvelopeVersion: minimumEnvelopeVersion)
+        let started = try now()
+        let v2 = try PairingInvitationV2(invitation: invitation, windowID: random(16), secret: random(32),
+            replacement: predecessor?.predecessor, lifetimeMilliseconds: configuration.lifetimeMilliseconds)
+        return try AuthorityPairingV2Window(invitation: v2, predecessor: predecessor, started: started)
+    }
+
+    func expireV2WindowIfDue(_ window: AuthorityPairingV2Window) throws {
+        try window.expireIfDue(now())
+    }
+
+    func exportV2Window(_ window: AuthorityPairingV2Window) throws -> Data {
+        try window.export(at: now()).encode()
+    }
+
+    func reserveV2(_ window: AuthorityPairingV2Window, proof: PairingSetupV2Proof) throws {
+        try verifyCurrent()
+        if let predecessor = window.predecessor, try !canRePair(predecessor) {
+            throw AuthorityPairingSetupError.unsupportedReplacement
+        }
+        try window.reserve(proof, at: now())
+    }
+
+    func stageV2(_ window: AuthorityPairingV2Window, connection: UUID, proposalBytes: Data,
+                 authorize: () throws -> Void) throws -> PairingEnrollmentAttempt {
+        let proposal = try window.takeProposal(connection: connection, matching: proposalBytes, at: now())
+        return try stage(proposal, proposalBytes: proposalBytes, window: window, authorize: authorize)
+    }
+
     /// The proposal supplies phone claims only. Root chooses fresh setup identity, challenge, tag, nonce and expiry.
     /// The app and phone must compare the returned transcript before producing the biometric proof.
     func stage(_ proposalBytes: Data, authorize: () throws -> Void = {}) throws -> PairingEnrollmentAttempt {
@@ -136,12 +170,21 @@ final class AuthorityPairingSetupAccess: Sendable {
             proposal = try PairingPhoneProposal.decode(proposalBytes)
             guard proposal.replacement != nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
         }
+        return try stage(proposal, proposalBytes: proposalBytes, window: nil, authorize: authorize)
+    }
+
+    private func stage(_ proposal: PairingPhoneProposal, proposalBytes: Data, window: AuthorityPairingV2Window?,
+                       authorize: () throws -> Void) throws -> PairingEnrollmentAttempt {
         let scope = proposal.phone.scope
         guard scope.macID == macID, scope.accountID == accountID else { throw AuthorityPairingSetupError.wrongScope }
         let proposalDigest = proposal.replacement.map { _ in Data(SHA256.hash(data: proposalBytes)) }
         let prepare: @Sendable (JournalTransaction, AuthorityMoment, PairingRecoveryStage?) throws -> PairingEnrollmentAttempt = { tx, started, retained in
             try self.requireCurrent(tx)
             let trust = try tx.approvalTrustSnapshot()
+            try window?.requireStaging(self.now())
+            if let predecessor = window?.predecessor, trust.revision != predecessor.revision {
+                throw AuthorityPairingSetupError.unsupportedReplacement
+            }
             let replacement = proposal.replacement.map(PairingEnrollmentAttempt.Replacement.requireRevoked) ?? .none
             if let retained {
                 try proposal.validate(retained.transcript)
@@ -152,6 +195,10 @@ final class AuthorityPairingSetupAccess: Sendable {
                     startedAtUnixMillis: retained.transcript.issuedAtUnixMillis, deadlineMilliseconds: retained.deadline,
                     recoveryProposalDigest: proposalDigest)
                 try attempt.validateEnrollmentHistory(tx)
+                if let window {
+                    try window.publicInvitation.validateMacClaims(in: retained.transcript)
+                    try window.requireStaging(self.now())
+                }
                 return attempt
             }
             let wall = try self.unixMilliseconds()
@@ -182,6 +229,11 @@ final class AuthorityPairingSetupAccess: Sendable {
                 transportKey: proposal.transportKey, decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey,
                 enrollmentTag: self.random(32), replacement: proposal.replacement, expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) },
                 issuedAtUnixMillis: wall, expiresAtUnixMillis: expiry.partialValue)
+            if let window {
+                try proposal.validate(transcript)
+                try window.publicInvitation.validateMacClaims(in: transcript)
+                try window.requireStaging(self.now())
+            }
             let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trust, replacement: replacement,
                 authorityPublicKey: self.authorityPublicKey, transportPublicKey: self.configuration.transportPublicKey,
                 minimumEnvelopeVersion: self.minimumEnvelopeVersion, started: started, startedAtUnixMillis: wall,
@@ -198,12 +250,18 @@ final class AuthorityPairingSetupAccess: Sendable {
     }
 
     func commit(_ attempt: PairingEnrollmentAttempt, setupID: Data, confirmedDigest: Data, proof: Data,
-                authorize: @escaping () throws -> Void) throws -> Data {
+                window: AuthorityPairingV2Window? = nil, authorize: @escaping () throws -> Void) throws -> Data {
         guard setupID.count == 16, confirmedDigest.count == 32, proof.count == 64,
               setupID == attempt.transcript.setupID, try confirmedDigest == attempt.transcript.digest() else {
             throw AuthorityPairingSetupError.invalidConfirmation
         }
-        return try commitPairing(attempt, proof, random(16), authorize, { tx in try self.requireCurrent(tx) })
+        return try commitPairing(attempt, proof, random(16), {
+            try authorize()
+            try window?.requireStaging(self.now())
+        }, { tx in
+            try self.requireCurrent(tx)
+            try window?.requireStaging(self.now())
+        })
     }
     func pairedPhones(includeRePair: Bool = false) throws -> PairedPhoneSnapshot {
         try journal.read { tx in

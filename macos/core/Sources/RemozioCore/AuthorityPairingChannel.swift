@@ -41,6 +41,7 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
 
 enum PairingClientCall: Sendable {
     case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel
+    case openV2(String, PairedPhoneSelection?), stageV2(Data, UUID, Data)
     case phoneManagementHello, versionedPhoneManagementHello(UInt64)
     case managePhone(PairedPhoneOperation, Data, Data)
 }
@@ -80,6 +81,7 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
             proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) {
                 [self] in checked(.bytes($0), reply: reply)
             }
+        case .openV2, .stageV2: reply(.failed)
         case .cancel: proxy.cancelPairing { [self] in checked(.cancelled($0), reply: reply) }
         case .phoneManagementHello: proxy.pairedPhoneHello { [self] in checked(.version($0), reply: reply) }
         case .versionedPhoneManagementHello(let maximumVersion):
@@ -308,12 +310,25 @@ public actor AuthorityPairingChannel {
         return try await stage(claims, bytes: proposal.encode(), authorization: authorization)
     }
 
-    private func stage(_ proposal: PairingPhoneProposal, bytes proposalBytes: Data, authorization: Data) async throws -> PairingTranscript {
+    // Only the logical driver supports this path. Installed v1 selectors remain unchanged.
+    func openV2(label: String, predecessor: PairedPhoneSelection?) async throws -> PairingInvitationV2 {
+        guard state == .open, staged == nil else { throw AuthorityPairingChannelError.closed }
+        return try PairingInvitationV2.decode(bytes(await perform(.openV2(label, predecessor))))
+    }
+
+    func stageV2(_ proposal: PairingPhoneProposal, connection: UUID, authorization: Data) async throws -> PairingTranscript {
+        try await stage(proposal, bytes: proposal.encode(), connection: connection, authorization: authorization)
+    }
+
+    private func stage(_ proposal: PairingPhoneProposal, bytes proposalBytes: Data, connection: UUID? = nil,
+                       authorization: Data) async throws -> PairingTranscript {
         guard state == .open, let context, staged == nil else { throw AuthorityPairingChannelError.closed }
         guard proposal.phone.scope.macID == macID, proposal.phone.scope.accountID == accountID,
               authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingChannelError.invalidMessage }
         do {
-            let transcript = try PairingTranscript.decode(bytes(await perform(.stage(proposalBytes, authorization))))
+            let call = connection.map { PairingClientCall.stageV2(proposalBytes, $0, authorization) }
+                ?? .stage(proposalBytes, authorization)
+            let transcript = try PairingTranscript.decode(bytes(await perform(call)))
             do { try proposal.validate(transcript) } catch { throw AuthorityPairingChannelError.invalidMessage }
             guard transcript.macAuthorityKey == context.authorityPublicKey, transcript.macTransportKey == context.transportPublicKey,
                   transcript.minimumEnvelopeVersion == context.minimumEnvelopeVersion,

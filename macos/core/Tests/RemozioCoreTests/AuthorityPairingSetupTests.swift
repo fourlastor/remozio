@@ -43,7 +43,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         var mac: Data { Data(repeating: 1, count: 16) }
         let account: Data
         init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false,
-             accountByte: UInt8 = 2, configureTransport: Bool = false, observePairingContention: @escaping @Sendable () -> Void = {}) throws {
+             accountByte: UInt8 = 2, configureTransport: Bool = false, pairingLifetime: UInt64 = 1000,
+             observePairingContention: @escaping @Sendable () -> Void = {}) throws {
             self.account = Data(repeating: accountByte, count: 16)
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
             let ownedRoot = root
@@ -95,7 +96,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: getuid())
             let journal = journal, environment = environment, authority = authority
             access = try .init(journal: journal, macID: mac, accountID: account, authorityPublicKey: authority.publicKey.x963Representation,
-                appPolicy: policy, configuration: .init(transportPublicKey: transport.publicKey.x963Representation, lifetimeMilliseconds: 1000),
+                appPolicy: policy, configuration: .init(transportPublicKey: transport.publicKey.x963Representation, lifetimeMilliseconds: pairingLifetime),
                 minimumEnvelopeVersion: 1, auditVersions: auditVersions, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
                     if environment.selfDenied.value { throw Failure.denied }
                 }, gatewayRevocations: gatewayRevocations, commit: { attempt, proof, event, authorize, validate in
@@ -211,6 +212,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .commit(let setup, let digest, let proof, let authorization):
                 commitSends.value += 1
                 endpoint.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
+            case .openV2(let label, let predecessor):
+                endpoint.openPairingV2(label: label, predecessor: predecessor) { complete(.bytes($0)) }
+            case .stageV2(let proposal, let connection, let authorization):
+                stageSends.value += 1
+                endpoint.stagePairingV2(proposal, connection: connection, authorization: authorization) { complete(.bytes($0)) }
             case .cancel: endpoint.cancelPairing { complete(.cancelled($0)) }
             case .phoneManagementHello: endpoint.pairedPhoneHello { complete(.version($0)) }
             case .versionedPhoneManagementHello(let maximumVersion):
@@ -320,6 +326,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .stage(let proposal, let authorization): proxy.stagePairing(proposal, authorization: authorization) { complete(.bytes($0)) }
             case .commit(let setup, let digest, let proof, let authorization):
                 proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
+            case .openV2, .stageV2: complete(.failed)
             case .cancel: proxy.cancelPairing { complete(.cancelled($0)) }
             case .phoneManagementHello:
                 if let trace { trace.legacyHellos.value += 1 }
@@ -1307,6 +1314,305 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    private func openV2(_ endpoint: AuthorityPairingXPCEndpoint, predecessor: PairedPhoneSelection? = nil)
+        throws -> PairingInvitationV2 {
+        try hello(endpoint)
+        let reply = Box<Data?>(nil)
+        endpoint.openPairingV2(label: "Fixture", predecessor: predecessor) { reply.value = $0 }
+        return try PairingInvitationV2.decode(XCTUnwrap(reply.value))
+    }
+
+    private func bindingV2(_ invitation: PairingInvitationV2, proposal: PairingPhoneProposal,
+                           connection: UUID = UUID(), valid: Bool = true) throws -> PairingSetupV2Proof {
+        let challenge = Data(repeating: 91, count: 32), exporter = Data(repeating: 92, count: 32)
+        let tag = try invitation.proof(proposal: proposal, challenge: challenge, exporter: exporter)
+        return .init(windowID: invitation.windowID, connection: connection, peerPoint: proposal.transportKey.publicKey,
+            challenge: challenge, exporter: valid ? exporter : Data(repeating: 93, count: 32), proposal: proposal, tag: tag)
+    }
+
+    func testV2ProofReservesOnlyTheExactProposalAndUsesExistingCommit() throws {
+        let f = try Fixture(), endpoint = try f.endpoint()
+        let invitation = try openV2(endpoint)
+        let draft = try f.proposal()
+        let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+            decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+        let binding = try bindingV2(invitation, proposal: proposal)
+        XCTAssertThrowsError(try endpoint.reservePairingV2(bindingV2(invitation, proposal: proposal, valid: false)))
+        try endpoint.reservePairingV2(binding)
+        XCTAssertThrowsError(try endpoint.reservePairingV2(binding))
+        XCTAssertEqual(try f.records(), 0)
+        XCTAssertEqual(f.environment.authorized.value, 0)
+        let result = Box<Data?>(nil)
+        endpoint.stagePairingV2(try proposal.encode(), connection: binding.connection, authorization: authorization) {
+            result.value = $0
+        }
+        let transcript = try PairingTranscript.decode(XCTUnwrap(result.value))
+        try proposal.validate(transcript)
+        XCTAssertEqual(try f.records(), 0)
+        let receipt = try XCTUnwrap(commit(endpoint, transcript: transcript, fixture: f))
+        XCTAssertTrue(try transcript.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(try f.records(), 1)
+        XCTAssertEqual(f.environment.signed.value, 1)
+        try f.assertCheckpoint()
+    }
+
+    func testV2WindowRejectsLegacyStagingAndUnprovedConnections() throws {
+        for legacy in [false, true] {
+            let f = try Fixture(), endpoint = try f.endpoint(), draft = try f.proposal()
+            let invitation = try openV2(endpoint)
+            let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+                decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+            try endpoint.reservePairingV2(bindingV2(invitation, proposal: proposal))
+            let result = Box<Data?>(Data())
+            if legacy {
+                endpoint.stagePairing(try draft.encode(), authorization: authorization) { result.value = $0 }
+            } else {
+                endpoint.stagePairingV2(try proposal.encode(), connection: UUID(), authorization: authorization) { result.value = $0 }
+            }
+            XCTAssertNil(result.value)
+            XCTAssertEqual(try f.records(), 0)
+            XCTAssertEqual(f.environment.signed.value, 0)
+        }
+    }
+
+    func testV2WindowRetiresOnDisconnectAndRejectsExpiryAndChangedClaims() throws {
+        for mode in 0...2 {
+            let f = try Fixture(), endpoint = try f.endpoint(), draft = try f.proposal()
+            let invitation = try openV2(endpoint)
+            let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+                decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+            let binding = try bindingV2(invitation, proposal: proposal)
+            try endpoint.reservePairingV2(binding)
+            if mode == 0 { endpoint.disconnectPairingV2(binding.connection) }
+            if mode == 1 { f.environment.time.value = 1_100 }
+            let changed = try f.proposal(phone: 10)
+            let payload = try mode == 2 ? PairingPhoneProposal(phone: changed.phone, transportKey: changed.transportKey,
+                decisionKey: changed.decisionKey, biometricKey: changed.biometricKey).encode() : proposal.encode()
+            let result = Box<Data?>(Data())
+            endpoint.stagePairingV2(payload, connection: binding.connection, authorization: authorization) { result.value = $0 }
+            XCTAssertNil(result.value)
+            XCTAssertEqual(try f.records(), 0)
+        }
+    }
+
+    private func revokeSelectionForV2(_ f: Fixture) async throws -> PairedPhoneSelection {
+        let (channel, _) = try await pairForRevocation(f)
+        let listed = try await channel.pairedPhones()
+        let active = try XCTUnwrap(listed.selection(for: XCTUnwrap(listed.phones.first)))
+        _ = try await channel.revokePhone(active, authorization: authorization)
+        let retained = try await channel.pairedPhonesForRePair()
+        let pending = try XCTUnwrap(retained.rePairSelection(for: active.phone))
+        XCTAssertThrowsError(try f.access.openV2Window(label: "Fixture", predecessor: active))
+        await channel.close()
+        return pending
+    }
+
+    private func advanceV2TrustRevision(_ f: Fixture) throws {
+        let other = try f.endpoint(), biometric = P256.Signing.PrivateKey()
+        defer { other.close() }
+        try hello(other)
+        let transcript = try staged(other, proposal: f.proposal(phone: 10, epoch: 11, keyBase: 70, biometric: biometric))
+        let proof = try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        XCTAssertNotNil(try commit(other, transcript: transcript, fixture: f, proof: proof))
+    }
+
+    func testV2RePairStagesAndCommitsTheProvedReplacement() async throws {
+        let f = try Fixture()
+        let pending = try await revokeSelectionForV2(f)
+        let endpoint = try f.endpoint(), invitation = try openV2(endpoint, predecessor: pending)
+        let biometric = P256.Signing.PrivateKey()
+        let proposal = try rePairProposal(f, predecessor: pending.predecessor, biometric: biometric)
+        let records = try f.records(), authorized = f.environment.authorized.value
+        let binding = try bindingV2(invitation, proposal: proposal)
+        try endpoint.reservePairingV2(binding)
+        XCTAssertEqual(try f.records(), records)
+        XCTAssertEqual(f.environment.authorized.value, authorized)
+        XCTAssertEqual(invitation.replacement, proposal.replacement)
+
+        let result = Box<Data?>(nil)
+        endpoint.stagePairingV2(try proposal.encode(), connection: binding.connection, authorization: authorization) {
+            result.value = $0
+        }
+        let transcript = try PairingTranscript.decode(XCTUnwrap(result.value))
+        try proposal.validate(transcript)
+        XCTAssertEqual(transcript.expectedTrustRevision, GatewayHostSnapshot.bytes(pending.revision))
+        let proof = try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let receipt = try XCTUnwrap(commit(endpoint, transcript: transcript, fixture: f, proof: proof))
+        XCTAssertTrue(try transcript.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        let phones = try f.access.pairedPhones()
+        XCTAssertTrue(phones.phones.contains(DeliveryRecipient(phoneID: proposal.phone.scope.phoneID,
+            enrollmentEpoch: proposal.phone.scope.enrollmentEpoch)))
+        XCTAssertFalse(phones.phones.contains(pending.phone))
+        try f.assertCheckpoint()
+    }
+
+    func testV2RePairRefusesASelectionThatChangesBetweenOpeningAndProof() async throws {
+        let f = try Fixture()
+        let pending = try await revokeSelectionForV2(f)
+        let endpoint = try f.endpoint(), invitation = try openV2(endpoint, predecessor: pending)
+        let proposal = try rePairProposal(f, predecessor: pending.predecessor, biometric: .init())
+        let other = try f.endpoint(), biometric = P256.Signing.PrivateKey()
+        defer { other.close() }
+        try hello(other)
+        let replacement = try rePairProposal(f, predecessor: pending.predecessor, biometric: biometric, epoch: 51, keyBase: 73)
+        let result = Box<Data?>(nil)
+        other.stagePairing(try replacement.encode(), authorization: authorization) { result.value = $0 }
+        let transcript = try PairingTranscript.decode(XCTUnwrap(result.value))
+        let proof = try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        XCTAssertNotNil(try commit(other, transcript: transcript, fixture: f, proof: proof))
+        XCTAssertNil(try f.access.pairedPhones(includeRePair: true).rePairSelection(for: pending.phone))
+        let binding = try bindingV2(invitation, proposal: proposal)
+        XCTAssertThrowsError(try endpoint.reservePairingV2(binding)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unsupportedReplacement)
+        }
+        XCTAssertNil(try f.journal.read { try $0.pendingRecoveryStage(phoneID: pending.phone.phoneID) })
+    }
+
+    func testV2RePairRefusesARevisionThatChangesBetweenProofAndStaging() async throws {
+        let f = try Fixture()
+        let pending = try await revokeSelectionForV2(f)
+        let endpoint = try f.endpoint(), invitation = try openV2(endpoint, predecessor: pending)
+        let proposal = try rePairProposal(f, predecessor: pending.predecessor, biometric: .init())
+        let binding = try bindingV2(invitation, proposal: proposal)
+        try endpoint.reservePairingV2(binding)
+        try advanceV2TrustRevision(f)
+        XCTAssertFalse(try f.access.canRePair(pending))
+        let records = try f.records(), result = Box<Data?>(Data())
+        endpoint.stagePairingV2(try proposal.encode(), connection: binding.connection, authorization: authorization) {
+            result.value = $0
+        }
+        XCTAssertNil(result.value)
+        XCTAssertEqual(try f.records(), records)
+        XCTAssertNil(try f.journal.read { try $0.pendingRecoveryStage(phoneID: pending.phone.phoneID) })
+        try f.assertCheckpoint()
+    }
+
+    private struct V2TransportFixture: MacPairingTransportControl {
+        let owner: TransportPairingSetupOwner
+        func start(invitation: PairingInvitation) async throws -> UInt16 { throw Failure.denied }
+        func start(rePair: RePairInvitation) async throws -> UInt16 { throw Failure.denied }
+        func current() async throws -> TransportPairingSnapshot { try await owner.snapshot() }
+        func stage(candidateID: Data, transcript: PairingTranscript) async throws {
+            try await owner.stage(candidateID: candidateID, transcript: transcript)
+        }
+        func deliverReceipt(candidateID: Data, signature: Data) async throws {
+            try await owner.deliverReceipt(candidateID: candidateID, signature: signature)
+        }
+        func abort() { owner.abort() }
+        func close() async { await owner.closeAndWait() }
+    }
+
+    private struct V2AdministratorFixture: MacPairingAdministrator {
+        func authorization() async throws -> Data { Data(count: MemoryLayout<AuthorizationExternalForm>.size) }
+        func close() async {}
+    }
+
+    private final class V2IdentityFixture: @unchecked Sendable {
+        let identity: SecIdentity
+        init(_ identity: SecIdentity) { self.identity = identity }
+    }
+
+    func testNativeV2SetupAdmitsOnlyAProvedCandidateAndKeepsLegacyOffThatWindow() async throws {
+        let f = try Fixture(pairingLifetime: 10_000), driver = try ClientDriver(f)
+        let root = client(f, driver: driver)
+        let config = try TransportPairingControlConfiguration(macID: f.mac, accountID: f.account,
+            ownerUID: 501, transportUID: 502, serviceName: "dev.remozio.tests.pairing",
+            teamID: "ABCDEFGHIJ", appIdentifier: "dev.remozio.app", appHashes: [Data(repeating: 4, count: 20)],
+            transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 5, count: 20)])
+        let transport = TransportPairingSetupOwner(configuration: config, factory: { _, _, _ in throw Failure.denied })
+        let macIdentity = try V2IdentityFixture(AuthorityJournalSchema19MigrationTests.fixtureIdentity(f.transport))
+        let v2 = MacPairingV2Control(open: { try await root.openV2(label: $0, predecessor: $1) },
+            listen: { window in
+                _ = try await transport.beginV2(window, identity: macIdentity.identity,
+                    reserve: driver.endpoint.reservePairingV2, disconnect: driver.endpoint.disconnectPairingV2)
+            }, stage: { try await root.stageV2($0, connection: $1, authorization: $2) })
+        let session = MacPairingSession(root: root, transport: V2TransportFixture(owner: transport),
+            administrator: V2AdministratorFixture(), v2: v2, unixMilliseconds: { 1000 }, elapsedMilliseconds: { 100 })
+        defer { session.abort() }
+        let opened = try await session.start(label: "Fixture")
+        let invitation = try XCTUnwrap(opened.invitationV2)
+        XCTAssertNil(opened.invitation)
+        let port = try await transport.snapshot().port
+        let phone = P256.Signing.PrivateKey()
+        let phoneIdentity = try AuthorityJournalSchema19MigrationTests.fixtureIdentity(phone)
+        let (legacy, _) = try AuthorityJournalSchema19MigrationTests.fixtureConnectLookup(port: port, purpose: PairingSetupFrame.applicationProtocol,
+            serverKey: invitation.invitation.transportPublicKey, identity: phoneIdentity)
+        let legacyRejected: Bool
+        do {
+            try await legacy.start(timeoutMilliseconds: 2_000)
+            legacyRejected = try await legacy.receive() == nil
+        } catch NetworkChannelError.failed {
+            legacyRejected = true
+        } catch NetworkChannelError.closed {
+            legacyRejected = true
+        }
+        await legacy.close()
+        XCTAssertTrue(legacyRejected, "The v2 listener accepted a legacy setup frame")
+
+        let (channel, connection) = try AuthorityJournalSchema19MigrationTests.fixtureConnectLookup(port: port, purpose: PairingSetupPreludeV2.applicationProtocol,
+            serverKey: invitation.invitation.transportPublicKey, identity: phoneIdentity)
+        defer { channel.abort() }
+        try await channel.start(timeoutMilliseconds: 2_000)
+        let metadata = try XCTUnwrap(connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata)
+        let label = PairingInvitationV2.exporterLabel
+        let raw = try XCTUnwrap(sec_protocol_metadata_create_secret(metadata.securityProtocolMetadata, label.utf8.count, label, 32))
+        let exporter = Data(DispatchData._unconditionallyBridgeFromObjectiveC(raw))
+        guard case .challenge(let challenge) = try await PairingSetupPreludeV2.decode(
+            AuthorityJournalSchema19MigrationTests.fixtureReadNativeFrame(from: channel, maximum: PairingSetupPreludeV2.maximumBytes)) else {
+            return XCTFail("Expected the v2 challenge")
+        }
+        let beforeProof = try await session.current()
+        XCTAssertTrue(beforeProof.candidates.isEmpty)
+        XCTAssertEqual(try f.records(), 0)
+
+        let draft = try f.proposal()
+        let proposal = try PairingPhoneProposal(phone: draft.phone,
+            transportKey: .init(keyID: draft.transportKey.keyID, publicKey: phone.publicKey.x963Representation),
+            decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+        let tag = try invitation.proof(proposal: proposal, challenge: challenge, exporter: exporter)
+        try await AuthorityJournalSchema19MigrationTests.fixtureSendNativeFrame(PairingSetupPreludeV2.proposal(proposal, tag: tag).encode(), to: channel)
+        let provedBy = ContinuousClock.now.advanced(by: .seconds(2))
+        var snapshot = try await session.current()
+        while snapshot.candidates.isEmpty, ContinuousClock.now < provedBy {
+            try await Task.sleep(for: .milliseconds(5))
+            snapshot = try await session.current()
+        }
+        let candidate = try XCTUnwrap(snapshot.candidates.first)
+        XCTAssertEqual(snapshot.candidates.count, 1)
+        XCTAssertNil(snapshot.invitationV2)
+        XCTAssertEqual(try f.records(), 0)
+
+        _ = try await session.select(candidateID: candidate.id)
+        guard case .transcript(let transcript) = try await PairingSetupFrame.decode(
+            AuthorityJournalSchema19MigrationTests.fixtureReadNativeFrame(from: channel, maximum: PairingSetupFrame.maximumBytes)) else { return XCTFail("Expected transcript") }
+        try proposal.validate(transcript)
+        XCTAssertEqual(try f.records(), 0)
+        _ = try await session.confirmComparison()
+        let proof = try f.biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let digest = try transcript.digest()
+        try await AuthorityJournalSchema19MigrationTests.fixtureSendNativeFrame(PairingSetupFrame.proof(setupID: transcript.setupID, digest: digest, signature: proof).encode(), to: channel)
+        let proofBy = ContinuousClock.now.advanced(by: .seconds(2))
+        var confirmed = try await session.current()
+        while !confirmed.phoneProofAvailable, ContinuousClock.now < proofBy {
+            try await Task.sleep(for: .milliseconds(5))
+            confirmed = try await session.current()
+        }
+        XCTAssertTrue(confirmed.phoneProofAvailable)
+        async let receipt = AuthorityJournalSchema19MigrationTests.fixtureReadNativeFrame(from: channel, maximum: PairingSetupFrame.maximumBytes)
+        let committed = try await session.commit()
+        XCTAssertEqual(committed.phase, .receiptSent)
+        guard case .receipt(let setup, let retainedDigest, let signature) = try await PairingSetupFrame.decode(receipt) else {
+            return XCTFail("Expected receipt")
+        }
+        XCTAssertEqual(setup, transcript.setupID)
+        XCTAssertEqual(retainedDigest, digest)
+        XCTAssertTrue(try transcript.verify(signature: signature, publicKey: invitation.invitation.authorityPublicKey, purpose: .macCommit))
+        XCTAssertEqual(try f.records(), 1)
+        try f.assertCheckpoint()
+        await session.close()
+        await channel.close()
+    }
+
     func testStageUsesFreshRootValuesAndNoAuthorityWrite() throws {
         let f = try Fixture(), endpoint = try f.endpoint(), proposal = try f.proposal()
         try hello(endpoint)
@@ -1624,6 +1930,18 @@ extension AuthorityPairingSetupTests {
 }
 
 final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Sendable {
+    private func identity(_ key: P256.Signing.PrivateKey) throws -> SecIdentity { try Self.fixtureIdentity(key) }
+    private func connectLookup(port: UInt16, purpose: String, serverKey: Data, identity: SecIdentity)
+        throws -> (NetworkByteChannel, NWConnection) {
+        try Self.fixtureConnectLookup(port: port, purpose: purpose, serverKey: serverKey, identity: identity)
+    }
+    private func sendNativeFrame(_ bytes: Data, to channel: NetworkByteChannel) async throws {
+        try await Self.fixtureSendNativeFrame(bytes, to: channel)
+    }
+    private func readNativeFrame(from channel: NetworkByteChannel, maximum: Int) async throws -> Data {
+        try await Self.fixtureReadNativeFrame(from: channel, maximum: maximum)
+    }
+
     private typealias Fixture = AuthorityPairingSetupTests.Fixture
     private typealias Box<Value> = AuthorityPairingSetupTests.Box<Value>
     private enum Fault: Error { case injected }
@@ -2010,7 +2328,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         endpoint.pairingLookup(proof) { XCTAssertNil($0) }
     }
 
-    private func identity(_ key: P256.Signing.PrivateKey) throws -> SecIdentity {
+    fileprivate static func fixtureIdentity(_ key: P256.Signing.PrivateKey) throws -> SecIdentity {
         let attributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits as String: 256]
         let native = try XCTUnwrap(SecKeyCreateWithData(key.x963Representation as CFData, attributes as CFDictionary, nil))
@@ -2030,7 +2348,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         return try XCTUnwrap(value.value)
     }
 
-    private func connectLookup(port: UInt16, purpose: String, serverKey: Data, identity: SecIdentity)
+    fileprivate static func fixtureConnectLookup(port: UInt16, purpose: String, serverKey: Data, identity: SecIdentity)
         throws -> (NetworkByteChannel, NWConnection) {
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
         sec_protocol_options_set_local_identity(options, try XCTUnwrap(sec_identity_create(identity)))
@@ -2046,7 +2364,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         return (NetworkByteChannel(connection: connection) { _ in true }, connection)
     }
 
-    private func sendNativeFrame(_ bytes: Data, to channel: NetworkByteChannel) async throws {
+    fileprivate static func fixtureSendNativeFrame(_ bytes: Data, to channel: NetworkByteChannel) async throws {
         let size = UInt32(bytes.count).bigEndian
         try await channel.send(withUnsafeBytes(of: size) { Data($0) } + bytes)
     }
@@ -2055,7 +2373,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         try await sendNativeFrame(frame.encode(), to: channel)
     }
 
-    private func readNativeFrame(from channel: NetworkByteChannel, maximum: Int) async throws -> Data {
+    fileprivate static func fixtureReadNativeFrame(from channel: NetworkByteChannel, maximum: Int) async throws -> Data {
         var bytes = Data()
         while bytes.count < 4 {
             guard let chunk = try await channel.receive() else { throw Fault.injected }
