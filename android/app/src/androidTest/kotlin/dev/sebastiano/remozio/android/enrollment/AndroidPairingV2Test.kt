@@ -2,12 +2,11 @@ package dev.sebastiano.remozio.android.enrollment
 
 import android.os.Parcelable
 import android.net.ssl.SSLSockets
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.SparseArray
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.sebastiano.remozio.android.transport.AndroidTlsTestFixture
 import dev.remozio.phone.transport.ApprovalCarrierRoute
 import dev.remozio.phone.transport.DirectTCPConnector
 import dev.remozio.phone.transport.PairingV2TLSProvider
@@ -27,22 +26,12 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.Socket
 import java.security.KeyPairGenerator
-import java.security.KeyStore
-import java.security.Principal
-import java.security.PrivateKey
 import java.security.PublicKey
-import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
-import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
-import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.X509ExtendedKeyManager
-import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.flowOf
@@ -79,39 +68,24 @@ class AndroidPairingV2Test {
     }
 
     @Test fun v2UsesTheAndroidEngineExporterAndSeparatesTheRecoveryDomain(): Unit = runBlocking {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val serverAlias = "remozio-test-v2-server-" + UUID.randomUUID()
-        val clientAlias = "remozio-test-v2-client-" + UUID.randomUUID()
-        try {
-            val server = identity(store, serverAlias)
-            val client = identity(store, clientAlias)
+        AndroidTlsTestFixture.create().use { fixture ->
             val authority = publicKey()
-            val credentials = invitation(authority, server.certificate.publicKey)
+            val credentials = invitation(authority, fixture.serverCertificate.publicKey)
             val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
             val offer = ChannelOffer(ChannelRole.PHONE, scope, ByteArray(32) { 14 }, setOf(1u), emptyList(), emptySet())
-            val proposal = PairingPhoneProposal(offer, PairingKey(ByteArray(16) { 5 }, raw(client.certificate.publicKey)),
+            val proposal = PairingPhoneProposal(offer, PairingKey(ByteArray(16) { 5 }, raw(fixture.clientCertificate.publicKey)),
                 PairingKey(ByteArray(16) { 6 }, raw(publicKey())), PairingKey(ByteArray(16) { 7 }, raw(publicKey())))
             val transcript = PairingTranscript(ByteArray(16) { 8 }, ByteArray(32) { 9 }, offer,
                 ChannelOffer(ChannelRole.MAC, scope, ByteArray(32) { 10 }, setOf(1u), emptyList(), emptySet()), 1u, 1u,
-                raw(authority), raw(server.certificate.publicKey), proposal.transportKey, proposal.decisionKey,
+                raw(authority), raw(fixture.serverCertificate.publicKey), proposal.transportKey, proposal.decisionKey,
                 proposal.biometricKey, ByteArray(32) { 11 }, null, ByteArray(16) { 12 }, 1000u, 2000u)
-            val context = SSLContext.getInstance("TLSv1.3").apply {
-                init(arrayOf(server), arrayOf(trust(client.certificate)), null)
-            }
             val address = InetAddress.getByName("127.0.0.1")
-            (context.serverSocketFactory.createServerSocket(0, 1, address) as SSLServerSocket).use { listener ->
-                listener.soTimeout = 5_000
-                listener.needClientAuth = true
-                listener.sslParameters = listener.sslParameters.apply {
-                    applicationProtocols = arrayOf(PairingSetupPreludeV2.APPLICATION_PROTOCOL)
-                }
+            fixture.listen(address).use { listener ->
                 val challenge = ByteArray(32) { 13 }
                 val invitationExporter = AtomicReference<ByteArray?>()
                 val peer = async(Dispatchers.IO) {
                     (listener.accept() as SSLSocket).use { socket ->
-                        socket.soTimeout = 5_000
-                        socket.startHandshake()
-                        assertEquals(PairingSetupPreludeV2.APPLICATION_PROTOCOL, socket.applicationProtocol)
+                        fixture.handshake(socket, PairingSetupPreludeV2.APPLICATION_PROTOCOL)
                         val output = DataOutputStream(socket.outputStream)
                         fun send(body: ByteArray) { output.writeInt(body.size); output.write(body); output.flush() }
                         send(PairingSetupPreludeV2.Challenge(challenge).encode())
@@ -149,7 +123,7 @@ class AndroidPairingV2Test {
                 }
                 val channel = authenticatePairingV2Routes(this, flowOf(ApprovalCarrierRoute { owner ->
                     DirectTCPConnector().connect(owner, InetSocketAddress(address, listener.localPort))
-                }), arrayOf(client), credentials, proposal, 10_000, provider)
+                }), arrayOf(fixture.clientKeys), credentials, proposal, 10_000, provider)
                 try {
                     assertNull(invitationExporter.get())
                     assertArrayEquals(transcript.encode(), channel.awaitTranscriptV2(credentials).encode())
@@ -159,9 +133,6 @@ class AndroidPairingV2Test {
                     invitationExporter.getAndSet(null)?.fill(0)
                 }
             }
-        } finally {
-            store.deleteEntry(clientAlias)
-            store.deleteEntry(serverAlias)
         }
     }
 
@@ -175,34 +146,4 @@ class AndroidPairingV2Test {
     }.generateKeyPair().public
 
     private fun raw(key: PublicKey) = key.encoded.takeLast(65).toByteArray()
-
-    private fun identity(store: KeyStore, alias: String): Identity {
-        KeyPairGenerator.getInstance("EC", "AndroidKeyStore").apply {
-            initialize(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
-                .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                .setDigests(KeyProperties.DIGEST_SHA256)
-                .build())
-        }.generateKeyPair()
-        return Identity(alias, store.getKey(alias, null) as PrivateKey, store.getCertificate(alias) as X509Certificate)
-    }
-
-    private fun trust(peer: X509Certificate) = object : X509TrustManager {
-        override fun getAcceptedIssuers() = arrayOf(peer)
-        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
-            if (chain.size != 1 || !chain[0].encoded.contentEquals(peer.encoded)) {
-                throw java.security.cert.CertificateException("Unexpected test certificate")
-            }
-        }
-        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) = checkClientTrusted(chain, authType)
-    }
-
-    private class Identity(val alias: String, val key: PrivateKey, val certificate: X509Certificate) : X509ExtendedKeyManager() {
-        override fun chooseEngineClientAlias(types: Array<String>?, issuers: Array<Principal>?, engine: SSLEngine?) = alias
-        override fun chooseClientAlias(types: Array<String>?, issuers: Array<Principal>?, socket: Socket?) = alias
-        override fun chooseServerAlias(type: String?, issuers: Array<Principal>?, socket: Socket?) = alias
-        override fun getClientAliases(type: String?, issuers: Array<Principal>?) = arrayOf(alias)
-        override fun getServerAliases(type: String?, issuers: Array<Principal>?) = arrayOf(alias)
-        override fun getCertificateChain(alias: String?) = if (alias == this.alias) arrayOf(certificate) else null
-        override fun getPrivateKey(alias: String?) = if (alias == this.alias) key else null
-    }
 }
