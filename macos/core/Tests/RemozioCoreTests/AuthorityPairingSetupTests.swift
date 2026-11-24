@@ -1545,6 +1545,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             legacyRejected = true
         } catch NetworkChannelError.closed {
             legacyRejected = true
+        } catch NetworkChannelError.timedOut {
+            // Network.framework can leave the incompatible TLS handshake pending until the client deadline.
+            // The v2 exchange below must still complete on this listener.
+            legacyRejected = true
         }
         await legacy.close()
         XCTAssertTrue(legacyRejected, "The v2 listener accepted a legacy setup frame")
