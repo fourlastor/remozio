@@ -2324,7 +2324,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         endpoint.pairingLookup(proof) { XCTAssertNil($0) }
     }
 
-    fileprivate static func fixtureIdentity(_ key: P256.Signing.PrivateKey) throws -> SecIdentity {
+    static func fixtureIdentity(_ key: P256.Signing.PrivateKey) throws -> SecIdentity {
         let attributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits as String: 256]
         let native = try XCTUnwrap(SecKeyCreateWithData(key.x963Representation as CFData, attributes as CFDictionary, nil))
@@ -2344,7 +2344,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         return try XCTUnwrap(value.value)
     }
 
-    fileprivate static func fixtureConnectLookup(port: UInt16, purpose: String, serverKey: Data, identity: SecIdentity)
+    static func fixtureConnectLookup(port: UInt16, purpose: String, serverKey: Data, identity: SecIdentity)
         throws -> (NetworkByteChannel, NWConnection) {
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
         sec_protocol_options_set_local_identity(options, try XCTUnwrap(sec_identity_create(identity)))
@@ -2360,7 +2360,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         return (NetworkByteChannel(connection: connection) { _ in true }, connection)
     }
 
-    fileprivate static func fixtureSendNativeFrame(_ bytes: Data, to channel: NetworkByteChannel) async throws {
+    static func fixtureSendNativeFrame(_ bytes: Data, to channel: NetworkByteChannel) async throws {
         let size = UInt32(bytes.count).bigEndian
         try await channel.send(withUnsafeBytes(of: size) { Data($0) } + bytes)
     }
@@ -2369,7 +2369,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         try await sendNativeFrame(frame.encode(), to: channel)
     }
 
-    fileprivate static func fixtureReadNativeFrame(from channel: NetworkByteChannel, maximum: Int) async throws -> Data {
+    static func fixtureReadNativeFrame(from channel: NetworkByteChannel, maximum: Int) async throws -> Data {
         var bytes = Data()
         while bytes.count < 4 {
             guard let chunk = try await channel.receive() else { throw Fault.injected }
