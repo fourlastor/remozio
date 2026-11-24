@@ -243,6 +243,12 @@ public final class AuthorityJournal: @unchecked Sendable {
         self.requests = requests
     }
 
+    /// Fixture seam for supplying a controlled pool to the prepared request owner.
+    convenience init(requests: sending ApprovalRequestCoordinator, commandFilesystem: CommandFilesystemProbePool) {
+        self.init(requests: requests)
+        self.commandFilesystem = commandFilesystem
+    }
+
     /// Fixture seam for observing a pairing operation that cannot acquire the owner lock.
     convenience init(requests: sending ApprovalRequestCoordinator, observePairingContention: @escaping @Sendable () -> Void) {
         self.init(requests: requests)

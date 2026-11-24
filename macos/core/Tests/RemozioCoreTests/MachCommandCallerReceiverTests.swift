@@ -2328,7 +2328,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                         let requests = try ApprovalRequestCoordinator(database: ownedDatabase, writer: ownedWriter, clockEpoch: clock,
                             maximumRequests: maximumRequests, maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits,
                             decisionLimits: limits, signingLimits: limits, auditLimits: limits)
-                        authority = AuthorityJournal(requests: requests)
+                        authority = AuthorityJournal(requests: requests, commandFilesystem: commandFilesystem)
                     } else {
                         authority = AuthorityJournal(database: ownedDatabase, commandFilesystem: commandFilesystem)
                     }
@@ -5181,7 +5181,8 @@ extension MachCommandCallerReceiverTests {
         let admissionPort = try Endpoint(), terminal = try Endpoint()
         let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
             inputDescriptor: inputDescriptor, executablePath: path, arguments: arguments, binding: binding)
-        let request = try admitOwnedCommand(command, fixture: fixture)
+        let admittedAt = fixture.now(existingFixture == nil ? 110 : 120)
+        let request = try admitOwnedCommand(command, fixture: fixture, now: { admittedAt })
         let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
         _ = try ownerDecision(request, fixture: fixture, decline: false)
         return NativeDispatchFixture(fixture: fixture, authority: authority, launcher: launcher,
@@ -5305,14 +5306,19 @@ extension MachCommandCallerReceiverTests {
     }
 
     func testNativeDispatchSlowCommitDoesNotDiscardAcceptedFinalProof() throws {
-        let pool = CommandFilesystemProbePool(timeout: .seconds(1))
+        let probeBudget: Duration = .seconds(1)
+        let pool = CommandFilesystemProbePool(timeout: probeBudget)
         let test = try nativeDispatchFixture(commandFilesystem: pool)
         let calls = OSAllocatedUnfairLock(initialState: 0)
         let now = test.fixture.now(130)
         try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, clock: {
             // Calls 1 and 2 check the original approval. The third call starts the durable dispatch write.
             let count = calls.withLock { $0 += 1; return $0 }
-            if count == 3 { usleep(1_250_000) }
+            if count == 3 {
+                let started = ContinuousClock.now
+                Thread.sleep(forTimeInterval: 1.25)
+                XCTAssertGreaterThan(started.duration(to: ContinuousClock.now), probeBudget)
+            }
             return now
         })
         try awaitDispatchCleanup(test.authority)
