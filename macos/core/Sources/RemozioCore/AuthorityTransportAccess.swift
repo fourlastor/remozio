@@ -181,7 +181,7 @@ final class AuthorityTransportAccess: Sendable {
         return result
     }
 
-    private func requireCurrent(_ transaction: JournalTransaction) throws {
+    func requireCurrent(_ transaction: JournalTransaction) throws {
         guard let snapshot = try transaction.codePolicy(), snapshot.roleRevisions[.transport] == roleRevision,
               snapshot.policy.entries.first(where: { $0.role == .transport }) == entry else {
             throw AuthorityTransportAccessError.policyMismatch

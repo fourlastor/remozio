@@ -209,6 +209,10 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         }
     }
 
+    func ownsProofWindow(_ id: Data) -> Bool {
+        lock.withLock { !closed && ready && v2Window?.id == id && v2Admission != nil }
+    }
+
     /// Bind an authenticated proof link to this app endpoint's live v2 window.
     func proofReservations(windowID: Data, link: AuthorityPairingProofLink) throws -> AuthorityPairingProofReservations {
         let window = try lock.withLock {

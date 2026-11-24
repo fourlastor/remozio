@@ -135,6 +135,13 @@ final class AuthorityPairingProofReservations: Sendable {
 
     deinit { retire() }
 
+    /// Charge native proof work to the window before decoding or checking a proof.
+    func withXPCWork<Value>(_ operation: () throws -> Value) throws -> Value {
+        guard window.proofXPCBudget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+        defer { window.proofXPCBudget.release() }
+        return try operation()
+    }
+
     func register(connection: UUID, acceptedAt: UInt64, peerPoint: Data, exporter: Data) throws -> Candidate {
         try checkCurrentAndPrune()
         return try state.withLock {

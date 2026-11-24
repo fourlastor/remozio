@@ -41,6 +41,10 @@ struct PairingSetupV2Admissions {
         return true
     }
 
+    func isVerifying(_ id: UUID, at now: ContinuousClock.Instant) -> Bool {
+        pending.contains { $0.id == id && $0.phase == .verifying && now < $0.deadline }
+    }
+
     mutating func completeVerification(_ id: UUID, at now: ContinuousClock.Instant) -> Bool {
         guard let index = pending.firstIndex(where: { $0.id == id && $0.phase == .verifying && now < $0.deadline }) else {
             return false

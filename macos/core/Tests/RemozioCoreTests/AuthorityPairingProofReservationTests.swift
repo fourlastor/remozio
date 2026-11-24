@@ -77,6 +77,26 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
         XCTAssertThrowsError(try fixture.window.takeProposal(connection: candidate.id, matching: proposal, at: fixture.clock.now()))
     }
 
+    func testExhaustedXPCBudgetRejectsBeforeConsumingOrDecodingProposal() throws {
+        let fixture = try Fixture(), reservations = try fixture.reservations()
+        let candidate = try fixture.register(reservations)
+        let invalidProposal = Data([0xff])
+        let tag = Data(repeating: 0, count: 32)
+
+        try reservations.withXPCWork {
+            XCTAssertThrowsError(try reservations.withXPCWork {
+                try reservations.verify(candidate: candidate.id, proposalBytes: invalidProposal, tag: tag)
+            }) {
+                guard case AuthorityXPCEndpointError.unavailable = $0 else {
+                    return XCTFail("Expected proof work admission to fail")
+                }
+            }
+            XCTAssertEqual(reservations.pendingCount, 1)
+        }
+        try reservations.withXPCWork { try fixture.verify(reservations, candidate) }
+        try reservations.withXPCWork { try reservations.confirm(candidate: candidate.id) }
+    }
+
     func testRegistrationRetainsReplayChecksAfterCandidateRetirement() throws {
         let fixture = try Fixture(), reservations = try fixture.reservations()
         let connection = UUID(), exporter = Data(repeating: 21, count: 32)

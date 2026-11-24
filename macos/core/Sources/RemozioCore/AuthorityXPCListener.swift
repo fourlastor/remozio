@@ -123,6 +123,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private var running = false
     private var closed = false
     private var pairingProofs: AuthorityPairingProofLinks?
+    private var transportAccess: AuthorityTransportAccess?
     private let handshakeTimeout: Duration
 
     public init(serviceName: String, peerPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
@@ -234,17 +235,17 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             snapshot: { try access.snapshot() }, validate: { try access.validate($0) },
             requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler,
             pairingReceipt: receiptHandler, pairingLookup: pairingLookupHandler, phonePushRegistration: registrationHandler, phonePushRecovery: recoveryHandler, phoneAudit: auditHandler, phoneRouting: routingHandler, phoneUpdateScheduling: updateSchedulingHandler, wakeHints: wakeHints)
+        self.transportAccess = access
     }
     deinit { listener.invalidate(); registry.close(); pairingProofs?.close() }
-    func preparePairingProofs(access: AuthorityPairingSetupAccess) throws {
+    func preparePairingProofs(access: AuthorityPairingSetupAccess, owners: AuthorityMaintenancePairingOwners) throws {
         try lock.withLock {
-            guard getuid() == 0, geteuid() == 0, !running, !closed, pairingProofs == nil else {
-                throw AuthorityXPCEndpointError.unavailable
-            }
-            pairingProofs = .init(policy: policy, timeout: handshakeTimeout) { [verifyHandshakePolicy] in
-                try verifyHandshakePolicy()
+            guard getuid() == 0, geteuid() == 0, !running, !closed, pairingProofs == nil, let transportAccess,
+                  owners.admission === access.maintenanceAdmission else { throw AuthorityXPCEndpointError.unavailable }
+            pairingProofs = .init(policy: policy, timeout: handshakeTimeout, verifyCurrent: {
+                try transportAccess.verifyCurrent()
                 try access.verifyCurrent()
-            }
+            }, bindReservations: owners.proofReservations, validateTransport: transportAccess.requireCurrent)
         }
     }
     public func start() throws {

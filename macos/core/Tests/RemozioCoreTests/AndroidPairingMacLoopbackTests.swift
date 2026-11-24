@@ -114,7 +114,7 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
         throw FixtureError.timeout
     }
 
-    private static func transcript(for proposal: PairingPhoneProposal, invitation: PairingInvitation) throws -> PairingTranscript {
+    static func transcript(for proposal: PairingPhoneProposal, invitation: PairingInvitation) throws -> PairingTranscript {
         let mac = try ChannelOffer(role: .mac, scope: proposal.phone.scope, nonce: AuthorityPairingSetupAccess.secureRandom(32),
             envelopeVersions: [1], requests: [], auditVersions: [])
         let issued = UInt64(Date().timeIntervalSince1970 * 1000)
@@ -123,20 +123,20 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
             minimumEnvelopeVersion: invitation.minimumEnvelopeVersion, selectedEnvelopeVersion: 1,
             macAuthorityKey: invitation.authorityPublicKey, macTransportKey: invitation.transportPublicKey,
             transportKey: proposal.transportKey, decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey,
-            enrollmentTag: AuthorityPairingSetupAccess.secureRandom(32), replacement: nil,
+            enrollmentTag: AuthorityPairingSetupAccess.secureRandom(32), replacement: proposal.replacement,
             expectedTrustRevision: Data(repeating: 1, count: 16), issuedAtUnixMillis: issued, expiresAtUnixMillis: issued + 30_000)
     }
 
-    private static func pairNativeClient(port: UInt16, invitation: PairingInvitationV2) async throws {
+    static func pairNativeClient(port: UInt16, invitation: PairingInvitationV2) async throws {
         let transport = P256.Signing.PrivateKey()
         let biometric = P256.Signing.PrivateKey()
         let scope = try ChannelScope(macID: invitation.invitation.macID, accountID: invitation.invitation.accountID,
-            phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
+            phoneID: invitation.replacement?.phoneID ?? Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
         let proposal = try PairingPhoneProposal(phone: ChannelOffer(role: .phone, scope: scope,
             nonce: AuthorityPairingSetupAccess.secureRandom(32), envelopeVersions: [1], requests: [], auditVersions: []),
             transportKey: .init(keyID: Data(repeating: 5, count: 16), publicKey: transport.publicKey.x963Representation),
             decisionKey: .init(keyID: Data(repeating: 6, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
-            biometricKey: .init(keyID: Data(repeating: 7, count: 16), publicKey: biometric.publicKey.x963Representation))
+            biometricKey: .init(keyID: Data(repeating: 7, count: 16), publicKey: biometric.publicKey.x963Representation), replacement: invitation.replacement)
         let (channel, connection) = try AuthorityJournalSchema19MigrationTests.fixtureConnectLookup(port: port,
             purpose: PairingSetupPreludeV2.applicationProtocol, serverKey: invitation.invitation.transportPublicKey,
             identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport))

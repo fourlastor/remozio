@@ -97,14 +97,17 @@ extension AuthorityXPCDriver {
     func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
 }
 
-private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable {
+final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable {
     private let connection: NSXPCConnection
     private let policy: XPCPeerPolicy
-    init(serviceName: String, policy: XPCPeerPolicy) {
-        self.policy = policy
-        connection = NSXPCConnection(machServiceName: serviceName, options: .privileged)
+    convenience init(serviceName: String, policy: XPCPeerPolicy) {
+        self.init(connection: NSXPCConnection(machServiceName: serviceName, options: .privileged),
+                  policy: policy, configure: policy.configure)
+    }
+    init(connection: NSXPCConnection, policy: XPCPeerPolicy, configure: (NSXPCConnection) -> Void) {
+        self.connection = connection; self.policy = policy
         connection.remoteObjectInterface = NSXPCInterface(with: TransportAuthorityXPCProtocol.self)
-        policy.configure(connection)
+        configure(connection)
     }
     func start(invalidated: @escaping @Sendable () -> Void) {
         connection.interruptionHandler = invalidated
