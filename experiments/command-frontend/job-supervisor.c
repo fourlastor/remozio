@@ -98,7 +98,13 @@ int main(int argc, char **argv) {
             } else if (found < 0 && errno != EINTR) error = 85;
             usleep(1000);
         }
-        if (!error && !passive_frontend_complete(reaped, status, slave, &original, started, deadline)) error = 86;
+        if (!error && !passive_frontend_complete(reaped, status, slave, &original, started, deadline)) {
+            error = 86;
+            if (!strcmp(argv[3], "stale") && getenv("REMOZIO_CI_STALE_TRACE")) {
+                fprintf(stderr, "STALE_TRACE supervisor deadline targetResumed=%d frontendForeground=%d\n",
+                    target_resumed(getenv("REMOZIO_FIXTURE_RESUME_MARKER")), tcgetpgrp(slave) == child);
+            }
+        }
         goto cleanup;
     }
     while (!error && !cancelled && !stopped && now() < deadline) {

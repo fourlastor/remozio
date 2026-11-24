@@ -57,7 +57,10 @@ int remozio_fixture_spawn_supervisor(const char *path, char *const arguments[],
         count = snprintf(barrier, sizeof(barrier), "REMOZIO_FIXTURE_STOP_BARRIER=%s", barrier_path);
         if (barrier_path[0] != '/' || count < 0 || (size_t)count >= sizeof(barrier)) error = EINVAL;
     }
-    char *environment[] = {"PATH=/usr/bin:/bin", marker, barrier_path ? barrier : NULL, NULL};
+    char *environment[] = {"PATH=/usr/bin:/bin", marker, NULL, NULL, NULL};
+    int environment_count = 2;
+    if (barrier_path) environment[environment_count++] = barrier;
+    if (getenv("REMOZIO_CI_STALE_TRACE")) environment[environment_count] = "REMOZIO_CI_STALE_TRACE=1";
     if (!error) error = posix_spawn(child, path, &actions, &attributes, arguments, environment);
     if (actions_ready) posix_spawn_file_actions_destroy(&actions);
     if (attributes_ready) posix_spawnattr_destroy(&attributes);

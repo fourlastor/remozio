@@ -58,6 +58,16 @@ def build():
 def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_forced_cleanup=None):
     target = "/bin/bash" if mode == "nested" else str(helpers["target"])
     environment = {"PATH": "/usr/bin:/bin"}
+    trace_stale = mode == "stale" and os.environ.get("GITHUB_ACTIONS") == "true"
+    if trace_stale:
+        environment["REMOZIO_CI_STALE_TRACE"] = "1"
+
+    def report_stale_trace(errors):
+        if trace_stale:
+            for line in errors.decode(errors="replace").splitlines():
+                if line.startswith("STALE_TRACE "):
+                    print(line, file=sys.stderr, flush=True)
+
     if stop_barrier is not None:
         environment["REMOZIO_FIXTURE_STOP_BARRIER"] = str(stop_barrier)
     process = subprocess.Popen([str(binary), "authority", mode, str(helpers["supervisor"]), str(helpers["monitor"]),
@@ -78,7 +88,12 @@ def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_fo
     except (subprocess.TimeoutExpired, KeyboardInterrupt):
         # The authority remains alive to supervise cancellation and reap the actual monitor and target.
         process.send_signal(signal.SIGTERM)
-        output, errors = process.communicate(timeout=timeouts[1])
+        try:
+            _, errors = process.communicate(timeout=timeouts[1])
+        except subprocess.TimeoutExpired as failure:
+            report_stale_trace(failure.stderr or b"")
+            raise
+        report_stale_trace(errors)
         raise
     finally:
         try:
@@ -97,6 +112,14 @@ def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_fo
             process.stderr.close()
     if process.returncode:
         raise RuntimeError(f"Live frontend {mode} returned {process.returncode}: {errors.decode(errors='replace')}")
+    try:
+        return validate_observations(output, mode)
+    except (ValueError, TypeError, AttributeError, KeyError, RuntimeError):
+        report_stale_trace(errors)
+        raise
+
+
+def validate_observations(output, mode):
     observations = json.loads(output)
     if observations.get("nativeSupervisorStatus") != 13 << 8 or observations.get("oneOriginalAdmission") is not True:
         raise RuntimeError(f"Incomplete native result: {observations!r}")
