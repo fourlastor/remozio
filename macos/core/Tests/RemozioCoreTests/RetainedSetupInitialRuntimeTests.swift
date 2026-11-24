@@ -162,7 +162,8 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
         for i in published ? [0, 2] : [0, 2, 4] {
             XCTAssertEqual(state.byCall[i][.readTransaction], 1)
             XCTAssertEqual(state.byCall[i][.runtime], 2)
-            XCTAssertEqual(state.byCall[i][.frame], 6)
+            // Stable frame read cache: one real frame load per read transaction (was 6 before the cache).
+            XCTAssertEqual(state.byCall[i][.frame], 1)
             XCTAssertEqual(state.byCall[i][.activation], 2)
             XCTAssertEqual(state.byCall[i][.policyScan], 7)
         }

@@ -23,7 +23,7 @@ final class RetainedSetupInitialRuntimeEntryTests: XCTestCase {
         machine.observeStoreRead = { counts[$0, default: 0] += 1 }
         defer { machine.observeStoreRead = nil }
         let result = try machine.retainedSetupInitialRuntimeEntry(owner: owner, candidate: candidate)
-        var expected: [Read: Int] = [.readTransaction: 1, .runtime: 2, .frame: 6, .activation: 2, .sharedImport: 6]
+        var expected: [Read: Int] = [.readTransaction: 1, .runtime: 2, .frame: 1 /* stable frame read cache: was 6 */, .activation: 2, .sharedImport: 6]
         if schema >= 25 { expected[.policyMarker] = 1; expected[.policyScan] = 7 }
         XCTAssertEqual(counts, expected)
         counts.removeAll()

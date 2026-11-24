@@ -396,7 +396,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         XCTAssertLessThanOrEqual(s.captures.count, 6)
         for counts in s.outerReads {
             XCTAssertEqual(counts[.readTransaction], journal ? 3 : 2)
-            XCTAssertEqual(counts[.runtime], 2); XCTAssertEqual(counts[.frame], 6); XCTAssertEqual(counts[.activation], 2)
+            XCTAssertEqual(counts[.runtime], 2); XCTAssertEqual(counts[.frame], 1) /* stable frame read cache: was 6 */; XCTAssertEqual(counts[.activation], 2)
             XCTAssertEqual(counts[.writeTransaction, default: 0], 0)
         }
     }
