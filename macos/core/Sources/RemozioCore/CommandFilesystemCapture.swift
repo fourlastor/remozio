@@ -5,7 +5,38 @@ import RemozioProtocol
 
 public enum CommandFilesystemCaptureError: Error, Equatable {
     case invalidPath, invalidExecutable, invalidDirectory, changed, closed, timedOut
+    case credentialUnavailable
     case system(Int32)
+}
+
+/// Authenticated effective credentials from the Mach audit token.
+struct CommandFilesystemCaller: Sendable {
+    let userID: uid_t
+    let groupID: gid_t
+
+    static func requireProcessIdentity() throws {
+        var user: uid_t = 0, group: gid_t = 0
+        guard pthread_getugid_np(&user, &group) == -1, errno == ESRCH else {
+            throw CommandFilesystemCaptureError.credentialUnavailable
+        }
+    }
+
+    func withIdentity<Result>(_ body: () throws -> Result) throws -> Result {
+        try Self.requireProcessIdentity()
+        if geteuid() != 0, userID == geteuid(), groupID == getegid() {
+            return try body()
+        }
+        guard userID != .max, groupID != .max, pthread_setugid_np(userID, groupID) == 0 else {
+            throw CommandFilesystemCaptureError.credentialUnavailable
+        }
+        defer {
+            // A worker must never return to the pool with assumed credentials.
+            if pthread_setugid_np(uid_t.max, gid_t.max) != 0 {
+                fatalError("Cannot restore the command filesystem thread identity")
+            }
+        }
+        return try body()
+    }
 }
 
 /// Captures filesystem facts in the calling process. This does not authorize or execute a command.
@@ -17,6 +48,9 @@ public final class CommandFilesystemCapture {
     public let directory: CapturedDirectory
     let resolvedExecutablePath: Data
     private let captureID = UUID()
+    private let caller: CommandFilesystemCaller?
+    // The SDK defines O_SEARCH as O_EXEC | O_DIRECTORY.
+    private static let searchDirectoryFlags = O_EXEC | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK
     private let resolvedDirectories: [ResolvedDirectory]
     private let resolvedName: Data
     private var executableFD: Int32
@@ -29,28 +63,38 @@ public final class CommandFilesystemCapture {
     }
 
     init(executablePath: Data, directoryPath: Data, deadline: ContinuousClock.Instant,
-         checkProbe: () throws -> Void = {},
+         caller: CommandFilesystemCaller? = nil, checkProbe: () throws -> Void = {},
          checkCancellation: () throws -> Void = {}) throws {
         try Self.validatePath(executablePath)
         try Self.validatePath(directoryPath)
         try Self.checkDeadline(deadline, checkProbe: checkProbe)
         try checkCancellation()
-        let cwd = try Self.openPath(directoryPath, flags: O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK)
+        let cwd = try Self.withCaller(caller) {
+            try Self.openPath(directoryPath, flags: Self.searchDirectoryFlags)
+        }
         var file: Int32 = -1
         var parent: Int32 = -1
         do {
             let cwdInfo = try Self.directoryInfo(cwd)
-            let resolved = try Self.openExecutable(executablePath, deadline: deadline, checkProbe: checkProbe)
-            file = resolved.descriptor
+            let resolved = try Self.withCaller(caller) {
+                try Self.resolveExecutable(executablePath, deadline: deadline, checkProbe: checkProbe)
+            }
             parent = resolved.parent
+            try Self.checkDeadline(deadline, checkProbe: checkProbe)
+            file = try Self.openComponent(parent, resolved.name,
+                flags: O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW | O_NOCTTY)
             let fileInfo = try Self.executableInfo(file)
+            guard Self.stable(resolved.info, fileInfo) else { throw CommandFilesystemCaptureError.changed }
             let digest = try Self.digest(file, initial: fileInfo, deadline: deadline, checkProbe: checkProbe,
                 checkCancellation: checkCancellation)
-            try Self.checkNamedExecutable(executablePath, held: fileInfo)
-            try Self.checkNamedExecutable(resolved.path, held: fileInfo, followLink: false)
-            try Self.checkDirectory(cwd, path: directoryPath, identity: Self.identity(cwdInfo))
+            try Self.withCaller(caller) {
+                try Self.checkNamedExecutable(executablePath, held: fileInfo)
+                try Self.checkNamedExecutable(resolved.path, held: fileInfo, followLink: false)
+                try Self.checkDirectory(cwd, path: directoryPath, identity: Self.identity(cwdInfo))
+            }
             try Self.checkDeadline(deadline, checkProbe: checkProbe)
             try checkCancellation()
+            self.caller = caller
             executable = CapturedExecutable(path: executablePath, identity: Self.identity(fileInfo), sha256: digest)
             directory = CapturedDirectory(path: directoryPath, identity: Self.identity(cwdInfo))
             resolvedExecutablePath = resolved.path
@@ -75,7 +119,8 @@ public final class CommandFilesystemCapture {
         guard executableFD >= 0, directoryFD >= 0 else { throw CommandFilesystemCaptureError.closed }
         do {
             _ = try Self.recheck(executableFD: executableFD, directoryFD: directoryFD, executable: executable, directory: directory,
-                resolvedPath: resolvedExecutablePath, deadline: ContinuousClock.now + Self.phaseTimeout, checkCancellation: checkCancellation)
+                resolvedPath: resolvedExecutablePath, caller: caller, deadline: ContinuousClock.now + Self.phaseTimeout,
+                checkCancellation: checkCancellation)
         } catch { close(); throw error }
     }
 
@@ -91,7 +136,7 @@ public final class CommandFilesystemCapture {
             throw CommandFilesystemCaptureError.system(error)
         }
         return Recheck(captureID: captureID, executableFD: file, directoryFD: cwd, executable: executable,
-            directory: directory, resolvedPath: resolvedExecutablePath)
+            directory: directory, resolvedPath: resolvedExecutablePath, caller: caller)
     }
 
     final class Recheck: Sendable {
@@ -101,16 +146,18 @@ public final class CommandFilesystemCapture {
         private let executable: CapturedExecutable
         private let directory: CapturedDirectory
         private let resolvedPath: Data
+        private let caller: CommandFilesystemCaller?
 
         fileprivate init(captureID: UUID, executableFD: Int32, directoryFD: Int32, executable: CapturedExecutable,
-                         directory: CapturedDirectory, resolvedPath: Data) {
+                         directory: CapturedDirectory, resolvedPath: Data, caller: CommandFilesystemCaller?) {
             self.captureID = captureID; self.executableFD = executableFD; self.directoryFD = directoryFD
             self.executable = executable; self.directory = directory; self.resolvedPath = resolvedPath
+            self.caller = caller
         }
 
         func run(deadline: ContinuousClock.Instant, checkProbe: () throws -> Void) throws -> MetadataProof {
             let observed = try CommandFilesystemCapture.recheck(executableFD: executableFD, directoryFD: directoryFD,
-                executable: executable, directory: directory, resolvedPath: resolvedPath, deadline: deadline,
+                executable: executable, directory: directory, resolvedPath: resolvedPath, caller: caller, deadline: deadline,
                 checkProbe: checkProbe, checkCancellation: {})
             return MetadataProof(captureID: captureID, observed: observed)
         }
@@ -131,40 +178,46 @@ public final class CommandFilesystemCapture {
     func verifyMetadata(_ proof: MetadataProof) throws {
         guard executableFD >= 0, executableParentFD >= 0, directoryFD >= 0 else { throw CommandFilesystemCaptureError.closed }
         guard proof.captureID == captureID else { throw CommandFilesystemCaptureError.changed }
-        try Self.checkDirectory(directoryFD, path: directory.path, identity: directory.identity)
-        try Self.checkNamedExecutable(executable.path, held: proof.observed)
-        for component in resolvedDirectories {
-            let named = try Self.namedInfo(AT_FDCWD, component.path, flags: AT_SYMLINK_NOFOLLOW)
-            guard named.st_mode & S_IFMT == S_IFDIR, Self.identity(named) == component.identity else {
+        try Self.withCaller(caller) {
+            try Self.checkDirectory(directoryFD, path: directory.path, identity: directory.identity)
+            try Self.checkNamedExecutable(executable.path, held: proof.observed)
+            for component in resolvedDirectories {
+                let named = try Self.namedInfo(AT_FDCWD, component.path, flags: AT_SYMLINK_NOFOLLOW)
+                guard named.st_mode & S_IFMT == S_IFDIR, Self.identity(named) == component.identity else {
+                    throw CommandFilesystemCaptureError.changed
+                }
+            }
+            guard Self.identity(try Self.directoryInfo(executableParentFD)) == resolvedDirectories.last?.identity,
+                  Self.stable(proof.observed, try Self.namedInfo(executableParentFD, resolvedName, flags: AT_SYMLINK_NOFOLLOW)),
+                  Self.stable(proof.observed, try Self.executableInfo(executableFD)) else {
                 throw CommandFilesystemCaptureError.changed
             }
+            try Self.checkNamedExecutable(resolvedExecutablePath, held: proof.observed, followLink: false)
         }
-        guard Self.identity(try Self.directoryInfo(executableParentFD)) == resolvedDirectories.last?.identity,
-              Self.stable(proof.observed, try Self.namedInfo(executableParentFD, resolvedName, flags: AT_SYMLINK_NOFOLLOW)),
-              Self.stable(proof.observed, try Self.executableInfo(executableFD)) else {
-            throw CommandFilesystemCaptureError.changed
-        }
-        try Self.checkNamedExecutable(resolvedExecutablePath, held: proof.observed, followLink: false)
     }
 
     private static func recheck(executableFD: Int32, directoryFD: Int32, executable: CapturedExecutable,
-                                directory: CapturedDirectory, resolvedPath: Data, deadline: ContinuousClock.Instant,
+                                directory: CapturedDirectory, resolvedPath: Data, caller: CommandFilesystemCaller?,
+                                deadline: ContinuousClock.Instant,
                                 checkProbe: () throws -> Void = {},
                                 checkCancellation: () throws -> Void) throws -> stat {
         try checkDeadline(deadline, checkProbe: checkProbe)
         try checkCancellation()
-        try checkDirectory(directoryFD, path: directory.path, identity: directory.identity)
         let info = try executableInfo(executableFD)
         guard identity(info) == executable.identity else { throw CommandFilesystemCaptureError.changed }
-        try checkNamedExecutable(executable.path, held: info)
-        try checkNamedExecutable(resolvedPath, held: info, followLink: false)
+        func checkNames() throws {
+            try withCaller(caller) {
+                try checkDirectory(directoryFD, path: directory.path, identity: directory.identity)
+                try checkNamedExecutable(executable.path, held: info)
+                try checkNamedExecutable(resolvedPath, held: info, followLink: false)
+            }
+        }
+        try checkNames()
         let observed = try digest(executableFD, initial: info, deadline: deadline, checkProbe: checkProbe,
             checkCancellation: checkCancellation)
         guard observed == executable.sha256 else { throw CommandFilesystemCaptureError.changed }
         try checkCancellation()
-        try checkNamedExecutable(executable.path, held: info)
-        try checkNamedExecutable(resolvedPath, held: info, followLink: false)
-        try checkDirectory(directoryFD, path: directory.path, identity: directory.identity)
+        try checkNames()
         try checkDeadline(deadline, checkProbe: checkProbe)
         return info
     }
@@ -179,6 +232,11 @@ public final class CommandFilesystemCapture {
         if executableFD >= 0 { _ = Darwin.close(executableFD); executableFD = -1 }
         if executableParentFD >= 0 { _ = Darwin.close(executableParentFD); executableParentFD = -1 }
         if directoryFD >= 0 { _ = Darwin.close(directoryFD); directoryFD = -1 }
+    }
+
+    private static func withCaller<Value>(_ caller: CommandFilesystemCaller?, _ body: () throws -> Value) throws -> Value {
+        if let caller { return try caller.withIdentity(body) }
+        return try body()
     }
 
     private static func validatePath(_ path: Data) throws {
@@ -207,7 +265,7 @@ public final class CommandFilesystemCapture {
     }
 
     private struct ResolvedExecutable {
-        let descriptor: Int32
+        let info: stat
         let parent: Int32
         let name: Data
         let path: Data
@@ -215,9 +273,9 @@ public final class CommandFilesystemCapture {
     }
 
     /// Retain each parent across lookup. Keep their identities and the final parent descriptor.
-    private static func openExecutable(_ requested: Data, deadline: ContinuousClock.Instant,
-                                       checkProbe: () throws -> Void) throws -> ResolvedExecutable {
-        let directoryFlags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW
+    private static func resolveExecutable(_ requested: Data, deadline: ContinuousClock.Instant,
+                                          checkProbe: () throws -> Void) throws -> ResolvedExecutable {
+        let directoryFlags = searchDirectoryFlags | O_NOFOLLOW
         var parents = [try openPath(Data([0x2f]), flags: directoryFlags)]
         defer { for parent in parents { _ = Darwin.close(parent) } }
         let root = ResolvedDirectory(path: Data([0x2f]), identity: identity(try directoryInfo(parents[0])))
@@ -284,16 +342,8 @@ public final class CommandFilesystemCapture {
                 if path.count > 1 { path.append(0x2f) }
                 path.append(name)
                 try validatePath(path)
-                try checkDeadline(deadline, checkProbe: checkProbe)
-                let descriptor = try openComponent(parent, name, flags: O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW | O_NOCTTY)
-                do {
-                    guard stable(entry, try executableInfo(descriptor)) else { throw CommandFilesystemCaptureError.changed }
-                    let retainedParent = parents.removeLast()
-                    return ResolvedExecutable(descriptor: descriptor, parent: retainedParent, name: name, path: path, directories: directories)
-                } catch {
-                    _ = Darwin.close(descriptor)
-                    throw error
-                }
+                let retainedParent = parents.removeLast()
+                return ResolvedExecutable(info: entry, parent: retainedParent, name: name, path: path, directories: directories)
             default:
                 throw CommandFilesystemCaptureError.invalidExecutable
             }

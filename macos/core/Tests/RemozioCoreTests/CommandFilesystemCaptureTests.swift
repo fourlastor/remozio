@@ -55,6 +55,52 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         XCTAssertThrowsError(try capture.recheck()) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .closed) }
     }
 
+    func testCapturesThroughSearchOnlyDirectories() throws {
+        let fixture = try Fixture()
+        XCTAssertEqual(chmod(fixture.root, 0o100), 0)
+        defer { _ = chmod(fixture.root, 0o700) }
+        XCTAssertEqual(chmod(fixture.cwd, 0o100), 0)
+        defer { _ = chmod(fixture.cwd, 0o700) }
+
+        let caller = CommandFilesystemCaller(userID: geteuid(), groupID: getegid())
+        let capture = try CommandFilesystemCapture(executablePath: Data(fixture.executable.utf8),
+            directoryPath: Data(fixture.cwd.utf8), deadline: ContinuousClock.now + .seconds(5), caller: caller)
+        XCTAssertEqual(capture.executable.sha256, Data(SHA256.hash(data: fixture.content)))
+        try capture.recheck()
+        try capture.withBorrowedDirectoryDescriptor { descriptor in
+            XCTAssertNotEqual(fcntl(descriptor, F_GETFL) & O_EXEC, 0)
+        }
+        try CommandFilesystemCaller.requireProcessIdentity()
+    }
+
+    func testCallerLookupRejectsReplacementBeforeOpenForHash() throws {
+        let fixture = try Fixture()
+        let canonical = try XCTUnwrap(realpath(fixture.root, nil))
+        defer { free(canonical) }
+        let executable = String(cString: canonical) + "/tool"
+        let replacement = String(cString: canonical) + "/replacement"
+        try FileManager.default.copyItem(atPath: executable, toPath: replacement)
+        let beforeOpen = executable.split(separator: "/").count + 2
+        var checks = 0
+        let caller = CommandFilesystemCaller(userID: geteuid(), groupID: getegid())
+        XCTAssertThrowsError(try CommandFilesystemCapture(executablePath: Data(executable.utf8),
+            directoryPath: Data(fixture.cwd.utf8), deadline: ContinuousClock.now + .seconds(5), caller: caller,
+            checkProbe: {
+                checks += 1
+                if checks == beforeOpen { XCTAssertEqual(rename(replacement, executable), 0) }
+            })) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
+        XCTAssertEqual(checks, beforeOpen)
+        try CommandFilesystemCaller.requireProcessIdentity()
+    }
+
+    func testCallerScopePropagatesFailureAndLeavesProcessIdentity() throws {
+        let caller = CommandFilesystemCaller(userID: geteuid(), groupID: getegid())
+        XCTAssertThrowsError(try caller.withIdentity { throw Cancelled.test }) {
+            XCTAssertTrue($0 is Cancelled)
+        }
+        try CommandFilesystemCaller.requireProcessIdentity()
+    }
+
     func testOSCaptureFieldsRoundTripThroughTheCommandWireParser() throws {
         struct Row: Decodable { let hex: String }
         struct Vectors: Decodable { let valid: [Row] }

@@ -81,7 +81,8 @@ public final class RetainedCommandCapture {
             }
             let environment = try Self.environment(minimal: minimalEnvironment, additions: submission.environmentAdditions)
             let filesystem = try capturedFilesystem ?? CommandFilesystemCapture(executablePath: submission.executablePath,
-                directoryPath: submission.directoryPath, checkCancellation: checkCancellation)
+                directoryPath: submission.directoryPath, deadline: ContinuousClock.now + CommandFilesystemCapture.phaseTimeout,
+                caller: received.caller.filesystemCaller, checkCancellation: checkCancellation)
             heldFilesystem = filesystem
             guard filesystem.executable.path == submission.executablePath, filesystem.directory.path == submission.directoryPath else {
                 throw RetainedCommandCaptureError.binding
