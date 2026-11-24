@@ -13,6 +13,8 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
     let publicationBytes: Data
     /// Excluded from equality. The bytes are a pure function of the fields above.
     private let canonicalCache = CanonicalBytesCache()
+    /// Excluded from equality. A store-decoded record shares the store's publication decode cache; any other record owns its own.
+    private let caches: PreparationEpochDecodeCachesHolder
     var description: String { "MachineUpdateRetainedSetupPromotionIntentRecord(redacted)" }
     var debugDescription: String { description }
 
@@ -22,17 +24,25 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
         id: UUID = UUID(), revision: UUID = UUID()) throws {
         try MachineUpdateRetainedSetupPromotionStorage.requireProposalFormats(candidate)
         try publication.requireSourceForPublication(snapshot, current: current, candidate: candidate)
-        try self.init(id: id, revision: revision, phase: .prepared, publicationBytes: publication.encoded)
+        try self.init(id: id, revision: revision, phase: .prepared, publicationBytes: publication.encoded,
+            caches: .unshared())
         try requireSnapshot(snapshot, candidate: candidate)
     }
-    private init(id: UUID, revision: UUID, phase: Phase, publicationBytes: Data) throws {
+    private init(id: UUID, revision: UUID, phase: Phase, publicationBytes: Data,
+        caches: PreparationEpochDecodeCaches) throws {
         guard !publicationBytes.isEmpty, publicationBytes.count <= RuntimeRetainedSetupCompletionPublication.maximumBytes else {
             throw PreparationStoreError.corruptRecord
         }
-        _ = try RuntimeRetainedSetupCompletionPublication.decode(publicationBytes)
+        _ = try Self.publication(publicationBytes, caches: caches)
         self.id = id; self.revision = revision; self.phase = phase; self.publicationBytes = publicationBytes
+        self.caches = .init(caches)
     }
-    func publication() throws -> RuntimeRetainedSetupCompletionPublication { try .decode(publicationBytes) }
+    func publication() throws -> RuntimeRetainedSetupCompletionPublication { try Self.publication(publicationBytes, caches: caches.caches) }
+    /// The decode is a pure function of these exact bytes. Only a success is shared; a failure runs again and throws the same error.
+    private static func publication(_ bytes: Data, caches: PreparationEpochDecodeCaches) throws -> RuntimeRetainedSetupCompletionPublication {
+        let key = PreparationImmutableValidationCache.key(domain: "remozio.retained-setup-completion-publication.decode.v1", [bytes])
+        return try caches.completionPublications.value(key: key) { try RuntimeRetainedSetupCompletionPublication.decode(bytes) }
+    }
     func requireSnapshot(_ snapshot: MachineUpdateRetainedSetupCompletionSnapshot, candidate: SignedReleaseEvidence) throws {
         try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(candidate)
         try snapshot.requireSame(as: .init(activation: snapshot.activation, intent: snapshot.intent, candidate: candidate))
@@ -54,7 +64,8 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
         current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence) throws -> Self {
         guard phase == .prepared else { throw PreparationStoreError.invalidTransition }
         try requireSource(snapshot, current: current, candidate: candidate)
-        return try .init(id: id, revision: UUID(), phase: .publishing, publicationBytes: publicationBytes)
+        return try .init(id: id, revision: UUID(), phase: .publishing, publicationBytes: publicationBytes,
+            caches: caches.caches)
     }
     func recordingPublishedFiles(snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
         current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
@@ -63,7 +74,8 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
         try requireSource(snapshot, current: current, candidate: candidate)
         guard try publication().progress(observation: observation) == .selected else { throw RuntimeActivationError.incomplete }
         try requireSource(snapshot, current: current, candidate: candidate)
-        return try .init(id: id, revision: UUID(), phase: .filesPublished, publicationBytes: publicationBytes)
+        return try .init(id: id, revision: UUID(), phase: .filesPublished, publicationBytes: publicationBytes,
+            caches: caches.caches)
     }
     /// Validates adjacent historical phases. This comparison grants no writer or publication authority.
     func requireTransition(from previous: Self) throws {
@@ -83,7 +95,8 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
             2: .bytes(Self.uuidBytes(id)), 3: .bytes(Self.uuidBytes(revision)),
             4: .unsigned(phase.rawValue), 5: .bytes(publicationBytes)]), limits: Self.limits)
     } } }
-    static func decode(_ bytes: Data) throws -> Self {
+    /// A store passes its own caches. Any other caller gets an unshared set, which only this record and its successors use.
+    static func decode(_ bytes: Data, caches: PreparationEpochDecodeCaches = .unshared()) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes,
                   case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
@@ -94,7 +107,7 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
                   case .bytes(let publication) = fields[5] else { throw PreparationStoreError.corruptRecord }
             let value = try Self(id: id.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) },
                 revision: revision.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) },
-                phase: phase, publicationBytes: publication)
+                phase: phase, publicationBytes: publication, caches: caches)
             guard try value.encoded == bytes else { throw PreparationStoreError.corruptRecord }
             return value
         } catch { throw PreparationStoreError.corruptRecord }
