@@ -253,6 +253,10 @@ public final class AuthorityService: @unchecked Sendable {
 
     deinit { maintenance?.close(); listener.close(); try? journal.close() }
 
+    func preparePairingProofs(access: AuthorityPairingSetupAccess) throws {
+        try listener.preparePairingProofs(access: access)
+    }
+
     /// A failed start retires this instance. Recovery requires a new protected startup.
     public func start() throws {
         try lock.withLock {
