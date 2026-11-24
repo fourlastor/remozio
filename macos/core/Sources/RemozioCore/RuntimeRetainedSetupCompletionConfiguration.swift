@@ -11,6 +11,8 @@ struct RuntimeRetainedSetupCompletionConfiguration: CustomStringConvertible, Cus
     let transport: TransportPairingStartupConfiguration
     let gateway: GatewaySettingsConsumerHostConfiguration
     let clients: RuntimeActivationClients
+    /// Excluded from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
     var description: String { "RuntimeRetainedSetupCompletionConfiguration(redacted)" }
     var debugDescription: String { description }
 
@@ -39,13 +41,14 @@ struct RuntimeRetainedSetupCompletionConfiguration: CustomStringConvertible, Cus
         let proposed = try Self(snapshot: snapshot, current: current, candidate: candidate, clients: clients)
         guard try proposed.encoded == encoded else { throw RuntimeActivationError.changedScope }
     }
-    var encoded: Data { get throws {
+    /// Computes the canonical bytes on first success only; this value is immutable, so later reads return the same result.
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.formatName),
             2: .bytes(archive.encoded), 3: .bytes(sourceDigest), 4: .bytes(host.canonicalBytes),
             5: .bytes(transport.canonicalBytes), 6: .bytes(gateway.encoded),
             7: .bytes(clients.presence.canonicalBytes), 8: .bytes(clients.pairing.canonicalBytes),
             9: .bytes(clients.frontend.canonicalBytes)]), limits: Self.limits)
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes,

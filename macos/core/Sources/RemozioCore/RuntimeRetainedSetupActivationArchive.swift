@@ -26,6 +26,8 @@ struct RuntimeRetainedSetupActivationArchive: Sendable, CustomStringConvertible,
         }
     }
     private let storage: Storage
+    /// Excluded from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
     static let formatName = RuntimeActivationPlan.formatName
     static let formatVersion: UInt64 = 6
     static let maximumBytes = 262144
@@ -68,7 +70,8 @@ struct RuntimeRetainedSetupActivationArchive: Sendable, CustomStringConvertible,
             binding: binding, inventory: inventory)
     }
 
-    var encoded: Data { get throws {
+    /// Computes the canonical bytes on first success only; this value is immutable, so later reads return the same result.
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try DeterministicCBOR.encode(.map([
             0: .unsigned(Self.formatVersion), 1: .bytes(reference.encoded), 2: .text(bundlePath),
             3: .bytes(host.canonicalBytes), 4: .bytes(transport.canonicalBytes), 5: .bytes(gatewaySettingsHost.encoded),
@@ -77,7 +80,7 @@ struct RuntimeRetainedSetupActivationArchive: Sendable, CustomStringConvertible,
             8: phoneUpdateSchedulingVersion.map(CBORValue.unsigned) ?? .null,
             9: .bytes(binding.encoded), 10: .bytes(inventory.canonicalBytes),
         ]), limits: Self.limits)
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
               fields[0] == .unsigned(formatVersion), Set(fields.keys) == Set(UInt64(0)...10),

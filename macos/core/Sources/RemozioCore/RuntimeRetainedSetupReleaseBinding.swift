@@ -32,6 +32,38 @@ struct RuntimeRetainedSetupReleaseBinding: Codable, Equatable, Sendable, CustomS
     let startupPolicySnapshotDigest: Data
     let startupCheckpointDigest: Data
     let completionPolicyDigest: Data
+    /// Excluded from CodingKeys and from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case macID
+        case installationID
+        case accountID
+        case ownerUID
+        case activationAttempt
+        case candidateDigest
+        case admissionDigest
+        case updateID
+        case stableSealDigest
+        case installedEpochDigest
+        case sealedInventoryDigest
+        case sourceAccountDigest
+        case preparationDigest
+        case initializationDigest
+        case provisioningInventoryDigest
+        case provisioningReleaseDigest
+        case previousInstalledReleaseDigest
+        case installedReleaseDigest
+        case runtimeReferenceDigest
+        case retainedSourceDigest
+        case policyIntentDigest
+        case sourcePolicyDigest
+        case sourceCheckpointDigest
+        case startupPolicyDigest
+        case startupPolicySnapshotDigest
+        case startupCheckpointDigest
+        case completionPolicyDigest
+    }
     var description: String { "RuntimeRetainedSetupReleaseBinding(redacted)" }
     var debugDescription: String { description }
 
@@ -122,11 +154,12 @@ struct RuntimeRetainedSetupReleaseBinding: Codable, Equatable, Sendable, CustomS
             throw RuntimeActivationError.invalidPlan
         }
     }
-    var encoded: Data { get throws {
+    /// Validates and encodes on first success only; this value is immutable, so later reads return the same result.
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate(); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw RuntimeActivationError.invalidPlan }; return bytes
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw RuntimeActivationError.invalidPlan }
