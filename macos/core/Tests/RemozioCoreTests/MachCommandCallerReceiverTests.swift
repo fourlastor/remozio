@@ -5190,10 +5190,11 @@ extension MachCommandCallerReceiverTests {
     private func beginDispatch(_ fixture: CommandRequestFixture, request: IssuedRequestPayload, launcher: String,
                                elevation: @escaping (CommandCapture) throws -> Void = { _ in },
                                clock: (() throws -> AuthorityMoment)? = nil,
-                               runtimeFailure: Bool = false, launcherFailure: Bool = false, callerExpression: String? = nil) throws {
+                               runtimeFailure: Bool = false, launcherFailure: Bool = false, callerExpression: String? = nil,
+                               preparationMilliseconds: UInt32 = 5000) throws {
         let authority = try XCTUnwrap(fixture.authority), expression = try callerExpression ?? selfExpression(), now = fixture.now(130)
         try authority.beginCommandExecution(requestID: request.requestID, monitorPath: dispatchMonitor(fixture), childPath: launcher,
-            preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: elevation, clock: clock ?? { now },
+            preparationMilliseconds: preparationMilliseconds, fileCreationMask: 0o022, validateElevation: elevation, clock: clock ?? { now },
             runtime: { tx, approval, capture in
                 if runtimeFailure { throw CommandExecutionError.policyChanged }
                 try approval.requireCurrent(tx.requestDeliveryTrust())
@@ -5280,7 +5281,10 @@ extension MachCommandCallerReceiverTests {
         let probes = OSAllocatedUnfairLock(initialState: 0)
         let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
         defer { resume.signal() }
-        let pool = CommandFilesystemProbePool(timeout: .seconds(1), beforeWork: {
+        let probeBudget: Duration = .seconds(1)
+        let preparationBudget: UInt32 = 5000
+        XCTAssertGreaterThan(Duration.milliseconds(Int(preparationBudget)), probeBudget)
+        let pool = CommandFilesystemProbePool(timeout: probeBudget, beforeWork: {
             let index = probes.withLock { $0 += 1; return $0 }
             if index == 3 {
                 entered.signal()
@@ -5288,7 +5292,8 @@ extension MachCommandCallerReceiverTests {
             }
         })
         let test = try nativeDispatchFixture(commandFilesystem: pool)
-        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher,
+            preparationMilliseconds: preparationBudget)
         XCTAssertEqual(entered.wait(timeout: .now() + .seconds(2)), .success)
         let id = test.request.requestID
         XCTAssertEqual(try test.authority.withRequests { try $0.state(requestID: id).phase }, .authorized)
@@ -5297,6 +5302,26 @@ extension MachCommandCallerReceiverTests {
         let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
         XCTAssertEqual(outcome?.phase, .cancelled)
         XCTAssertEqual(outcome?.revision, 1)
+    }
+
+    func testNativeDispatchSlowCommitDoesNotDiscardAcceptedFinalProof() throws {
+        let pool = CommandFilesystemProbePool(timeout: .seconds(1))
+        let test = try nativeDispatchFixture(commandFilesystem: pool)
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let now = test.fixture.now(130)
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, clock: {
+            // Calls 1 and 2 check the original approval. The third call starts the durable dispatch write.
+            let count = calls.withLock { $0 += 1; return $0 }
+            if count == 3 { usleep(1_250_000) }
+            return now
+        })
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .exited(0))
+        let id = test.request.requestID
+        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .succeeded)
+        XCTAssertEqual(outcome?.revision, 2)
+        XCTAssertGreaterThanOrEqual(calls.withLock { $0 }, 4)
     }
 
     func testNativeDispatchRetriesFilesystemCapacityBeforePreparationAndDispatch() throws {
@@ -5329,6 +5354,23 @@ extension MachCommandCallerReceiverTests {
             try awaitDispatchCleanup(test.authority)
             XCTAssertEqual(try nativeDispatchOutcome(test), .exited(0))
         }
+    }
+
+    func testNativeDispatchDeferredPreparationBudgetExpiresWithoutDispatch() throws {
+        let pool = CommandFilesystemProbePool(executionSlots: 1)
+        let releaseSlot = DispatchSemaphore(value: 0)
+        let test = try nativeDispatchFixture(commandFilesystem: pool)
+        let occupied = try pool.start(.execution) { _, _ in
+            _ = releaseSlot.wait(timeout: .now() + .seconds(4))
+        }
+        defer { occupied.cancel(); releaseSlot.signal() }
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, preparationMilliseconds: 200)
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .failedBeforeStart)
+        let id = test.request.requestID
+        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .cancelled)
+        XCTAssertEqual(outcome?.revision, 1)
     }
 
     func testNativeDispatchDiscardsPreparationProofAfterPolicyChanges() throws {

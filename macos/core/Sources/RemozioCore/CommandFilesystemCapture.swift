@@ -193,6 +193,7 @@ public final class CommandFilesystemCapture {
                 }
                 guard length >= 0 else { throw CommandFilesystemCaptureError.system(errno) }
                 guard length > 0, length < buffer.count else { throw CommandFilesystemCaptureError.invalidPath }
+                try checkDeadline(deadline, checkProbe: checkProbe)
                 guard stable(entry, try namedInfo(parent, name, flags: AT_SYMLINK_NOFOLLOW)) else {
                     throw CommandFilesystemCaptureError.changed
                 }

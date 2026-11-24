@@ -165,17 +165,18 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         }
         let link = root + "/walk"
         XCTAssertEqual(symlink("first", link), 0)
-        let firstTargetComponent = root.split(separator: "/").count + 3
+        // The initial check and one check per component precede the check after readlinkat.
+        let afterReadlink = root.split(separator: "/").count + 3
         var componentsChecked = 0
         XCTAssertThrowsError(try CommandFilesystemCapture(executablePath: Data((link + "/tool").utf8),
             directoryPath: Data(fixture.cwd.utf8), deadline: ContinuousClock.now + .seconds(5), checkProbe: {
                 componentsChecked += 1
-                if componentsChecked == firstTargetComponent {
+                if componentsChecked == afterReadlink {
                     XCTAssertEqual(unlink(link), 0)
                     XCTAssertEqual(symlink("second", link), 0)
                 }
             })) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
-        XCTAssertGreaterThan(componentsChecked, firstTargetComponent)
+        XCTAssertEqual(componentsChecked, afterReadlink)
     }
 
     func testExecutableReplacementRetiresTheOriginalCapture() throws {

@@ -425,12 +425,12 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
-    /// Transfers a command into the serialized request owner, without a Sendable capture wrapper.
+    /// Test entry for transferring an already assembled command into the serialized request owner.
     /// A failed first transfer closes its objects. Rejected reentry leaves previously owned objects intact.
     /// The host completes negotiation and current elevation-policy validation before this call.
     /// The request owner commits the submission replay reservation with request creation.
     /// The synchronous callbacks must not await or reenter this journal.
-    public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
+    func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                              checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
         lock.lock()
@@ -524,9 +524,11 @@ public final class AuthorityJournal: @unchecked Sendable {
                                       validateSelf: @Sendable (JournalTransaction) throws -> Void,
                                       expression: (AuthorityCodePolicySnapshot, uid_t, au_asid_t?) throws -> String) throws -> IssuedRequestPayload {
         lock.lock(); defer { lock.unlock() }
-        do { try requireNoRequestOperation() }
+        do {
+            try requireNoRequestOperation()
+            guard lock.depth == 1 else { throw JournalDatabaseError.transactionActive }
+        }
         catch { attempt.closeIfUnclaimed(); throw error }
-        precondition(lock.depth == 1)
         try attempt.claimForOwner()
         let profile = attempt.profile, submission = attempt.submission.binding
         let userID = attempt.userID, auditSessionID = attempt.auditSessionID
@@ -1084,6 +1086,7 @@ extension AuthorityJournal {
 
     /// Protected host integration. The elevation callback must enforce the selected administrator policy without reentry.
     /// Pipe and PTY execution stay inactive until the host installs the protected command endpoint.
+    /// If the filesystem workers are occupied, this call can accept ownership and prepare on a later poll.
     public func beginCommandExecution(requestID: Data, monitorPath: String, childPath: String, preparationMilliseconds: UInt32,
                                       fileCreationMask: UInt32, maximumActiveCommands: Int = 32, pollIntervalMilliseconds: Int = 20,
                                       validateElevation: @escaping @Sendable (CommandCapture) throws -> Void,
@@ -1134,7 +1137,7 @@ extension AuthorityJournal {
                                launcher: (CommandExecutionRuntime) throws -> () throws -> Void) throws {
         try lock.withLock {
             try requireNoRequestOperation()
-            precondition(lock.depth == 1)
+            guard lock.depth == 1 else { throw JournalDatabaseError.transactionActive }
             guard (100...60_000).contains(preparationMilliseconds), fileCreationMask <= 0o777,
                   (1...1024).contains(maximumActiveCommands), (10...1000).contains(pollIntervalMilliseconds) else {
                 throw CommandExecutionError.invalidConfiguration
@@ -1286,7 +1289,6 @@ extension AuthorityJournal {
                         try execution.validateElevation(execution.resources.capture)
                         try execution.recheck(filesystemChecked: true)
                         try commandActivity[id]?.validate()
-                        guard ContinuousClock.now < probe.deadline else { throw CommandFilesystemProbeError.expired }
                         try execution.release()
                     } catch {
                         execution.cancelBeforeRelease()
@@ -1302,7 +1304,10 @@ extension AuthorityJournal {
     /// The caller owns one request operation. Restore the lock and its guard before publishing any result.
     private func awaitCommandFilesystem<Value>(_ probe: CommandFilesystemProbe<Value>,
                                                checkCancellation: () throws -> Void = {}) throws -> Value {
-        precondition(lock.depth == 1 && requestOperationActive)
+        guard lock.depth == 1, requestOperationActive else {
+            probe.cancel()
+            throw JournalDatabaseError.transactionActive
+        }
         do {
             while true {
                 requestOperationActive = false
