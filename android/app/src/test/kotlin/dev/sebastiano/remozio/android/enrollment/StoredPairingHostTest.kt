@@ -1,6 +1,8 @@
 package dev.sebastiano.remozio.android.enrollment
 
 import dev.remozio.phone.enrollment.*
+import dev.remozio.phone.transport.RelayAccessCredential
+import dev.remozio.phone.transport.RelayEndpoint
 import dev.remozio.protocol.*
 import java.security.KeyPairGenerator
 import java.security.Signature
@@ -27,7 +29,7 @@ class StoredPairingHostTest {
     private fun key() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
     private val authority = key()
     private val biometric = key()
-    private fun record(n: Int, mac: Int = 20): PhoneEnrollment {
+    private fun record(n: Int, mac: Int = 20, relay: RelayAccessCredential? = null): PhoneEnrollment {
         val localBiometric = if (mac == 20) biometric else key()
         fun local(role: EnrollmentKeyRole): EnrollmentKeyReference {
             val point = (if (role == EnrollmentKeyRole.BIOMETRIC) localBiometric else key()).public.encoded
@@ -38,7 +40,7 @@ class StoredPairingHostTest {
         return PhoneEnrollment(id(n), id(mac), id(21), id(n + 30), id(n + 40), "Synthetic Mac",
             authority.public.encoded.takeLast(65).toByteArray(), key().public.encoded,
             local(EnrollmentKeyRole.TRANSPORT), local(EnrollmentKeyRole.DECISION), local(EnrollmentKeyRole.BIOMETRIC),
-            ByteArray(32) { n.toByte() }, null)
+            ByteArray(32) { n.toByte() }, relay)
     }
     private fun transcript(e: PhoneEnrollment, old: PhoneEnrollment? = null): PairingTranscript {
         val scope = ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes())
@@ -53,9 +55,19 @@ class StoredPairingHostTest {
     private class Storage : EnrollmentStorage {
         var bytes: ByteArray? = null
         var fail = false
+        var failRead = false
+        var replacements = 0
         var beforeReplace: () -> Unit = {}
-        override fun read(maximumBytes: Int) = bytes?.copyOf()
-        override fun replace(ciphertext: ByteArray) { check(!fail); beforeReplace(); bytes = ciphertext.copyOf() }
+        override fun read(maximumBytes: Int): ByteArray? {
+            check(!failRead)
+            return bytes?.copyOf()
+        }
+        override fun replace(ciphertext: ByteArray) {
+            check(!fail)
+            beforeReplace()
+            bytes = ciphertext.copyOf()
+            replacements++
+        }
         override fun close() = Unit
     }
     private val storage = Storage()
@@ -81,6 +93,17 @@ class StoredPairingHostTest {
         var joins = 0
         override suspend fun recover(): ByteArray? { queries++; return read() }
         override fun close() = Unit
+        override suspend fun closeAndJoin() { joins++; joining() }
+    }
+
+    private class RePairWire(
+        private val read: suspend () -> PairingRecoveryFrame.Reply,
+        private val joining: suspend () -> Unit = {},
+    ) : RePairRecoveryWire {
+        var lookups = 0
+        var joins = 0
+
+        override suspend fun lookup(): PairingRecoveryFrame.Reply { lookups++; return read() }
         override suspend fun closeAndJoin() { joins++; joining() }
     }
 
@@ -233,7 +256,7 @@ class StoredPairingHostTest {
         assertEquals(material.keys.map { it.alias }.toSet(), keys.retired.toSet())
     }
 
-    @Test fun rePairProofMarkerSurvivesRestartAndReceiptRetiresTheExactRemovedPredecessor(): Unit = runBlocking {
+    @Test fun rePairProofMarkerSurvivesRestartAndReceiptRetiresTheExactRemovedPredecessor(): Unit = runTest {
         val keys = RePairKeys()
         val h = rePairHost(keys)
         val old = record(1)
@@ -253,23 +276,24 @@ class StoredPairingHostTest {
         reopened.reconcileRePairOnStartup()
         assertTrue(keys.retired.isEmpty())
         assertFailsWith<RePairAlreadyPending> { reopened.inspectRePair(invitation) }
-        val emptyReceipt = PairingReceiptRecovery(reopened, { _, _ -> RecoveryWire({ null }) }, Dispatchers.Unconfined)
-        assertFalse(emptyReceipt.recover(reservation.recordID))
-        val refusedWire = PairingReceiptRecovery(reopened, { _, _ -> error("Receipt transport refused") }, Dispatchers.Unconfined)
-        assertFails { refusedWire.recover(reservation.recordID) }
-        val wrongReceipt = PairingReceiptRecovery(reopened, { _, _ ->
-            RecoveryWire({ receipt(transcript(old)).copyBytes() })
-        }, Dispatchers.Unconfined)
-        assertFails { wrongReceipt.recover(reservation.recordID) }
-        val wire = RecoveryWire({ receipt(t).copyBytes() })
-        val recovered = PairingReceiptRecovery(reopened, { _, row ->
+        fun recovery(open: suspend (CoroutineScope, PreparedPairingAccess) -> RePairRecoveryWire) =
+            PairingReceiptRecovery(reopened, { _, _ -> fail("Re-pair opened enrolled receipt transport") },
+                StandardTestDispatcher(testScheduler), openRePair = open, clock = testScheduler.timeSource)
+        assertFalse(recovery { _, _ -> RePairWire({ PairingRecoveryFrame.Refused }) }.recover(reservation.recordID))
+        assertFalse(recovery { _, _ -> error("Recovery transport closed") }.recover(reservation.recordID))
+        val wrong = PairingRecoveryFrame.Committed(receipt(transcript(old)).copyBytes())
+        assertFalse(recovery { _, _ -> RePairWire({ wrong }) }.recover(reservation.recordID))
+        val wire = RePairWire({ PairingRecoveryFrame.Committed(receipt(t).copyBytes()) })
+        val recovered = recovery { _, access ->
+            val row = access.record
             assertContentEquals(t.encode(), checkNotNull(row.pairing).transcript.encode())
             assertEquals(material.keys[0].alias, row.enrollment.transportKey.alias)
             wire
-        }, Dispatchers.Unconfined)
+        }
         assertTrue(recovered.recover(reservation.recordID))
         assertTrue(recovered.recover(reservation.recordID))
-        assertEquals(1, wire.queries)
+        assertEquals(1, wire.lookups)
+        assertEquals(1, wire.joins)
         open().use { store ->
             val snapshot = store.snapshot()
             assertEquals(reservation.recordID, snapshot.entries.single { it.enrollment.recordID == old.recordID }.successorRecordID)
@@ -376,6 +400,173 @@ class StoredPairingHostTest {
         val next = h.reserveRePair(envelope(ordinary), id(31), id(61), List(3) { CborValue.Bytes(id(96 + it)) })
         assertEquals(ordinary.recordID, next.predecessorRecordID)
         h.finishRePair(next.recordID)
+    }
+
+    private suspend fun submittedRePair(host: StoredPairingHost, keys: RePairKeys,
+        predecessor: PhoneEnrollment = record(1),
+    ): StoredPhoneEnrollment {
+        activatePredecessor(host, predecessor)
+        val reservation = host.reserveRePair(envelope(predecessor), id(30), id(60), List(3) { CborValue.Bytes(id(92 + it)) })
+        val (material, transcript) = proposalFor(reservation)
+        keys.allocated.addAll((material.keys.map { it.alias } + aliases(predecessor)))
+        host.prepareRePairProposal(reservation.recordID, material)
+        host.checkpointRePair(reservation.recordID, transcript)
+        val lease = host.prepared(reservation.recordID, transcript)
+        val marked = host.markRePairProof(lease).record
+        host.release(reservation.recordID, lease.lease)
+        host.finishRePair(reservation.recordID)
+        return marked
+    }
+
+    private fun aliases(enrollment: PhoneEnrollment): Set<String> =
+        setOf(enrollment.transportKey.alias, enrollment.decisionKey.alias, enrollment.biometricKey.alias)
+
+    private fun expiry(row: StoredPhoneEnrollment, reason: PairingExpiryReason = PairingExpiryReason.DEADLINE_ELAPSED,
+        signer: java.security.KeyPair = authority,
+    ): PairingExpiryReceipt {
+        val transcript = requireNotNull(row.pairing).transcript
+        val signature = Signature.getInstance("SHA256withECDSA").run {
+            initSign(signer.private)
+            update(PairingExpiryReceipt.signingInput(transcript, reason))
+            P256SignatureEncoding.fromDer(sign())
+        }
+        return PairingExpiryReceipt(transcript, reason, signature)
+    }
+
+    @Test fun rePairRefusalAndClosureExhaustRetriesWithoutRetirement() = runTest {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val row = submittedRePair(host, keys)
+        val archive = checkNotNull(storage.bytes).copyOf()
+        val aliases = keys.allocated.toSet()
+        val startTimes = mutableListOf<Long>()
+        val wires = mutableListOf<RePairWire>()
+        val recovery = PairingReceiptRecovery(host, { _, _ -> fail("Enrolled path used") },
+            StandardTestDispatcher(testScheduler), openRePair = { _, access ->
+                assertTrue(access.record.sameConnectionAs(row))
+                startTimes += testScheduler.currentTime
+                RePairWire({
+                    if (startTimes.size == 2) throw java.io.IOException("Simulated closure")
+                    PairingRecoveryFrame.Refused
+                }).also { wires.add(it) }
+            }, clock = testScheduler.timeSource)
+        assertFalse(recovery.recover(row.enrollment.recordID))
+        assertEquals(listOf(0L, 1_000L, 3_000L), startTimes)
+        assertTrue(wires.all { it.joins == 1 && it.lookups == 1 })
+        assertEquals(aliases, keys.allocated)
+        assertTrue(keys.retired.isEmpty())
+        assertContentEquals(archive, storage.bytes)
+    }
+
+    @Test fun signedExpiryAfterRefusalJoinsBeforeCommittingAndRetiresOnlyTheCandidate() = runTest {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val predecessor = record(1)
+        val row = submittedRePair(host, keys, predecessor)
+        val id = row.enrollment.recordID
+        var opened = 0
+        var joined = 0
+        storage.beforeReplace = { assertEquals(3, joined) }
+        keys.beforeRetire = {
+            assertEquals(3, joined)
+            open().use { store ->
+                assertEquals(EnrollmentPhase.REMOVED, store.snapshot().entries.single { it.enrollment.recordID == id }.phase)
+            }
+        }
+        val recovery = PairingReceiptRecovery(host, { _, _ -> fail("Enrolled path used") },
+            StandardTestDispatcher(testScheduler), openRePair = { _, _ ->
+                val response = when (++opened) {
+                    1 -> PairingRecoveryFrame.Refused
+                    2 -> PairingRecoveryFrame.Expired(expiry(row, signer = key()))
+                    else -> PairingRecoveryFrame.Expired(expiry(row, PairingExpiryReason.RETIRED_INCARNATION))
+                }
+                RePairWire({ response }, { joined++ })
+            }, clock = testScheduler.timeSource)
+        assertTrue(recovery.recover(id))
+        assertEquals(3, opened)
+        val snapshot = open().use { it.snapshot() }
+        assertEquals(EnrollmentPhase.ACTIVE, snapshot.entries.single { it.enrollment.recordID == predecessor.recordID }.phase)
+        assertEquals(aliases(row.enrollment), keys.retired.toSet())
+        assertEquals(aliases(predecessor), keys.allocated)
+    }
+
+    @Test fun cancellationWhileJoiningRecoveryKeepsTheLeaseAndPreparation() = runTest {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val row = submittedRePair(host, keys)
+        val id = row.enrollment.recordID
+        val joined = CompletableDeferred<Unit>()
+        val releaseJoin = CompletableDeferred<Unit>()
+        val recovery = PairingReceiptRecovery(host, { _, _ -> fail("Enrolled path used") },
+            StandardTestDispatcher(testScheduler), openRePair = { _, _ ->
+                RePairWire({ PairingRecoveryFrame.Expired(expiry(row)) }, { joined.complete(Unit); releaseJoin.await() })
+            }, clock = testScheduler.timeSource)
+        val action = async { recovery.recover(id) }
+        joined.await()
+        action.cancel()
+        assertFails { host.recoverable(id) }
+        releaseJoin.complete(Unit)
+        action.join()
+        assertTrue(keys.retired.isEmpty())
+        val retry = host.recoverable(id)
+        assertTrue(retry.record.sameConnectionAs(row))
+        host.release(id, retry.lease)
+    }
+
+    @Test fun failedArchiveReplacementNeverAuthorizesKeyRetirement() = runBlocking<Unit> {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val row = submittedRePair(host, keys)
+        val lease = host.recoverable(row.enrollment.recordID)
+        storage.fail = true
+        assertFailsWith<EnrollmentStoreUnavailable> { host.retireExpiredRePair(lease, expiry(row)) {} }
+        storage.fail = false
+        host.release(row.enrollment.recordID, lease.lease)
+        host.reconcileRePairOnStartup()
+        assertTrue(keys.retirementAttempts.isEmpty())
+        assertTrue(open().use { it.snapshot().entries.single { entry -> entry.enrollment.recordID == row.enrollment.recordID } }.sameConnectionAs(row))
+    }
+
+    @Test fun unreadableArchiveDefersInterruptedCleanupUntilCommittedSnapshotCanBeRead() = runBlocking<Unit> {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val predecessor = record(1)
+        val row = submittedRePair(host, keys, predecessor)
+        val expected = expiry(row)
+        open().use { store -> store.retireExpiredRePair(row, expected, store.snapshot().revision) }
+        val writes = storage.replacements
+        val archive = checkNotNull(storage.bytes).copyOf()
+        val alreadyDeleted = row.enrollment.transportKey.alias
+        assertTrue(keys.allocated.remove(alreadyDeleted))
+        val rebooted = rePairHost(keys)
+        storage.failRead = true
+        rebooted.reconcileRePairOnStartup()
+        assertTrue(keys.retirementAttempts.isEmpty())
+        assertEquals(writes, storage.replacements)
+        assertContentEquals(archive, storage.bytes)
+        storage.failRead = false
+        rebooted.reconcileRePairOnStartup()
+        rebooted.reconcileRePairOnStartup()
+        assertEquals(aliases(row.enrollment) - alreadyDeleted, keys.retirementAttempts.toSet())
+        assertEquals(2, keys.retirementAttempts.size)
+        assertEquals(aliases(predecessor), keys.allocated)
+        assertEquals(writes, storage.replacements)
+    }
+
+    @Test fun revokingThePredecessorDropsRelayWithoutInvalidatingDirectRecovery() = runBlocking<Unit> {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val old = record(1, relay = RelayAccessCredential(RelayEndpoint("synthetic.example"), "fixture-id", "fixture-secret"))
+        val row = submittedRePair(host, keys, old)
+        val id = row.enrollment.recordID
+        val access = host.recoverable(id)
+        assertEquals(old.recordID, host.recoveryRelayPredecessor(access)?.enrollment?.recordID)
+        val revision = open().use { it.snapshot().revision }
+        host.remove(old.recordID, revision)
+        assertNull(host.recoveryRelayPredecessor(access))
+        assertTrue(access.lease.isCurrent())
+        assertTrue(open().use { it.snapshot().entries.single { entry -> entry.enrollment.recordID == id } }.sameConnectionAs(row))
+        host.release(id, access.lease)
     }
 
     @Test fun recoveryActivatesOnlyTheRetainedTranscriptAndPreservesKeys() = runBlocking<Unit> {

@@ -1,8 +1,11 @@
 package dev.remozio.phone.transport
 
+import dev.remozio.protocol.P256SignatureEncoding
+import dev.remozio.protocol.PairingRecoveryQuery
 import java.net.Socket
 import java.security.Principal
 import java.security.PrivateKey
+import java.security.Signature
 import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -46,6 +49,19 @@ class ClientTLSKeyManager(privateKey: PrivateKey, certificateChain: Array<X509Ce
         if (alias == ALIAS && key != null) certificates?.copyOf() else null
 
     @Synchronized override fun getPrivateKey(alias: String?): PrivateKey? = if (alias == ALIAS) key else null
+
+    @Synchronized internal fun signRecovery(query: PairingRecoveryQuery, exporter: ByteArray, challenge: ByteArray): ByteArray {
+        val input = query.signingInput(exporter, challenge)
+        return try {
+            P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                initSign(checkNotNull(key))
+                update(input)
+                sign()
+            })
+        } finally {
+            input.fill(0)
+        }
+    }
 
     @Synchronized override fun close() { key = null; certificates = null }
 

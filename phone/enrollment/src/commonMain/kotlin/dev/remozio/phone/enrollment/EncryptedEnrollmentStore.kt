@@ -164,6 +164,18 @@ class EncryptedEnrollmentStore private constructor(
         commit(state.entries.map { if (it === row) it.withPhase(EnrollmentPhase.REMOVED) else it })
     }
 
+    /** Commit the exact signed retirement before the owner retires any keys. */
+    fun retireExpiredRePair(expected: StoredPhoneEnrollment, receipt: PairingExpiryReceipt,
+        expectedRevision: ULong,
+    ): EnrollmentSnapshot = locked {
+        checkRevision(expectedRevision)
+        val row = state.entries.single { it.enrollment.recordID == expected.enrollment.recordID }
+        require(row.phase == EnrollmentPhase.PREPARED && row.rePair?.proofMayHaveBeenSent == true)
+        require(row.sameConnectionAs(expected))
+        require(receipt.verify(requireNotNull(row.pairing).transcript))
+        commit(state.entries.map { if (it === row) it.withPhase(EnrollmentPhase.REMOVED) else it })
+    }
+
     /** Restores only the transcript retained in the authenticated local archive. */
     fun recoverPairing(recordID: ByteArray): PhonePairingAttempt = locked {
         checkAvailable()

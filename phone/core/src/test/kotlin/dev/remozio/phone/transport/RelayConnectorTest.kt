@@ -69,6 +69,27 @@ class RelayConnectorTest {
         }
     }
 
+    @Test fun changedPredecessorStopsTheUpgradeBeforeCredentialHeaders() = runBlocking {
+        Fixture().use { fixture ->
+            fixture.upgrade(object : WebSocketListener() {})
+            val owner = SupervisorJob()
+            var checked = false
+            try {
+                assertFailsWith<IOException> {
+                    fixture.connector.connect(CoroutineScope(owner), fixture.credential) {
+                        checked = true
+                        throw IOException("Predecessor no longer eligible")
+                    }
+                }
+                assertTrue(checked)
+                assertEquals(0, fixture.server.requestCount)
+            } finally {
+                owner.cancel()
+                withTimeout(5_000) { owner.join() }
+            }
+        }
+    }
+
     @Test fun drainsRecordsBeforeNormalPeerClose() = runBlocking {
         Fixture().use { fixture ->
             fixture.upgrade(object : WebSocketListener() {
