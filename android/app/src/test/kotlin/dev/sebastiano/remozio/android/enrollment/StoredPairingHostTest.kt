@@ -10,6 +10,7 @@ import java.security.spec.ECGenParameterSpec
 import javax.crypto.KeyGenerator
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
@@ -59,8 +60,10 @@ class StoredPairingHostTest {
         var fail = false
         var failRead = false
         var replacements = 0
+        var beforeRead: () -> Unit = {}
         var beforeReplace: () -> Unit = {}
         override fun read(maximumBytes: Int): ByteArray? {
+            beforeRead()
             check(!failRead)
             return bytes?.copyOf()
         }
@@ -525,6 +528,68 @@ class StoredPairingHostTest {
         val retry = host.recoverable(id)
         assertTrue(retry.record.sameConnectionAs(row))
         host.release(id, retry.lease)
+    }
+
+    @Test fun cancellationOnEitherSideOfTheExpiryCommitKeepsTheArchiveAndKeysConsistent() = runTest {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val predecessor = record(1)
+        val row = submittedRePair(host, keys, predecessor)
+        val candidate = row.enrollment.recordID
+        val candidateKeys = aliases(row.enrollment)
+        val before = checkNotNull(storage.bytes).copyOf()
+        val writes = storage.replacements
+        val revision = open().use { it.snapshot().revision }
+        val proof = PairingRecoveryFrame.Expired(expiry(row))
+        fun phase() = open().use { store -> store.snapshot().entries.single { it.enrollment.recordID == candidate }.phase }
+        fun recovery(afterJoin: () -> Unit = {}) = PairingReceiptRecovery(host, { _, _ -> fail("Enrolled path used") },
+            StandardTestDispatcher(testScheduler), openRePair = { _, _, _ ->
+                RePairWire({ proof }, { afterJoin() })
+            }, clock = testScheduler.timeSource)
+
+        var beforeCommit = false
+        val first = async(start = CoroutineStart.LAZY) {
+            recovery {
+                storage.beforeRead = {
+                    storage.beforeRead = {}
+                    beforeCommit = true
+                    coroutineContext.cancel()
+                }
+            }.recover(candidate)
+        }
+        first.start()
+        first.join()
+        assertTrue(beforeCommit && first.isCancelled)
+        assertContentEquals(before, storage.bytes)
+        assertEquals(writes, storage.replacements)
+        assertEquals(EnrollmentPhase.PREPARED, phase())
+        assertEquals(aliases(predecessor) + candidateKeys, keys.allocated)
+        assertTrue(keys.retirementAttempts.isEmpty())
+
+        var commitEntered = false
+        val second = async(start = CoroutineStart.LAZY) {
+            storage.beforeReplace = {
+                check(!commitEntered)
+                commitEntered = true
+                coroutineContext.cancel()
+                assertContentEquals(before, storage.bytes)
+                assertEquals(aliases(predecessor) + candidateKeys, keys.allocated)
+            }
+            recovery().recover(candidate)
+        }
+        keys.beforeRetire = {
+            assertEquals(writes + 1, storage.replacements)
+            assertEquals(EnrollmentPhase.REMOVED, phase())
+        }
+        second.start()
+        second.join()
+        assertTrue(commitEntered && second.isCancelled)
+        assertEquals(writes + 1, storage.replacements)
+        assertEquals(EnrollmentPhase.REMOVED, phase())
+        assertEquals(revision + 1u, open().use { it.snapshot().revision })
+        assertEquals(candidateKeys, keys.retired.toSet())
+        assertEquals(candidateKeys.size, keys.retired.size)
+        assertEquals(aliases(predecessor), keys.allocated)
     }
 
     @Test fun failedArchiveReplacementNeverAuthorizesKeyRetirement() = runBlocking<Unit> {
