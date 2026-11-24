@@ -881,6 +881,38 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertEqual(try fixture.auditRecordCount, before)
     }
 
+    func testTransferredCommandProbesOutsideTheJournalAndRejectsAStaleProof() throws {
+        let owner = OSAllocatedUnfairLock<AuthorityJournal?>(initialState: nil)
+        let reads = OSAllocatedUnfairLock(initialState: 0)
+        let pool = CommandFilesystemProbePool(beforeWork: {
+            guard let authority = owner.withLock({ $0 }) else { return }
+            do {
+                try authority.read { _ in () }
+                reads.withLock { $0 += 1 }
+            } catch { XCTFail("The filesystem probe held the journal: \(error)") }
+        })
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandFilesystem: pool)
+        let authority = try XCTUnwrap(fixture.authority)
+        owner.withLock { $0 = authority }
+        defer { owner.withLock { $0 = nil } }
+        let tool = fixture.root.appendingPathComponent("transferred-tool").path
+        let replacement = fixture.root.appendingPathComponent("transferred-replacement").path
+        for path in [tool, replacement] { try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: path) }
+        let reply = try Endpoint(), terminal = try Endpoint()
+        let (_, command, submission, profile) = try ownerIOCommand(admission: reply, terminal: terminal, executablePath: tool)
+        let now = fixture.now()
+        let before = try fixture.auditRecordCount
+        XCTAssertThrowsError(try authority.admitProbedCommand(command, draft: fixture.draft(command),
+            expression: selfExpression(), userID: geteuid(), auditSessionID: nil, now: {
+                XCTAssertEqual(rename(replacement, tool), 0)
+                return now
+            }, receiptTimeMs: nil)) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
+        XCTAssertEqual(reads.withLock { $0 }, 1)
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+        XCTAssertNil(try fixture.reservation(submission.binding.id))
+        XCTAssertEqual(try fixture.auditRecordCount, before)
+    }
+
     func testAdmissionAttemptCallbackErrorsCannotSpoofCaptureRefusalAndCannotReenterJournal() throws {
         for stage in 0..<3 {
             let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
@@ -9307,7 +9339,8 @@ extension MachCommandCallerReceiverTests {
                 XCTAssertTrue(capture.environment.contains(.init(name: addition.name, value: addition.value, source: .requested)))
             }
             XCTAssertEqual(capture.target.uid, geteuid()); XCTAssertTrue(capture.ancestry.entries.isEmpty)
-            XCTAssertEqual(box.state.withLock { $0.reads }, 3)
+            // The fourth grant read follows the final filesystem probe, before request publication.
+            XCTAssertEqual(box.state.withLock { $0.reads }, 4)
             XCTAssertGreaterThanOrEqual(fcntl(null, F_GETFD), 0)
             let cancelledAt = fixture.now(120)
             _ = try journal.withRequests { try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: cancelledAt, receiptTimeMs: nil) }

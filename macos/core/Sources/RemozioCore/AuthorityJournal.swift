@@ -432,27 +432,45 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
-    /// Test entry for transferring an already assembled command into the serialized request owner.
+    /// Transfers an already assembled command into the serialized request owner.
     /// A failed first transfer closes its objects. Rejected reentry leaves previously owned objects intact.
     /// The host completes negotiation and current elevation-policy validation before this call.
     /// The request owner commits the submission replay reservation with request creation.
     /// The synchronous callbacks must not await or reenter this journal.
-    func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
+    public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                              checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try admitProbedCommand(command, draft: draft, expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,
+            auditSessionID: currentPolicy.expectedAuditSessionID, now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
+    }
+
+    /// Shares the public transfer path with fixtures that provide a local caller requirement.
+    func admitProbedCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, expression: String,
+                            userID: uid_t, auditSessionID: au_asid_t?, now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                            checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
         lock.lock()
         defer { lock.unlock() }
         let requests: ApprovalRequestCoordinator
-        do { requests = try commandAdmissionOwner() }
+        do {
+            guard lock.depth == 1 else { throw JournalDatabaseError.transactionActive }
+            requests = try commandAdmissionOwner()
+        }
         catch { command.closeIfUnclaimed(); throw error }
         requestOperationActive = true
         defer { requestOperationActive = false }
         do {
-            return try requests.admitCommand(command, draft: draft, currentPolicy: currentPolicy,
-                now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
+            return try requests.admitCommand(command, draft: draft, expression: expression, userID: userID,
+                auditSessionID: auditSessionID, now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation,
+                filesystemProof: {
+                    try command.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID,
+                        checkCancellation: checkCancellation, filesystemChecked: true)
+                    let proof = try proveAdmissionFilesystem(command, userID: userID, checkCancellation: checkCancellation)
+                    guard self.requests === requests, !updatePolicyOperationActive else { throw ApprovalCoordinatorError.unavailable }
+                    return proof
+                })
         } catch {
             if database.retired { retireRequests() }
-            throw error
+            throw (error as? CommandAdmissionCallbackFailure)?.underlying ?? error
         }
     }
 
@@ -623,16 +641,9 @@ public final class AuthorityJournal: @unchecked Sendable {
         var filesystemRefusal: CommandAdmissionRejectionReason?
         func verifyFilesystem() throws -> CommandFilesystemCapture.MetadataProof {
             do {
-                let check = try command.makeFilesystemRecheck()
-                let probe = try commandFilesystem.start(.admission(userID)) { deadline, checkProbe in
-                    try check.run(deadline: deadline, checkProbe: checkProbe)
-                }
-                return try awaitCommandFilesystem(probe, checkCancellation: {
-                    do { try checkCancellation() }
-                    catch { throw CommandAdmissionCallbackFailure(underlying: error) }
-                })
+                return try proveAdmissionFilesystem(command, userID: userID, checkCancellation: checkCancellation)
             } catch {
-                if error is CommandFilesystemProbeError || error as? CommandFilesystemCaptureError == .timedOut {
+                if CommandFilesystemProbeError.isCapacityFailure(error) {
                     filesystemRefusal = .capacityExceeded
                 }
                 throw (error as? CommandAdmissionCallbackFailure)?.underlying ?? error
@@ -654,11 +665,23 @@ public final class AuthorityJournal: @unchecked Sendable {
         do {
             return try requests.admitCommand(command, draft: requestDraft, expression: peerExpression,
                 userID: userID, auditSessionID: auditSessionID, now: now,
-                receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation, filesystemProof: provedFilesystem)
+                receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation, filesystemProof: { provedFilesystem })
         } catch {
             if database.retired { retireRequests() }
             throw error
         }
+    }
+
+    private func proveAdmissionFilesystem(_ command: RetainedCommandCapture, userID: uid_t,
+                                         checkCancellation: () throws -> Void) throws -> CommandFilesystemCapture.MetadataProof {
+        let check = try command.makeFilesystemRecheck()
+        let probe = try commandFilesystem.start(.admission(userID)) { deadline, checkProbe in
+            try check.run(deadline: deadline, checkProbe: checkProbe)
+        }
+        return try awaitCommandFilesystem(probe, checkCancellation: {
+            do { try checkCancellation() }
+            catch { throw CommandAdmissionCallbackFailure(underlying: error) }
+        })
     }
 
     /// Apply only to actual capture failures. Callback failures never enter this classifier.

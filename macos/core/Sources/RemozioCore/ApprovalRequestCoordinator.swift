@@ -490,7 +490,7 @@ public final class ApprovalRequestCoordinator {
     public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                              checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
-        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs) {
+        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs) { _ in
             try command.recheck(currentPolicy: currentPolicy, checkCancellation: checkCancellation)
         }
     }
@@ -500,18 +500,17 @@ public final class ApprovalRequestCoordinator {
     func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, expression: String,
                       userID: uid_t, auditSessionID: au_asid_t?, now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                       checkCancellation: () throws -> Void = {},
-                      filesystemProof: CommandFilesystemCapture.MetadataProof? = nil) throws -> IssuedRequestPayload {
-        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs, verifyMetadata: {
-            if let filesystemProof { try command.verifyFilesystemMetadata(filesystemProof) }
-        }) {
+                      filesystemProof: () throws -> CommandFilesystemCapture.MetadataProof? = { nil }) throws -> IssuedRequestPayload {
+        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs, filesystemProof: filesystemProof) { checked in
             try command.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID,
-                checkCancellation: checkCancellation, filesystemChecked: filesystemProof != nil)
+                checkCancellation: checkCancellation, filesystemChecked: checked)
         }
     }
 
     private func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft,
                               now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
-                              verifyMetadata: () throws -> Void = {}, recheck: () throws -> Void) throws -> IssuedRequestPayload {
+                              filesystemProof: () throws -> CommandFilesystemCapture.MetadataProof? = { nil },
+                              recheck: (Bool) throws -> Void) throws -> IssuedRequestPayload {
         try command.claimForRequestOwner()
         let reply = try command.takeAdmissionReply()
         defer { reply?.close() }
@@ -528,9 +527,15 @@ public final class ApprovalRequestCoordinator {
                 rejection = .invalidRequest
                 throw ApprovalCoordinatorError.invalidDraft
             }
-            try recheck()
+            let proof: CommandFilesystemCapture.MetadataProof?
+            do { proof = try filesystemProof() }
+            catch {
+                if CommandFilesystemProbeError.isCapacityFailure(error) { rejection = .capacityExceeded }
+                throw error
+            }
+            try recheck(proof != nil)
             let moment = try now()
-            try verifyMetadata()
+            if let proof { try command.verifyFilesystemMetadata(proof) }
             // Only errors from this owner's admission path can classify a refusal. Callback errors remain uncertain.
             do { payload = try admit(draft, command: command, now: moment, receiptTimeMs: receiptTimeMs) }
             catch { rejection = Self.admissionRejection(error); throw error }

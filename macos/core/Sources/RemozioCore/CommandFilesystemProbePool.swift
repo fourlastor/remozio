@@ -3,6 +3,10 @@ import Foundation
 
 enum CommandFilesystemProbeError: Error, Equatable {
     case atCapacity, expired
+
+    static func isCapacityFailure(_ error: Error) -> Bool {
+        error is Self || error as? CommandFilesystemCaptureError == .timedOut
+    }
 }
 
 /// A result belongs to one phase and can be consumed once. The pool owns the slot until the work returns.
