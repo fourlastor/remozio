@@ -82,7 +82,7 @@ Its limit is 4 KiB, depth 6, and 128 items.
 | 1 | Complete negotiated profile and Mac/account scope |
 | 2 | Original submission ID, nonce and caller binding |
 | 3 | SHA-256 of the original canonical submission |
-| 4 | Exact admitted request ID, digest and challenge |
+| 4 | Exact admitted request ID, opaque token and challenge |
 | 5 | Terminal outcome tag |
 | 6 | Exit status, signal, or null |
 
@@ -99,7 +99,7 @@ The encoder remains internal. Encoding a value does not prove that a child produ
 ## Committed owner results
 
 The serialized request owner sends a terminal result after the audit transaction and its independent checkpoint succeed.
-It uses the retained original submission digest and the admitted request ID, digest and challenge.
+It uses the retained original submission digest and the admitted request ID, opaque token and challenge. The Authority uses the same token in both directions and in the terminal result.
 A successful send closes the private reply right. Retirement then closes the imported descriptors.
 
 ```mermaid

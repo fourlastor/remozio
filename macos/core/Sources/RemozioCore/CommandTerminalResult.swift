@@ -47,7 +47,7 @@ struct CommandTerminalResultPayload {
         guard profile.supportsExecutionChannels, submissionSchemaVersion == profile.submissionSchemaVersion,
               submission.callerBinding == profile.callerBinding else { throw CommandTerminalResultError.incompatible }
         guard submission.id.count == 16, submission.nonce.count == 32, submissionDigest.count == 32,
-              request.requestID.count == 16, request.requestDigest.count == 32, request.challenge.count == 32 else {
+              request.requestID.count == 16, request.requestToken.count == 32, request.challenge.count == 32 else {
             throw CommandTerminalResultError.malformed
         }
         let tag: UInt64, body: CBORValue
@@ -68,7 +68,7 @@ struct CommandTerminalResultPayload {
         var fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: profile.fields,
             2: .map([0: .bytes(binding.id), 1: .bytes(binding.nonce), 2: .bytes(binding.callerBinding)]),
             3: .bytes(submissionDigest),
-            4: .map([0: .bytes(request.requestID), 1: .bytes(request.requestDigest), 2: .bytes(request.challenge)]),
+            4: .map([0: .bytes(request.requestID), 1: .bytes(request.requestToken), 2: .bytes(request.challenge)]),
             5: .unsigned(tag), 6: body]
         if outputInterrupted { fields[7] = .unsigned(1) }
         return try DeterministicCBOR.encode(.map(fields), limits: Self.limits())
@@ -88,7 +88,7 @@ struct CommandTerminalResultPayload {
               binding[0] == .bytes(original.binding.id), binding[1] == .bytes(original.binding.nonce),
               binding[2] == .bytes(original.binding.callerBinding), fields[3] == .bytes(admission.submissionDigest),
               case .map(let identity) = fields[4], Set(identity.keys) == [0, 1, 2],
-              identity[0] == .bytes(request.requestID), identity[1] == .bytes(request.requestDigest),
+              identity[0] == .bytes(request.requestID), identity[1] == .bytes(request.requestToken),
               identity[2] == .bytes(request.challenge), case .unsigned(let tag) = fields[5], let body = fields[6] else {
             throw CommandTerminalResultError.malformed
         }

@@ -23,7 +23,7 @@ sequenceDiagram
         alt Capture and admission succeed
             R->>J: Reserve submission and create request atomically
             J->>R: Durable completion
-            R->>F: Admitted request ID, digest, challenge
+            R->>F: Admitted request ID, token, challenge
             Note over R: Reply loss preserves the admitted request
         else Known capture refusal or verified admission rollback
             R->>J: Check scope, checkpoint, and ID-or-nonce absence
@@ -51,7 +51,9 @@ The canonical CBOR envelope has exactly six keys:
 
 The result is limited to 4 KiB, depth 6, and 96 items. Unknown fields, versions, kinds, reasons, and classes fail. Noncanonical encoding fails. A reply for different arguments fails even if a caller reused the same identifiers.
 
-An admitted body contains a 16-byte request ID, 32-byte request digest, and 32-byte challenge. This acknowledges request creation. It grants no decision or execution permit.
+An admitted body has key 0 for the 16-byte request ID, key 1 for the 32-byte opaque request token, and key 2 for the 32-byte challenge. This acknowledges request creation. It grants no decision or execution permit.
+
+The Authority generates the token independently of the request ID and signed request digest. It retains the token with the live command and uses it for stream and terminal binding. The profile, encoded fields and lengths stay the same. The submission digest still binds the caller's original submission.
 
 A no-admission body contains a rejection reason and its exact retry class. Such a result must prove that this submission created no request and dispatched no action. Parsing a reason does not establish that state. The serialized host must construct this assertion only after a known pre-admission refusal or verified rollback.
 

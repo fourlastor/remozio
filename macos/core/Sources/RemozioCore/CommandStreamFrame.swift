@@ -12,12 +12,12 @@ struct CommandStreamBinding: Equatable, Sendable {
     var fields: CBORValue { .map([0: profile.fields,
         1: .map([0: .bytes(submission.id), 1: .bytes(submission.nonce), 2: .bytes(submission.callerBinding)]),
         2: .bytes(submissionDigest),
-        3: .map([0: .bytes(request.requestID), 1: .bytes(request.requestDigest), 2: .bytes(request.challenge)])]) }
+        3: .map([0: .bytes(request.requestID), 1: .bytes(request.requestToken), 2: .bytes(request.challenge)])]) }
     func validate() throws {
         guard profile.supportsExecutionControls, profile.callerBinding.count == 16, profile.macID.count == 16, profile.accountID.count == 16,
               submission.callerBinding == profile.callerBinding,
               submission.id.count == 16, submission.nonce.count == 32, submissionDigest.count == 32,
-              request.requestID.count == 16, request.requestDigest.count == 32, request.challenge.count == 32 else {
+              request.requestID.count == 16, request.requestToken.count == 32, request.challenge.count == 32 else {
             throw CommandStreamError.binding
         }
     }

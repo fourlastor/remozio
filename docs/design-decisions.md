@@ -68,6 +68,12 @@ Do not silently relocate executable files, force another interpreter, or restric
 
 The [macOS 26 and 27 experiment](experiments/macos-execution-binding.md) provides the measured evidence. Production execution still needs protected service integration, authorization policy, durable consumption, process I/O and recovery. Acceptance of this contract does not enable an unimplemented executor. The [filesystem capture component](macos-command-filesystem-capture.md) now implements capture and recheck without command dispatch.
 
+## Caller binding for admitted commands
+
+The Authority creates a random 32-byte token for each admitted command. The Mach admission reply, stream frames and terminal result carry that same token. The token correlates messages for the live command and grants no authority.
+
+The signed request digest stays on the approval and execution path. This keeps the caller's reply independent of an executable fingerprint the caller cannot read. The Mach field sizes and the phone's signed payload stay the same. See [admission results](macos-command-admission-results.md) and [I/O channels](macos-command-io-channels.md).
+
 ## Independent command elevation policy
 
 The user selected a separate Remozio policy on 11 October 2026.

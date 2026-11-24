@@ -9,7 +9,7 @@ final class CommandTerminalResultTests: XCTestCase {
     private let profile = CommandHandshakeProfile(wireVersion: 3, submissionSchemaVersion: 1, inputCarrierVersion: 4,
         callerBinding: Data(repeating: 3, count: 16), macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
     private let request = CommandAdmittedRequest(requestID: Data(repeating: 6, count: 16),
-        requestDigest: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
+        requestToken: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
     private func original(arguments: [Data] = [Data("true".utf8)]) throws -> CommandSubmission {
         try CommandSubmission(schemaVersion: 1, executablePath: Data("/usr/bin/true".utf8), arguments: arguments,
             directoryPath: Data("/tmp".utf8), requestedTargetUID: 0, environmentAdditions: [], ioMode: .pipes,
@@ -110,9 +110,12 @@ final class CommandTerminalResultTests: XCTestCase {
             original: original(arguments: [Data([0xff])]), admission: admission())) {
             XCTAssertEqual($0 as? CommandTerminalResultError, .wrongBinding)
         }
-        let different = CommandAdmittedRequest(requestID: request.requestID, requestDigest: request.requestDigest, challenge: Data(count: 32))
-        XCTAssertThrowsError(try CommandTerminalResultPayload.decode(payload().canonicalBytes, profile: profile,
-            original: original(), admission: admission(.admitted(different))))
+        let wrongChallenge = CommandAdmittedRequest(requestID: request.requestID, requestToken: request.requestToken, challenge: Data(count: 32))
+        let wrongToken = CommandAdmittedRequest(requestID: request.requestID, requestToken: Data(count: 32), challenge: request.challenge)
+        for different in [wrongChallenge, wrongToken] {
+            XCTAssertThrowsError(try CommandTerminalResultPayload.decode(payload().canonicalBytes, profile: profile,
+                original: original(), admission: admission(.admitted(different))))
+        }
     }
     func testNoncanonicalOversizedUnknownAndMissingFieldsFail() throws {
         try reject(Data(count: 4097))

@@ -16,10 +16,11 @@ public enum CommandAdmissionUncertainty: UInt64, Sendable { case admissionReject
 /// A request identity is an admission acknowledgment. It grants no decision or execution permission.
 public struct CommandAdmittedRequest: Equatable, Sendable {
     public let requestID: Data
-    public let requestDigest: Data
+    /// Opaque Authority value retained by the caller for stream and terminal binding.
+    public let requestToken: Data
     public let challenge: Data
-    init(requestID: Data, requestDigest: Data, challenge: Data) {
-        self.requestID = requestID; self.requestDigest = requestDigest; self.challenge = challenge
+    init(requestID: Data, requestToken: Data, challenge: Data) {
+        self.requestID = requestID; self.requestToken = requestToken; self.challenge = challenge
     }
 }
 
@@ -62,10 +63,10 @@ struct CommandAdmissionResultPayload {
         let tag: UInt64, body: CBORValue
         switch outcome {
         case .admitted(let request):
-            guard request.requestID.count == 16, request.requestDigest.count == 32, request.challenge.count == 32 else {
+            guard request.requestID.count == 16, request.requestToken.count == 32, request.challenge.count == 32 else {
                 throw CommandAdmissionResultError.malformed
             }
-            tag = 1; body = .map([0: .bytes(request.requestID), 1: .bytes(request.requestDigest), 2: .bytes(request.challenge)])
+            tag = 1; body = .map([0: .bytes(request.requestID), 1: .bytes(request.requestToken), 2: .bytes(request.challenge)])
         case .notAdmitted(let reason, let retry):
             guard Self.valid(reason: reason, retry: retry) else { throw CommandAdmissionResultError.malformed }
             tag = 2; body = .map([0: .unsigned(reason.rawValue), 1: .unsigned(retry.rawValue)])
@@ -94,9 +95,9 @@ struct CommandAdmissionResultPayload {
         switch tag {
         case 1:
             guard Set(body.keys) == [0, 1, 2], case .bytes(let requestID) = body[0], requestID.count == 16,
-                  case .bytes(let requestDigest) = body[1], requestDigest.count == 32,
+                  case .bytes(let requestToken) = body[1], requestToken.count == 32,
                   case .bytes(let challenge) = body[2], challenge.count == 32 else { throw CommandAdmissionResultError.malformed }
-            outcome = .admitted(.init(requestID: requestID, requestDigest: requestDigest, challenge: challenge))
+            outcome = .admitted(.init(requestID: requestID, requestToken: requestToken, challenge: challenge))
         case 2:
             guard Set(body.keys) == [0, 1], case .unsigned(let rawReason) = body[0],
                   let reason = CommandAdmissionRejectionReason(rawValue: rawReason), case .unsigned(let rawRetry) = body[1],

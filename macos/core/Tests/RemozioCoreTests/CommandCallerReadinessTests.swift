@@ -124,7 +124,7 @@ final class CommandCallerReadinessTests: XCTestCase {
 
     func testAllBusyClassesMakeFreshSubmissionsAndPreserveInvocationAndUnreadPipe() throws {
         let endpoint = try Endpoint(), admitted = CommandAdmittedRequest(requestID: Data(repeating: 3, count: 16),
-            requestDigest: Data(repeating: 4, count: 32), challenge: Data(repeating: 5, count: 32))
+            requestToken: Data(repeating: 4, count: 32), challenge: Data(repeating: 5, count: 32))
         let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
         let server = try serve(endpoint, replies: reasons.map(busy) + [.result(.admitted(admitted))])
         var fds: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&fds), 0); defer { for fd in fds { _ = Darwin.close(fd) } }
@@ -334,7 +334,7 @@ extension CommandCallerReadinessTests {
     }
     func testIOReadinessRetriesFourBoundBusyClassesAndRetainsActualTerminalSession() throws {
         let endpoint = try Endpoint(), request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),
-            requestDigest: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
+            requestToken: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
         let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
         let server = try serve(endpoint, replies: reasons.map(busy) + [.result(.admitted(request))], io: true)
         var input: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&input), 0)
@@ -460,7 +460,7 @@ extension CommandCallerReadinessTests {
     func testMappedReadinessRetainsEverySourceAcrossAllBusyClassesAndTheAdmittedChannel() throws {
         let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
         let request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),
-            requestDigest: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
+            requestToken: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
         let mixed = try CommandHandshakeCapabilities(wireVersions: [8, 9], submissionSchemaVersions: [1], inputCarrierVersions: [5])
         for mode: CommandIOMode in [.pty, .pipes] {
             for hasTerminal in [false, true] {
@@ -617,7 +617,7 @@ extension CommandCallerReadinessTests {
         defer { for fd in [input, output] { _ = Darwin.close(fd) } }
         let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
         let request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),
-            requestDigest: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
+            requestToken: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
         let server = try serve(endpoint, replies: reasons.map(busy) + [.result(.admitted(request))], io: true, mapped: true,
             capabilities: .mappedPipeJobExecutionControls, terminalOutcome: .cancelledBeforeStart)
         let actual = try expression()

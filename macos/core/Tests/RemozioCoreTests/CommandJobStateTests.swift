@@ -6,12 +6,12 @@ import XCTest
 @testable import RemozioCore
 
 final class CommandJobStateTests: XCTestCase {
-    private func binding(_ wire: UInt64) -> CommandStreamBinding {
+    private func binding(_ wire: UInt64, token: UInt8 = 8) -> CommandStreamBinding {
         .init(profile: .init(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: wire >= 8 ? 5 : 4,
             callerBinding: Data(repeating: 1, count: 16), macID: Data(repeating: 2, count: 16), accountID: Data(repeating: 3, count: 16)),
             submission: .init(id: Data(repeating: 4, count: 16), nonce: Data(repeating: 5, count: 32), callerBinding: Data(repeating: 1, count: 16)),
             submissionDigest: Data(repeating: 6, count: 32),
-            request: .init(requestID: Data(repeating: 7, count: 16), requestDigest: Data(repeating: 8, count: 32), challenge: Data(repeating: 9, count: 32)))
+            request: .init(requestID: Data(repeating: 7, count: 16), requestToken: Data(repeating: token, count: 32), challenge: Data(repeating: 9, count: 32)))
     }
     private func stopped(revision: UInt64 = 1, tracing: CommandStopTracing = .unknown) -> CommandJobStatePayload {
         .init(revision: revision, state: .stopped(signal: UInt32(SIGTSTP), rawStopCode: UInt32(CLD_STOPPED), tracing: tracing))
@@ -50,6 +50,19 @@ final class CommandJobStateTests: XCTestCase {
         }
         for wire: UInt64 in [3, 4, 5] {
             XCTAssertThrowsError(try CommandStreamFrame(sequence: 1, body: .jobState(stopped())).encode(binding: binding(wire)))
+        }
+    }
+    func testStreamRejectsAChangedRequestTokenInBothDirections() throws {
+        for wire: UInt64 in 4...9 {
+            let original = binding(wire), crossed = binding(wire, token: 10)
+            for (body, direction): (CommandStreamFrame.Body, CommandStreamFrame.Direction) in [(.opened, .toFrontend), (.cancel, .toAuthority)] {
+                let frame = CommandStreamFrame(sequence: 0, body: body)
+                let bytes = try frame.encode(binding: original)
+                XCTAssertEqual(try CommandStreamFrame.decode(bytes, binding: original, direction: direction), frame)
+                XCTAssertThrowsError(try CommandStreamFrame.decode(bytes, binding: crossed, direction: direction)) {
+                    XCTAssertEqual($0 as? CommandStreamError, .binding)
+                }
+            }
         }
     }
     func testMalformedJobMetadataAndUnknownFieldsFail() throws {
