@@ -15,8 +15,10 @@ permissions:
   contents: read
 concurrency:
   # The event is part of the group, so a push to main never cancels the nightly run of main, nor the reverse.
+  # A new pull request push cancels its older run. A push to main never cancels the run in progress, so each main
+  # push run can finish; the group still keeps only the newest waiting run and replaces older waiting ones.
   group: checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # Each other job except the Python checks needs this one and runs when its output is 'true' or the event is not a
   # pull request. Its `!cancelled()` keeps it running on main when this job fails; on a pull request, a failure here
