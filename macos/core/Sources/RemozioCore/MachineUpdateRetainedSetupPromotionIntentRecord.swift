@@ -11,6 +11,8 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
     let revision: UUID
     let phase: Phase
     let publicationBytes: Data
+    /// Excluded from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
     var description: String { "MachineUpdateRetainedSetupPromotionIntentRecord(redacted)" }
     var debugDescription: String { description }
 
@@ -75,11 +77,12 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
     private static func uuidBytes(_ value: UUID) -> Data {
         var bytes = value.uuid; return withUnsafeBytes(of: &bytes) { Data($0) }
     }
-    var encoded: Data { get throws {
+    /// Computes the canonical bytes on first success only; this value is immutable, so later reads return the same result.
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try DeterministicCBOR.encode(.map([0: .unsigned(Self.currentFormatVersion), 1: .text(Self.formatName),
             2: .bytes(Self.uuidBytes(id)), 3: .bytes(Self.uuidBytes(revision)),
             4: .unsigned(phase.rawValue), 5: .bytes(publicationBytes)]), limits: Self.limits)
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes,

@@ -10,6 +10,8 @@ struct RuntimeRetainedSetupCompletionArchive: Equatable, Sendable, CustomStringC
     let originalActivationBytes: Data
     let completionIntentBytes: Data
     let recordedInventoryBytes: Data
+    /// Excluded from equality. The bytes are a pure function of the fields above.
+    private let canonicalCache = CanonicalBytesCache()
     var description: String { "RuntimeRetainedSetupCompletionArchive(redacted)" }
     var debugDescription: String { description }
 
@@ -73,12 +75,13 @@ struct RuntimeRetainedSetupCompletionArchive: Equatable, Sendable, CustomStringC
         try binding.requireCompletionPolicy(policy.policy)
     }
 
-    var encoded: Data { get throws {
+    /// Computes the canonical bytes on first success only; this value is immutable, so later reads return the same result.
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate()
         return try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.purpose),
             2: .bytes(binding.encoded), 3: .bytes(originalActivationBytes),
             4: .bytes(completionIntentBytes), 5: .bytes(recordedInventoryBytes)]), limits: Self.limits)
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes,
