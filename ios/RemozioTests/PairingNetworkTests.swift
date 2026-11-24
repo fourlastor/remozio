@@ -205,6 +205,58 @@ final class PairingNetworkTests: XCTestCase {
         XCTAssertEqual(events.closedError, "identity failed")
     }
 
+    #if DEBUG
+    func testV2ExporterMatchesThePeerAndCanOnlyBeTakenOnce() throws {
+        let profile = IosPairingV2Preview.shared.applicationProtocol
+        let server = try LocalServer(alpn: profile)
+        let key = P256.Signing.PrivateKey()
+        let events = Recorder(self, expectBytes: true)
+        let transport = NetworkPairingTransport(target: .fixed(try server.endpoint()),
+            pin: Self.prefix + server.key.publicKey.x963Representation, applicationProtocol: profile,
+            identity: { try PairingClientIdentity.make(key.secKey) })
+        defer { transport.cancel() }
+        transport.start(events: events)
+        wait(for: [events.openedExpectation], timeout: 10)
+        transport.requestBytes()
+        wait(for: [try XCTUnwrap(events.receivedExpectation)], timeout: 10)
+        let exporter = PairingBytesKt.pairingData(bytes: try XCTUnwrap(transport.takeInvitationExporter()))
+        XCTAssertEqual(exporter.count, 32)
+        XCTAssertEqual(exporter, try XCTUnwrap(server.invitationExporter))
+        XCTAssertNil(transport.takeInvitationExporter())
+        transport.cancel()
+        wait(for: [events.closedExpectation], timeout: 10)
+    }
+
+    @MainActor
+    func testPreviewInputHidesTextAndDisablesEditingMenuActions() {
+        let field = PairingPreviewInput()
+        XCTAssertTrue(field.isSecureTextEntry)
+        XCTAssertNil(field.textContentType)
+        XCTAssertNil(field.restorationIdentifier)
+        XCTAssertEqual(field.autocorrectionType, .no)
+        XCTAssertEqual(field.smartInsertDeleteType, .no)
+        XCTAssertEqual(field.inlinePredictionType, .no)
+        XCTAssertFalse(field.canPerformAction(NSSelectorFromString("copy:"), withSender: nil))
+    }
+
+    @MainActor
+    func testPreviewClearsOnlyThePasteItConsumed() {
+        var clears = 0
+        PairingPreviewController.clearPasteboard(ifUnchanged: 7, current: { 8 }) { clears += 1 }
+        XCTAssertEqual(clears, 0)
+        PairingPreviewController.clearPasteboard(ifUnchanged: 7, current: { 7 }) { clears += 1 }
+        XCTAssertEqual(clears, 1)
+    }
+
+    @MainActor
+    func testPreviewRouteIsLimitedToAnExplicitLoopbackPort() {
+        XCTAssertNil(PairingPreviewEntry.endpoint(nil))
+        XCTAssertNil(PairingPreviewEntry.endpoint("192.0.2.10:9000"))
+        XCTAssertNil(PairingPreviewEntry.endpoint("127.0.0.1:0"))
+        XCTAssertEqual(PairingPreviewEntry.endpoint("127.0.0.1:9000"), .hostPort(host: .ipv4(.loopback), port: 9000))
+    }
+    #endif
+
     // MARK: - Helpers
 
     static func bytes(_ count: Int) -> KotlinByteArray { PairingBytesKt.pairingBytes(data: Data(repeating: 1, count: count)) }
@@ -272,6 +324,7 @@ private final class LocalServer {
     private let box: PointBox
     var clientPoint: Data? { box.get() }
     var connections: Int { box.connections() }
+    var invitationExporter: Data? { box.exporter() }
 
     init(alpn: String) throws {
         let identity = try PairingClientIdentity.make(key.secKey)
@@ -293,13 +346,26 @@ private final class LocalServer {
             }
             complete(true)
         }, queue)
-        listener = try NWListener(using: NWParameters(tls: tls), on: .any)
+        let parameters = NWParameters(tls: tls)
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        listener = try NWListener(using: parameters, on: .any)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
         listener.newConnectionHandler = { [queue] connection in
             box.connected()
             connection.stateUpdateHandler = { state in
-                if case .ready = state { connection.send(content: Data("hi".utf8), completion: .idempotent) }
+                if case .ready = state {
+                    #if DEBUG
+                    if alpn == IosPairingV2Preview.shared.applicationProtocol,
+                       let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata {
+                        let label = IosPairingV2Preview.shared.exporterLabel
+                        if let secret = sec_protocol_metadata_create_secret(metadata.securityProtocolMetadata, label.utf8.count, label, 32) {
+                            box.setExporter(Data(DispatchData._unconditionallyBridgeFromObjectiveC(secret)))
+                        }
+                    }
+                    #endif
+                    connection.send(content: Data("hi".utf8), completion: .idempotent)
+                }
             }
             connection.start(queue: queue)
         }
@@ -321,6 +387,9 @@ private final class PointBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Data?
     private var count = 0
+    private var secret: Data?
+    func setExporter(_ value: Data) { lock.withLock { secret = value } }
+    func exporter() -> Data? { lock.withLock { secret } }
     func set(_ point: Data) { lock.withLock { if value == nil { value = point } } }
     func get() -> Data? { lock.withLock { value } }
     func connected() { lock.withLock { count += 1 } }
