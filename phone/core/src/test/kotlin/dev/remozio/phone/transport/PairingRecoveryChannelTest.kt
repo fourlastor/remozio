@@ -2,7 +2,6 @@ package dev.remozio.phone.transport
 
 import dev.remozio.protocol.ChannelScope
 import dev.remozio.protocol.P256SignatureEncoding
-import dev.remozio.protocol.P256Verification
 import dev.remozio.protocol.PairingRecoveryFrame
 import dev.remozio.protocol.PairingRecoveryQuery
 import java.nio.ByteBuffer
@@ -47,8 +46,11 @@ class PairingRecoveryChannelTest {
         assertEquals(2, outgoing.size)
         assertContentEquals(wire(PairingRecoveryFrame.Lookup(query)), outgoing[0])
         val proof = assertIs<PairingRecoveryFrame.Proof>(PairingRecoveryFrame.decode(outgoing[1].copyOfRange(4, outgoing[1].size)))
-        assertTrue(P256Verification.verify(proof.signature.copyBytes(), key.public.encoded.takeLast(65).toByteArray(),
-            query.signingInput(exporter, challenge)))
+        assertTrue(Signature.getInstance("SHA256withECDSA").run {
+            initVerify(key.public)
+            update(query.signingInput(exporter, challenge))
+            verify(P256SignatureEncoding.toDer(proof.signature.copyBytes()))
+        })
     }
 
     @Test fun rejectsOversizedTruncatedAndUnexpectedChallengeFrames() = runBlocking<Unit> {
