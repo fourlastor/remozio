@@ -23,8 +23,9 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         var executable: String { root + "/tool" }
         var cwd: String { root + "/cwd" }
         let content: Data
-        init(content: Data = Data("#!/bin/sh\nprintf fixture\n".utf8)) throws {
-            root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        init(content: Data = Data("#!/bin/sh\nprintf fixture\n".utf8),
+             parent: URL = FileManager.default.temporaryDirectory) throws {
+            root = parent.appendingPathComponent("remozio-credential-" + UUID().uuidString).path
             self.content = content
             try FileManager.default.createDirectory(atPath: cwd, withIntermediateDirectories: true)
             try content.write(to: URL(fileURLWithPath: executable))
@@ -104,9 +105,73 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         try CommandFilesystemCaller.requireProcessIdentity()
     }
 
-    func testCredentialResetSentinelsMatchDarwin() {
+    func testCredentialResetSentinelsMatchDarwin() throws {
         XCTAssertEqual(CommandFilesystemCaller.kauthUIDNone, 0xffff_ff9b)
         XCTAssertEqual(CommandFilesystemCaller.kauthGIDNone, 0xffff_ff9b)
+
+        let environment = ProcessInfo.processInfo.environment
+        let uidValue = environment["REMOZIO_CREDENTIAL_FIXTURE_UID"]
+        let gidValue = environment["REMOZIO_CREDENTIAL_FIXTURE_GID"]
+        if uidValue == nil, gidValue == nil { return }
+        let uid = try XCTUnwrap(uidValue.flatMap { uid_t($0) })
+        let gid = try XCTUnwrap(gidValue.flatMap { gid_t($0) })
+        guard getuid() == 0, geteuid() == 0, uid > 0, gid > 0 else {
+            return XCTFail("The privileged fixture requires a separate caller")
+        }
+        try verifyPrivilegedFilesystemCapture(caller: .init(userID: uid, groupID: gid))
+        print("Remozio privileged filesystem fixture passed")
+    }
+
+    private func verifyPrivilegedFilesystemCapture(caller: CommandFilesystemCaller) throws {
+        let fixture = try Fixture(parent: URL(fileURLWithPath: "/private/tmp", isDirectory: true))
+        let executable = fixture.executable, cwd = fixture.cwd
+        let missing = fixture.root + "/missing"
+        let digest = Data(SHA256.hash(data: fixture.content))
+        let denied = fixture.root + "/denied"
+        try FileManager.default.createDirectory(atPath: denied, withIntermediateDirectories: false)
+        try FileManager.default.copyItem(atPath: fixture.executable, toPath: denied + "/tool")
+        XCTAssertEqual(chmod(denied, 0o700), 0)
+        XCTAssertEqual(chmod(fixture.root, 0o711), 0)
+        XCTAssertEqual(chmod(fixture.cwd, 0o111), 0)
+        XCTAssertEqual(chmod(fixture.executable, 0o111), 0)
+
+        let pool = CommandFilesystemProbePool()
+        let operation = try pool.start(.admission(caller.userID)) { deadline, checkProbe in
+            try caller.withIdentity {
+                var observedUID: uid_t = 0, observedGID: gid_t = 0
+                XCTAssertEqual(pthread_getugid_np(&observedUID, &observedGID), 0)
+                XCTAssertEqual(observedUID, caller.userID)
+                XCTAssertEqual(observedGID, caller.groupID)
+                let descriptor = Darwin.open(executable, O_RDONLY | O_CLOEXEC)
+                let error = errno
+                if descriptor >= 0 { _ = Darwin.close(descriptor) }
+                XCTAssertEqual(descriptor, -1)
+                XCTAssertEqual(error, EACCES)
+            }
+            try CommandFilesystemCaller.requireProcessIdentity()
+            XCTAssertThrowsError(try caller.withIdentity { throw Cancelled.test }) {
+                XCTAssertTrue($0 is Cancelled)
+            }
+            try CommandFilesystemCaller.requireProcessIdentity()
+
+            let capture = try CommandFilesystemCapture(executablePath: Data(executable.utf8),
+                directoryPath: Data(cwd.utf8), deadline: deadline, caller: caller, checkProbe: checkProbe)
+            defer { capture.close() }
+            XCTAssertEqual(capture.executable.sha256, digest)
+            try capture.withBorrowedDirectoryDescriptor { descriptor in
+                XCTAssertNotEqual(fcntl(descriptor, F_GETFL) & O_EXEC, 0)
+            }
+
+            for (path, expected) in [(missing, ENOENT), (denied + "/tool", EACCES)] {
+                XCTAssertThrowsError(try CommandFilesystemCapture(executablePath: Data(path.utf8),
+                    directoryPath: Data(cwd.utf8), deadline: deadline, caller: caller, checkProbe: checkProbe)) {
+                    XCTAssertEqual($0 as? CommandFilesystemCaptureError, .system(expected))
+                    XCTAssertEqual(AuthorityJournal.commandCaptureRefusal($0), .invalidRequest)
+                }
+            }
+            try CommandFilesystemCaller.requireProcessIdentity()
+        }
+        try withExtendedLifetime(fixture) { try operation.wait() }
     }
 
     func testOrdinaryWorkerRejectsAnotherUIDAndKeepsProcessIdentity() throws {
