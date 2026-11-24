@@ -7932,8 +7932,9 @@ extension MachCommandCallerReceiverTests {
                 XCTAssertEqual(admitted.requestToken.count, 32)
                 XCTAssertNotEqual(admitted.requestToken, signedDigest)
 
+                let retirementTime = fixture.now(120)
                 let state = try owner.withRequests {
-                    try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: fixture.now(120), receiptTimeMs: nil)
+                    try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: retirementTime, receiptTimeMs: nil)
                 }
                 XCTAssertEqual(state.requestDigest, signedDigest)
                 let result = try ownerTerminal(terminalPort, submission: submission, admission: admission)
