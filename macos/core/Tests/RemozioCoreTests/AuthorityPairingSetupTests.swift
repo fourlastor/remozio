@@ -1899,15 +1899,17 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
 
     /// The test client bridges raw TLS bytes into the production localhost WebSocket carrier.
     private final class ClientRelay: @unchecked Sendable {
+        let webSocketConnections = Mutex(0)
         let port = Box<UInt16?>(nil)
         private let listener: NWListener
         private let operations = OwnedTaskHandoffRegistry()
         private let state = NSLock()
         private var closed = false
-        private let target: NWEndpoint.Port
+        private let target: NWEndpoint
 
         init(target: UInt16) throws {
-            self.target = try XCTUnwrap(NWEndpoint.Port(rawValue: target))
+            let url = try XCTUnwrap(URL(string: "ws://127.0.0.1:\(target)/approval"))
+            self.target = .url(url)
             let parameters = NWParameters.tcp
             parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
             listener = try NWListener(using: parameters)
@@ -1925,17 +1927,19 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             state.withLock {
                 guard !closed else { tcp.cancel(); return }
                 let socketOptions = NWProtocolWebSocket.Options()
+                socketOptions.skipHandshake = false
                 socketOptions.setSubprotocols([ApprovalWebSocketRelay.subprotocol])
                 let parameters = NWParameters.tcp
                 parameters.defaultProtocolStack.applicationProtocols.insert(socketOptions, at: 0)
-                let socket = NWConnection(host: .ipv4(.loopback), port: target, using: parameters)
+                let socket = NWConnection(to: target, using: parameters)
                 let local = NetworkByteChannel(connection: tcp) { _ in true }
                 let relay = NetworkByteChannel(driver: WebSocketByteConnection(socket))
                 let work = operations.reserve()
-                work.install(Task {
+                work.install(Task { [self] in
                     do {
                         try await local.start(timeoutMilliseconds: 5_000)
                         try await relay.start(timeoutMilliseconds: 5_000)
+                        webSocketConnections.withLock { $0 += 1 }
                         try await ApprovalWebSocketRelay.forward(local, relay)
                     } catch { }
                     await local.close()
@@ -2137,7 +2141,10 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let client = try ClientRelay(target: carrierPort)
         defer { client.close() }
         let tunnel = try await waitForPort(client.port)
+        let rootConnectionsBeforeRelay = root.connections.withLock { $0 }
         try await checkNativeRecovery(port: tunnel, fixture: f, transcript: transcript, phone: phone, phoneIdentity: phoneIdentity)
+        XCTAssertEqual(client.webSocketConnections.withLock { $0 }, 1)
+        XCTAssertEqual(root.connections.withLock { $0 }, rootConnectionsBeforeRelay + 1)
         await client.closeAndWait()
         await relay.closeAndWait()
         await service.closeAndWait()
