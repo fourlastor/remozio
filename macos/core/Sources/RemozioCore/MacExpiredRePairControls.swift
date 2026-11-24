@@ -23,22 +23,26 @@ public final class MacExpiredRePairControls {
 
     public convenience init(openChannel: @escaping @MainActor () throws -> AuthorityPairingChannel) {
         self.init(load: {
-            let channel = try openChannel()
-            defer { channel.abort() }
-            do {
-                _ = try await channel.start()
-                try await channel.negotiateExpiredRePairList()
-            } catch {
-                channel.abort()
+            for _ in 0..<2 {
                 try Task.checkCancellation()
-                // A service without the new selector can close that connection before sending a reply.
-                let legacy = try openChannel()
-                defer { legacy.abort() }
-                _ = try await legacy.start()
-                try await legacy.requirePhoneManagement()
-                throw ExpiredRePairListError.updateRequired
+                let channel = try openChannel()
+                defer { channel.abort() }
+                do {
+                    _ = try await channel.start()
+                    try await channel.negotiateExpiredRePairList()
+                } catch {
+                    continue
+                }
+                return try await channel.expiredRePairs()
             }
-            return try await channel.expiredRePairs()
+
+            // A legacy service can close the connection on the unknown selector.
+            try Task.checkCancellation()
+            let legacy = try openChannel()
+            defer { legacy.abort() }
+            _ = try await legacy.start()
+            try await legacy.requirePhoneManagement()
+            throw ExpiredRePairListError.updateRequired
         }, discard: { record in
             let channel = try openChannel()
             defer { channel.abort() }

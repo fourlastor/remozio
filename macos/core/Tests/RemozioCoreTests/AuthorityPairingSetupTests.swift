@@ -291,10 +291,13 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         private let connection: NSXPCConnection
         private let policy: XPCPeerPolicy
         private let trace: PhoneManagementTrace?
+        private let beforeVersionedHello: @Sendable () -> Void
         private let onVersionedHello: @Sendable () -> Void
         init(endpoint: NSXPCListenerEndpoint, policy: XPCPeerPolicy, requirement: String,
-             trace: PhoneManagementTrace? = nil, onVersionedHello: @escaping @Sendable () -> Void = {}) {
-            self.policy = policy; self.trace = trace; self.onVersionedHello = onVersionedHello
+             trace: PhoneManagementTrace? = nil, beforeVersionedHello: @escaping @Sendable () -> Void = {},
+             onVersionedHello: @escaping @Sendable () -> Void = {}) {
+            self.policy = policy; self.trace = trace; self.beforeVersionedHello = beforeVersionedHello
+            self.onVersionedHello = onVersionedHello
             connection = NSXPCConnection(listenerEndpoint: endpoint)
             connection.remoteObjectInterface = NSXPCInterface(with: AuthorityAppXPCProtocol.self)
             connection.setCodeSigningRequirement(requirement)
@@ -326,6 +329,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 }
             case .versionedPhoneManagementHello(let maximumVersion):
                 if let trace { trace.versionedHellos.value += 1 }
+                beforeVersionedHello()
                 proxy.pairedPhoneHello(maximumVersion: maximumVersion) { [trace, onVersionedHello] version in
                     trace?.versionedReply.value = version
                     onVersionedHello()
@@ -748,11 +752,34 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         await controls.refresh()
         XCTAssertEqual(controls.availability, .updateRequired)
         XCTAssertNil(controls.records)
-        XCTAssertEqual(trace.opens.value, 2)
-        XCTAssertEqual(trace.versionedHellos.value, 1)
+        XCTAssertEqual(trace.opens.value, 3)
+        XCTAssertEqual(trace.versionedHellos.value, 2)
         XCTAssertEqual(trace.legacyHellos.value, 1)
         XCTAssertEqual(trace.legacyReply.value, 1)
         XCTAssertEqual(trace.expiredLists.value, 0)
+    }
+
+    @MainActor
+    func testNativeExpiredListRecoversAfterFirstVersionedHelloCloses() async throws {
+        let f = try Fixture(), requirement = try testRequirement(), trace = PhoneManagementTrace()
+        let server = NativeServer(f, requirement: requirement)
+        defer { server.close() }
+        let controls = MacExpiredRePairControls(openChannel: {
+            trace.opens.value += 1
+            let first = trace.opens.value == 1
+            f.environment.peerDenied.value = false
+            let driver = NativeDriver(endpoint: server.listener.endpoint, policy: f.policy, requirement: requirement,
+                trace: trace, beforeVersionedHello: { if first { f.environment.peerDenied.value = true } })
+            return AuthorityPairingChannel(driver: driver, macID: f.mac, accountID: f.account, timeoutMilliseconds: 3000)
+        })
+        await controls.refresh()
+        XCTAssertEqual(controls.availability, .available)
+        XCTAssertEqual(controls.records, [])
+        XCTAssertEqual(trace.opens.value, 2)
+        XCTAssertEqual(trace.versionedHellos.value, 2)
+        XCTAssertEqual(trace.versionedReply.value, 2)
+        XCTAssertEqual(trace.expiredLists.value, 1)
+        XCTAssertEqual(trace.legacyHellos.value, 0)
     }
 
     @MainActor
@@ -780,7 +807,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         await controls.refresh()
         XCTAssertEqual(controls.availability, .unavailable)
         XCTAssertNil(controls.records)
-        XCTAssertEqual(trace.opens.value, 2)
+        XCTAssertEqual(trace.opens.value, 3)
         XCTAssertEqual(trace.legacyReply.value, 0)
         XCTAssertEqual(trace.expiredLists.value, 0)
     }
