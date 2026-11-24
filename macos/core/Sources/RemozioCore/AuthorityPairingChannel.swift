@@ -41,7 +41,8 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
 
 enum PairingClientCall: Sendable {
     case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel
-    case phoneManagementHello, managePhone(PairedPhoneOperation, Data, Data)
+    case phoneManagementHello, versionedPhoneManagementHello(UInt64)
+    case managePhone(PairedPhoneOperation, Data, Data)
 }
 
 enum PairingClientReply: Sendable { case version(UInt64), bytes(Data?), cancelled(Bool), failed }
@@ -81,6 +82,8 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
             }
         case .cancel: proxy.cancelPairing { [self] in checked(.cancelled($0), reply: reply) }
         case .phoneManagementHello: proxy.pairedPhoneHello { [self] in checked(.version($0), reply: reply) }
+        case .versionedPhoneManagementHello(let maximumVersion):
+            proxy.pairedPhoneHello(maximumVersion: maximumVersion) { [self] in checked(.version($0), reply: reply) }
         case .managePhone(let operation, let selection, let authorization):
             proxy.managePairedPhone(operation.rawValue, selection: selection, authorization: authorization) {
                 [self] in checked(.bytes($0), reply: reply)
@@ -114,6 +117,7 @@ public actor AuthorityPairingChannel {
     private var context: AuthorityPairingContext?
     private var staged: PairingTranscript?
     private var managesPhones = false
+    private var canListExpiredRePairs = false
     private var authorizingPhoneMutation = false
     private var pending: (id: UUID, continuation: CheckedContinuation<PairingClientReply, any Error>)?
     private var timer: Task<Void, Never>?
@@ -192,20 +196,23 @@ public actor AuthorityPairingChannel {
         return try decodeStatus(bytes(await perform(.managePhone(.status, selection.encode(), Data()))))
     }
 
+    func negotiateExpiredRePairList() async throws {
+        guard case .version(2) = try await perform(.versionedPhoneManagementHello(2)) else {
+            throw AuthorityPairingChannelError.unsupportedVersion
+        }
+        managesPhones = true
+        canListExpiredRePairs = true
+    }
+
     func expiredRePairs() async throws -> [ExpiredRePairRecord] {
-        try await requirePhoneManagement()
-        let reply: PairingClientReply
+        guard canListExpiredRePairs else { throw AuthorityPairingChannelError.unsupportedVersion }
+        let reply = try await perform(.managePhone(.listExpiredRePairs, Data(), Data()))
         do {
-            reply = try await perform(.managePhone(.listExpiredRePairs, Data(), Data()))
-        } catch AuthorityPairingChannelError.closed {
-            throw ExpiredRePairListError.supportUnconfirmed
-        }
-        // Earlier Root versions close this connection or return nil for the unknown operation.
-        guard case .bytes(let data?) = reply else {
+            return try ExpiredRePairSnapshot.decode(bytes(reply), macID: macID, accountID: accountID).records
+        } catch {
             close()
-            throw ExpiredRePairListError.supportUnconfirmed
+            throw error
         }
-        return try ExpiredRePairSnapshot.decode(data, macID: macID, accountID: accountID).records
     }
 
     func discardExpiredRePair(_ record: ExpiredRePairRecord,
@@ -254,7 +261,7 @@ public actor AuthorityPairingChannel {
         }
     }
 
-    private func requirePhoneManagement() async throws {
+    func requirePhoneManagement() async throws {
         if managesPhones { return }
         guard case .version(1) = try await perform(.phoneManagementHello) else {
             throw AuthorityPairingChannelError.unsupportedVersion
@@ -349,7 +356,7 @@ public actor AuthorityPairingChannel {
         switch call {
         case .hello: guard state == .opening else { throw AuthorityPairingChannelError.closed }
         case .context: guard state == .opening else { throw AuthorityPairingChannelError.closed }
-        case .stage, .commit, .cancel, .phoneManagementHello, .managePhone:
+        case .stage, .commit, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
             guard state == .open else { throw AuthorityPairingChannelError.closed }
         }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }

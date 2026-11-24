@@ -20,8 +20,13 @@ import Synchronization
                            reply: @escaping @Sendable (Data?) -> Void)
 }
 
+@objc public protocol AuthorityVersionedPairedPhoneXPCProtocol: AuthorityPairedPhoneXPCProtocol {
+    @objc(pairedPhoneHelloWithMaximumVersion:reply:)
+    func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void)
+}
+
 /// One signed app connection retains at most one uncommitted attempt. Disconnect discards only that attempt.
-final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, AuthorityPairedPhoneXPCProtocol, @unchecked Sendable {
+final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, AuthorityVersionedPairedPhoneXPCProtocol, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let access: AuthorityPairingSetupAccess
     private let budget: AuthorityXPCWorkBudget
@@ -115,10 +120,18 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         respond(reply) { try access.context() }
     }
     func pairedPhoneHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        replyWithPhoneManagementVersion(1, reply: reply)
+    }
+    func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
+        replyWithPhoneManagementVersion(min(maximumVersion, 2), reply: reply)
+    }
+    private func replyWithPhoneManagementVersion(_ version: UInt64, reply: (UInt64) -> Void) {
         do {
-            let completed = try work { state.withLock { $0.phoneManagement = true } }
+            let completed = try work {
+                if version > 0 { state.withLock { $0.phoneManagement = true } }
+            }
             defer { completed.completion.close() }
-            send { reply(1) }
+            send { reply(version) }
         } catch { close(); reply(0) }
     }
     func managePairedPhone(_ operation: UInt64, selection: Data, authorization: Data,
@@ -284,7 +297,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
 }
 
 /// Existing presence selectors keep version 1. Pairing has an independent version handshake on the signed app channel.
-@objc public protocol AuthorityAppXPCProtocol: AuthorityPresenceXPCProtocol, AuthorityPairingXPCProtocol, AuthorityPairedPhoneXPCProtocol {}
+@objc public protocol AuthorityAppXPCProtocol: AuthorityPresenceXPCProtocol, AuthorityPairingXPCProtocol, AuthorityVersionedPairedPhoneXPCProtocol {}
 
 final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @unchecked Sendable {
     let presence: AuthorityPresenceXPCEndpoint
@@ -297,6 +310,9 @@ final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @uncheck
     func pairingHello(reply: @escaping @Sendable (UInt64) -> Void) { pairing.pairingHello(reply: reply) }
     func pairingContext(reply: @escaping @Sendable (Data?) -> Void) { pairing.pairingContext(reply: reply) }
     func pairedPhoneHello(reply: @escaping @Sendable (UInt64) -> Void) { pairing.pairedPhoneHello(reply: reply) }
+    func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
+        pairing.pairedPhoneHello(maximumVersion: maximumVersion, reply: reply)
+    }
     func managePairedPhone(_ operation: UInt64, selection: Data, authorization: Data,
                            reply: @escaping @Sendable (Data?) -> Void) {
         pairing.managePairedPhone(operation, selection: selection, authorization: authorization, reply: reply)

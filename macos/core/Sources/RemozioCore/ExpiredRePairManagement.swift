@@ -2,7 +2,7 @@ import Foundation
 import RemozioProtocol
 
 enum ExpiredRePairListError: Error {
-    case supportUnconfirmed
+    case updateRequired
 }
 
 enum ExpiredRePairDiscardError: Error, Equatable {
