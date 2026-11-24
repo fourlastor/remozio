@@ -56,7 +56,9 @@ Execute the captured command by pathname after a final executable identity/conte
 
 On macOS, the Authority opens the symlink target from retained directories. The private child frame uses the resolved path and preserves the captured argv, including its first entry. The approval payload keeps the requested path.
 
-The Authority hashes up to 512 MiB per executable. Each filesystem phase has a five-second monotonic deadline and uses a bounded worker pool outside the journal lock. A timed-out operation holds its slot until the filesystem call returns.
+The Authority hashes up to 512 MiB per executable outside the journal lock. It reserves two worker slots for preparation and dispatch. Admission uses two separate slots, with one active operation per caller UID.
+
+Each filesystem phase has a five-second monotonic deadline. A timed-out operation holds its slot until the filesystem call returns. At release, the filesystem observation can be up to five seconds plus one poll old. The Authority checks the completed probe and commits dispatch in the same locked operation as the native release attempt.
 
 A process can still replace or modify the executable after the recheck and before the OS executes it. Scripts and dependencies can also change. Approval binds the invocation; it does not guarantee immutable approved program bytes or transitive behavior.
 

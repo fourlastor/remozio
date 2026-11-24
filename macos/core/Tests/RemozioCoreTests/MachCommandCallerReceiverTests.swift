@@ -739,7 +739,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let reply = try Endpoint()
         let (attempt, submission, profile) = try admissionAttempt(reply: reply)
         _ = try admitAttempt(attempt, fixture: fixture)
-        XCTAssertEqual(reads.withLock { $0 }, 3)
+        XCTAssertEqual(reads.withLock { $0 }, 2)
         guard case .admitted = try typedOutcome(reply, submission: submission, profile: profile) else {
             return XCTFail("Expected the request to commit")
         }
@@ -753,20 +753,11 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 return owner
             }
             guard let authority else { return }
-            do {
-                try authority.write { tx in
-                    let policy = try XCTUnwrap(tx.codePolicy())
-                    let old = try XCTUnwrap(policy.policy.entries.first { $0.role == .commandFrontend })
-                    let replacement = try AuthorityCodeEntry(role: old.role, teamID: old.teamID, identifier: old.identifier,
-                        installedGeneration: old.installedGeneration, minimumGeneration: old.minimumGeneration,
-                        codeDirectoryHash: Data(repeating: 0xfa, count: 20), active: true)
-                    _ = try tx.installCodePolicy(
-                        AuthorityCodePolicy(entries: policy.policy.entries.filter { $0.role != .commandFrontend } + [replacement]),
-                        expectedRevision: policy.revision)
-                }
-            } catch { XCTFail("Could not change the fixture frontend policy: \(error)") }
+            do { try Self.replaceFixtureFrontendPolicy(in: authority) }
+            catch { XCTFail("Could not change the fixture frontend policy: \(error)") }
         })
-        let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandFilesystem: pool)
+        // The owned component fixture permits policy replacement. A checkpointed journal rejects generic writes.
+        let fixture = try CommandRequestFixture(owned: true, commandFilesystem: pool)
         let authority = try XCTUnwrap(fixture.authority)
         owner.withLock { $0 = authority }
         defer { owner.withLock { $0 = nil } }
@@ -777,6 +768,61 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
         XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
         XCTAssertNil(try fixture.reservation(submission.binding.id))
+    }
+
+    private static func replaceFixtureFrontendPolicy(in authority: AuthorityJournal) throws {
+        try authority.write { tx in
+            let policy = try XCTUnwrap(tx.codePolicy())
+            let old = try XCTUnwrap(policy.policy.entries.first { $0.role == .commandFrontend })
+            let replacement = try AuthorityCodeEntry(role: old.role, teamID: old.teamID, identifier: old.identifier,
+                installedGeneration: old.installedGeneration, minimumGeneration: old.minimumGeneration,
+                codeDirectoryHash: Data(repeating: 0xfa, count: 20), active: true)
+            _ = try tx.installCodePolicy(
+                AuthorityCodePolicy(entries: policy.policy.entries.filter { $0.role != .commandFrontend } + [replacement]),
+                expectedRevision: policy.revision)
+        }
+    }
+
+    func testAdmissionFilesystemLimitsProveAbsenceBeforeReturningCapacity() throws {
+        for timeout in [false, true] {
+            let hold = DispatchSemaphore(value: 0)
+            defer { hold.signal() }
+            let pool = CommandFilesystemProbePool(admissionSlots: timeout ? 2 : 0, timeout: .milliseconds(50),
+                beforeWork: { _ = hold.wait(timeout: .now() + .seconds(2)) })
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandFilesystem: pool)
+            let reply = try Endpoint()
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture)) {
+                XCTAssertEqual($0 as? CommandFilesystemProbeError, timeout ? .expired : .atCapacity)
+            }
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.capacityExceeded, .never))
+            XCTAssertNil(try fixture.reservation(submission.binding.id))
+        }
+    }
+
+    func testAdmissionFilesystemCapacityKeepsHistoricalDuplicateUncertain() throws {
+        let pool = CommandFilesystemProbePool(admissionSlots: 1)
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandFilesystem: pool)
+        let firstReply = try Endpoint()
+        let (first, original, originalProfile) = try admissionAttempt(reply: firstReply)
+        let request = try admitAttempt(first, fixture: fixture)
+        guard case .admitted = try typedOutcome(firstReply, submission: original, profile: originalProfile) else {
+            return XCTFail("The original request must commit")
+        }
+        _ = try XCTUnwrap(fixture.authority).withRequests { try $0.retirePending(requestID: request.requestID,
+            reason: .cancelled, now: fixture.now(120), receiptTimeMs: nil) }
+        let hold = DispatchSemaphore(value: 0)
+        let occupied = try pool.start(.admission(getuid())) { _, _ in
+            _ = hold.wait(timeout: .now() + .seconds(5))
+        }
+        defer { occupied.cancel(); hold.signal() }
+        let reply = try Endpoint()
+        let (second, submission, profile) = try admissionAttempt(reply: reply, binding: original.binding)
+        XCTAssertThrowsError(try admitAttempt(second, fixture: fixture)) {
+            XCTAssertEqual($0 as? CommandFilesystemProbeError, .atCapacity)
+        }
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.duplicateSubmission))
+        XCTAssertNotNil(try fixture.reservation(original.binding.id))
     }
 
     func testAdmissionCaptureClassifierNeverTreatsHostResourceOrUnknownFailuresAsInvalidCommands() {
@@ -2283,7 +2329,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                             decisionLimits: limits, signingLimits: limits, auditLimits: limits)
                         authority = AuthorityJournal(requests: requests)
                     } else {
-                        authority = AuthorityJournal(database: ownedDatabase)
+                        authority = AuthorityJournal(database: ownedDatabase, commandFilesystem: commandFilesystem)
                     }
                     standaloneRequests = nil
                 } else {
@@ -4660,14 +4706,15 @@ extension MachCommandCallerReceiverTests {
     private func ownerIOCommand(admission: Endpoint, terminal: Endpoint, inputDescriptor: Int32? = nil,
                                 outputDescriptor: Int32? = nil, errorDescriptor: Int32? = nil,
                                 executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, wire: UInt64 = 3, ioMode: CommandIOMode = .pipes,
-                                disconnect: StartedCommandDisconnect = .terminate) throws ->
+                                disconnect: StartedCommandDisconnect = .terminate, binding: CapturedSubmission? = nil) throws ->
         (ReceivedMachCommandInputSubmission, RetainedCommandCapture, CommandSubmission, CommandHandshakeProfile) {
         let endpoint = try Endpoint(), input = inputDescriptor ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         let defaultOutput = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
         let output = outputDescriptor ?? defaultOutput, error = errorDescriptor ?? output
         guard input >= 0, output >= 0, error >= 0 else { throw MachCommandCallerError.unavailable }
         defer { if inputDescriptor == nil { _ = Darwin.close(input) }; _ = Darwin.close(defaultOutput) }
-        let submission = try commandSubmission(executablePath: executablePath, arguments: arguments, disconnect: disconnect, ioMode: ioMode)
+        let submission = try commandSubmission(executablePath: executablePath, arguments: arguments, binding: binding,
+            disconnect: disconnect, ioMode: ioMode)
         let profile = CommandHandshakeProfile(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: 4,
             callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
         try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output, errorDescriptor: error,
@@ -5122,13 +5169,17 @@ extension MachCommandCallerReceiverTests {
     }
     private func nativeDispatchFixture(checkpointed: Bool = false, path: String = "/usr/bin/true",
                                        arguments: [Data]? = nil, retiredEnrollmentEpoch: UInt8? = nil,
-                                       inputDescriptor: Int32? = nil, releaseActivity: ReleaseActivityBarrier? = nil) throws -> NativeDispatchFixture {
-        let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true, retiredEnrollmentEpoch: retiredEnrollmentEpoch)
+                                       inputDescriptor: Int32? = nil, releaseActivity: ReleaseActivityBarrier? = nil,
+                                       commandFilesystem: CommandFilesystemProbePool = .init(),
+                                       existingFixture: CommandRequestFixture? = nil,
+                                       binding: CapturedSubmission? = nil) throws -> NativeDispatchFixture {
+        let fixture = try existingFixture ?? CommandRequestFixture(checkpointed: checkpointed, owned: true,
+            retiredEnrollmentEpoch: retiredEnrollmentEpoch, commandFilesystem: commandFilesystem)
         let authority = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
         if let releaseActivity { try authority.attachReleaseActivityBarrier(releaseActivity) }
         let admissionPort = try Endpoint(), terminal = try Endpoint()
         let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
-            inputDescriptor: inputDescriptor, executablePath: path, arguments: arguments)
+            inputDescriptor: inputDescriptor, executablePath: path, arguments: arguments, binding: binding)
         let request = try admitOwnedCommand(command, fixture: fixture)
         let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
         _ = try ownerDecision(request, fixture: fixture, decline: false)
@@ -5189,6 +5240,130 @@ extension MachCommandCallerReceiverTests {
     }
     private func nativeDispatchOutcome(_ test: NativeDispatchFixture) throws -> CommandTerminalOutcome {
         try ownerTerminal(test.terminal, submission: test.submission, admission: test.admission).outcome
+    }
+
+    func testNativeDispatchFilesystemProbesLetAnotherCommandComplete() throws {
+        let owner = OSAllocatedUnfairLock<AuthorityJournal?>(initialState: nil)
+        let observations = OSAllocatedUnfairLock(initialState: 0)
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let pool = CommandFilesystemProbePool(beforeWork: {
+            guard let authority = owner.withLock({ $0 }) else { return }
+            do { try authority.read { _ in () } }
+            catch { XCTFail("A filesystem probe held the journal: \(error)") }
+            let index = observations.withLock { $0 += 1; return $0 }
+            if index == 2 {
+                entered.signal()
+                _ = resume.wait(timeout: .now() + .seconds(4))
+            }
+        })
+        let first = try nativeDispatchFixture(commandFilesystem: pool)
+        let second = try nativeDispatchFixture(existingFixture: first.fixture,
+            binding: .init(id: Data(repeating: 0xc1, count: 16), nonce: Data(repeating: 0xc2, count: 32), callerBinding: assemblyBinding))
+        let authority = first.authority
+        owner.withLock { $0 = authority }
+        defer { owner.withLock { $0 = nil }; resume.signal() }
+        try beginDispatch(first.fixture, request: first.request, launcher: first.launcher)
+        XCTAssertEqual(entered.wait(timeout: .now() + .seconds(2)), .success)
+        let firstID = first.request.requestID
+        XCTAssertEqual(try authority.withRequests { try $0.state(requestID: firstID).phase }, .authorized)
+        try beginDispatch(second.fixture, request: second.request, launcher: second.launcher)
+        XCTAssertEqual(try nativeDispatchOutcome(second), .exited(0))
+        XCTAssertEqual(try authority.withRequests { try $0.state(requestID: firstID).phase }, .authorized)
+        resume.signal()
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try nativeDispatchOutcome(first), .exited(0))
+        XCTAssertEqual(observations.withLock { $0 }, 6)
+    }
+
+    func testNativeDispatchExpiredFinalFilesystemProbeDoesNotRelease() throws {
+        let probes = OSAllocatedUnfairLock(initialState: 0)
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        defer { resume.signal() }
+        let pool = CommandFilesystemProbePool(timeout: .seconds(1), beforeWork: {
+            let index = probes.withLock { $0 += 1; return $0 }
+            if index == 3 {
+                entered.signal()
+                _ = resume.wait(timeout: .now() + .seconds(4))
+            }
+        })
+        let test = try nativeDispatchFixture(commandFilesystem: pool)
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)
+        XCTAssertEqual(entered.wait(timeout: .now() + .seconds(2)), .success)
+        let id = test.request.requestID
+        XCTAssertEqual(try test.authority.withRequests { try $0.state(requestID: id).phase }, .authorized)
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .failedBeforeStart)
+        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .cancelled)
+        XCTAssertEqual(outcome?.revision, 1)
+    }
+
+    func testNativeDispatchRetriesFilesystemCapacityBeforePreparationAndDispatch() throws {
+        for duringPrepare in [false, true] {
+            let saturated = DispatchSemaphore(value: 0)
+            let pool = CommandFilesystemProbePool(executionSlots: 1, onCapacity: { phase in
+                if case .execution = phase { saturated.signal() }
+            })
+            let hold = DispatchSemaphore(value: 0)
+            let blocked = OSAllocatedUnfairLock(initialState: false)
+            func occupy() throws {
+                _ = try pool.start(.execution) { _, _ in
+                    _ = hold.wait(timeout: .now() + .seconds(4))
+                }
+            }
+            defer { hold.signal() }
+            let test = try nativeDispatchFixture(commandFilesystem: pool)
+            if duringPrepare { try occupy() }
+            try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, elevation: { _ in
+                if !duringPrepare && blocked.withLock({ value in defer { value = true }; return !value }) {
+                    try occupy()
+                }
+            })
+            XCTAssertEqual(test.authority.activeCommandCount, 1)
+            let id = test.request.requestID
+            XCTAssertEqual(try test.authority.withRequests { try $0.state(requestID: id).phase }, .authorized)
+            XCTAssertEqual(saturated.wait(timeout: .now() + .seconds(2)), .success)
+            XCTAssertEqual(test.authority.activeCommandCount, 1)
+            hold.signal()
+            try awaitDispatchCleanup(test.authority)
+            XCTAssertEqual(try nativeDispatchOutcome(test), .exited(0))
+        }
+    }
+
+    func testNativeDispatchDiscardsPreparationProofAfterPolicyChanges() throws {
+        let owner = OSAllocatedUnfairLock<AuthorityJournal?>(initialState: nil)
+        let pool = CommandFilesystemProbePool(beforeWork: {
+            let authority = owner.withLock { value in defer { value = nil }; return value }
+            guard let authority else { return }
+            do { try Self.replaceFixtureFrontendPolicy(in: authority) }
+            catch { XCTFail("Could not change the fixture frontend policy: \(error)") }
+        })
+        let test = try nativeDispatchFixture(commandFilesystem: pool)
+        let authority = test.authority
+        owner.withLock { $0 = authority }
+        defer { owner.withLock { $0 = nil } }
+        XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)) {
+            XCTAssertEqual($0 as? CommandExecutionError, .policyChanged)
+        }
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .failedBeforeStart)
+        let id = test.request.requestID
+        let outcome = try authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .cancelled)
+    }
+
+    func testNativeDispatchRejectsExecutableSymlinkRetargetedAfterAdmission() throws {
+        let link = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        XCTAssertEqual(symlink("/usr/bin/true", link.path), 0)
+        defer { _ = unlink(link.path) }
+        let test = try nativeDispatchFixture(path: link.path)
+        XCTAssertEqual(unlink(link.path), 0)
+        XCTAssertEqual(symlink("/usr/bin/false", link.path), 0)
+        XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)) {
+            XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed)
+        }
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .failedBeforeStart)
     }
     func testNativeDispatchChangedMonitorRolePreventsReleaseWithoutChangingFrontendRole() throws {
         let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
@@ -8427,8 +8602,32 @@ extension MachCommandCallerReceiverTests {
             guard case .admitted(let identity) = try typedOutcome(reply, submission: submission, profile: profile) else {
                 return XCTFail("Current grants must admit the authenticated capture")
             }
-            XCTAssertEqual(identity.requestID, request.requestID); XCTAssertEqual(box.state.withLock { $0.reads }, 3)
+            XCTAssertEqual(identity.requestID, request.requestID)
+            // The fourth read checks the protected grants after the final off-lock filesystem probe.
+            XCTAssertEqual(box.state.withLock { $0.reads }, 4)
             XCTAssertNotNil(try fixture.reservation(submission.binding.id))
+        }
+    }
+
+    func testCurrentElevationRevocationDuringFinalFilesystemProbeNeverPublishesRequest() throws {
+        for checkpointed in [false, true] {
+            let box = ElevationGrantBox(), probes = OSAllocatedUnfairLock(initialState: 0)
+            let pool = CommandFilesystemProbePool(beforeWork: {
+                let count = probes.withLock { $0 += 1; return $0 }
+                if count == 2 { box.state.withLock { $0.targets = [] } }
+            })
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true, commandFilesystem: pool)
+            let reply = try Endpoint(), policy = try currentElevation(box)
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+            let before = try fixture.auditRecordCount
+            XCTAssertThrowsError(try admitWithElevation(attempt, fixture: fixture, policy: policy)) {
+                XCTAssertEqual($0 as? CommandElevationPolicyError, .policyRejected)
+            }
+            XCTAssertEqual(probes.withLock { $0 }, 2)
+            XCTAssertEqual(box.state.withLock { $0.reads }, 4)
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+            XCTAssertNil(try fixture.reservation(submission.binding.id))
+            XCTAssertEqual(try fixture.auditRecordCount, before)
         }
     }
 
@@ -8450,7 +8649,7 @@ extension MachCommandCallerReceiverTests {
 
     func testCurrentElevationReadFailureHasNoCachedAdmissionFallback() throws {
         for checkpointed in [false, true] {
-            for failAt in 1...3 {
+            for failAt in 1...4 {
                 let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
                 let box = ElevationGrantBox(); box.state.withLock { $0.failAtRead = failAt }
                 let policy = try currentElevation(box), (attempt, submission, profile) = try admissionAttempt(reply: reply)

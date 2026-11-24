@@ -5,9 +5,36 @@ import Security
 import SQLite3
 import RemozioProtocol
 
+private final class AuthorityJournalLock {
+    private let underlying = NSRecursiveLock()
+    private(set) var depth = 0
+
+    func lock() {
+        underlying.lock()
+        depth += 1
+    }
+
+    func `try`() -> Bool {
+        guard underlying.try() else { return false }
+        depth += 1
+        return true
+    }
+
+    func unlock() {
+        depth -= 1
+        underlying.unlock()
+    }
+
+    func withLock<Value>(_ body: () throws -> Value) rethrows -> Value {
+        lock()
+        defer { unlock() }
+        return try body()
+    }
+}
+
 /// Owns the authority's sole journal connection. Only Sendable results can leave a serialized transaction.
 public final class AuthorityJournal: @unchecked Sendable {
-    private let lock = NSRecursiveLock()
+    private let lock = AuthorityJournalLock()
     private let database: JournalDatabase
     private var storage: AuthorityStorage?
     private var requests: ApprovalRequestCoordinator?
@@ -22,6 +49,11 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var commandExecutions: [Data: CommandExecution] = [:]
     private var commandFilesystem = CommandFilesystemProbePool()
     private var commandsAwaitingPreparation = Set<Data>()
+    private struct DeferredCommandPreparation {
+        let deadline: ContinuousClock.Instant
+        let finish: (CommandFilesystemProbe<Void>) throws -> Void
+    }
+    private var deferredCommandPreparations: [Data: DeferredCommandPreparation] = [:]
     private var releaseActivity: ReleaseActivityBarrier?
     private var commandActivity: [Data: ReleaseActivityToken] = [:]
     private var commandCleanupTimer: DispatchSourceTimer?
@@ -30,7 +62,14 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var commandStreamChecks: [Data: () throws -> Void] = [:]
 
     /// Transfer exclusive ownership. The caller must not keep another user of this connection.
-    public init(database: sending JournalDatabase) { self.database = database }
+    public convenience init(database: sending JournalDatabase) {
+        self.init(database: database, commandFilesystem: .init())
+    }
+
+    init(database: sending JournalDatabase, commandFilesystem: CommandFilesystemProbePool) {
+        self.database = database
+        self.commandFilesystem = commandFilesystem
+    }
 
     /// Validates running code before recovering paired stores. Request admission remains closed.
     /// Both stores must already have been opened with the same configured Mac and account scope.
@@ -402,13 +441,9 @@ public final class AuthorityJournal: @unchecked Sendable {
         requestOperationActive = true
         defer { requestOperationActive = false }
         do {
-            try recheckCommandFilesystem(command, checkCancellation: checkCancellation)
-            guard self.requests === requests else { throw ApprovalCoordinatorError.unavailable }
-            return try requests.admitCommand(command, draft: draft, expression: currentPolicy.requirement,
-                userID: currentPolicy.expectedUserID, auditSessionID: currentPolicy.expectedAuditSessionID,
-                now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation, filesystemChecked: true)
+            return try requests.admitCommand(command, draft: draft, currentPolicy: currentPolicy,
+                now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
         } catch {
-            command.closeIfUnclaimed()
             if database.retired { retireRequests() }
             throw error
         }
@@ -491,6 +526,7 @@ public final class AuthorityJournal: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         do { try requireNoRequestOperation() }
         catch { attempt.closeIfUnclaimed(); throw error }
+        precondition(lock.depth == 1)
         try attempt.claimForOwner()
         let profile = attempt.profile, submission = attempt.submission.binding
         let userID = attempt.userID, auditSessionID = attempt.auditSessionID
@@ -550,8 +586,9 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
         let command: RetainedCommandCapture
         do {
-            let probe = try commandFilesystem.start { deadline in
-                try CommandFilesystemCapture(executablePath: executablePath, directoryPath: directoryPath, deadline: deadline)
+            let probe = try commandFilesystem.start(.admission(userID)) { deadline, checkProbe in
+                try CommandFilesystemCapture(executablePath: executablePath, directoryPath: directoryPath, deadline: deadline,
+                    checkProbe: checkProbe)
             }
             let filesystem = try awaitCommandFilesystem(probe, checkCancellation: {
                 do { try checkCancellation() }
@@ -576,7 +613,11 @@ public final class AuthorityJournal: @unchecked Sendable {
         var filesystemRefusal: CommandAdmissionRejectionReason?
         func verifyFilesystem() throws {
             do {
-                try recheckCommandFilesystem(command, checkCancellation: {
+                let check = try command.makeFilesystemRecheck()
+                let probe = try commandFilesystem.start(.admission(userID)) { deadline, checkProbe in
+                    try check.run(deadline: deadline, checkProbe: checkProbe)
+                }
+                try awaitCommandFilesystem(probe, checkCancellation: {
                     do { try checkCancellation() }
                     catch { throw CommandAdmissionCallbackFailure(underlying: error) }
                 })
@@ -588,8 +629,6 @@ public final class AuthorityJournal: @unchecked Sendable {
             }
         }
         do {
-            try verifyFilesystem()
-            try requireCurrentOwner()
             requestDraft = try draft(command.capture)
             try verifyFilesystem()
             try requireCurrentOwner()
@@ -1095,6 +1134,7 @@ extension AuthorityJournal {
                                launcher: (CommandExecutionRuntime) throws -> () throws -> Void) throws {
         try lock.withLock {
             try requireNoRequestOperation()
+            precondition(lock.depth == 1)
             guard (100...60_000).contains(preparationMilliseconds), fileCreationMask <= 0o777,
                   (1...1024).contains(maximumActiveCommands), (10...1000).contains(pollIntervalMilliseconds) else {
                 throw CommandExecutionError.invalidConfiguration
@@ -1130,15 +1170,12 @@ extension AuthorityJournal {
             commandExecutions[requestID] = execution
             commandActivity[requestID] = activity; transferredActivity = true
             startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
-            commandsAwaitingPreparation.insert(requestID)
-            defer { commandsAwaitingPreparation.remove(requestID) }
-            do {
-                let check = try resources.makeFilesystemRecheck()
-                let probe = try commandFilesystem.start { try check.run(deadline: $0) }
-                try awaitCommandFilesystem(probe)
-                guard commandExecutions[requestID] === execution, self.requests === requests else { throw CommandExecutionError.unavailable }
+            let prepare: (CommandFilesystemProbe<Void>) throws -> Void = { probe in
+                guard self.commandExecutions[requestID] === execution, self.requests === requests, execution.canPrepare else {
+                    throw CommandExecutionError.unavailable
+                }
                 try activity?.validate()
-                let current = try validatedRead { tx in
+                let current = try self.validatedRead { tx in
                     try Self.requireDispatchRevision(tx, requestID: requestID, approval: approval, revision: 0)
                     return try runtime(tx, approval, capture)
                 }
@@ -1147,7 +1184,7 @@ extension AuthorityJournal {
                 try execution.prepare(monitorPath: monitorPath, childPath: childPath,
                     preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask,
                     releaseActivity: activity, filesystemChecked: true)
-            } catch { execution.cancelBeforeRelease(); throw error }
+            }
             // The closure stays under this journal's lock and can only verify the same original controller.
             commandStreamChecks[requestID] = {
                 try self.validatedRead { tx in
@@ -1166,7 +1203,26 @@ extension AuthorityJournal {
                     return try runtime(tx, approval, capture)
                 }
                 guard current == context else { throw CommandExecutionError.policyChanged }
-                try execution.validateLauncher(); try execution.validateElevation(resources.capture)
+            }
+            let probe: CommandFilesystemProbe<Void>
+            do {
+                probe = try startExecutionFilesystemProbe(execution)
+            } catch CommandFilesystemProbeError.atCapacity {
+                deferredCommandPreparations[requestID] = DeferredCommandPreparation(
+                    deadline: ContinuousClock.now + .milliseconds(Int(preparationMilliseconds)), finish: prepare)
+                return
+            } catch {
+                execution.cancelBeforeRelease()
+                throw error
+            }
+            commandsAwaitingPreparation.insert(requestID)
+            defer { commandsAwaitingPreparation.remove(requestID) }
+            do {
+                try awaitCommandFilesystem(probe)
+                try prepare(probe)
+            } catch {
+                execution.cancelBeforeRelease()
+                throw error
             }
         }
     }
@@ -1179,6 +1235,24 @@ extension AuthorityJournal {
             defer { requestOperationActive = false }
             for (id, execution) in commandExecutions {
                 guard !commandsAwaitingPreparation.contains(id) else { continue }
+                if let pending = deferredCommandPreparations[id] {
+                    do {
+                        guard execution.canPrepare, requests != nil, ContinuousClock.now < pending.deadline,
+                              let validate = commandRuntimeChecks[id] else { throw CommandExecutionError.unavailable }
+                        try validate()
+                        guard let probe = execution.filesystemProbe else {
+                            do { execution.filesystemProbe = try startExecutionFilesystemProbe(execution) }
+                            catch CommandFilesystemProbeError.atCapacity { }
+                            continue
+                        }
+                        guard try probe.consumeIfReady() != nil else { continue }
+                        execution.filesystemProbe = nil
+                        try pending.finish(probe)
+                    } catch {
+                        execution.cancelBeforeRelease()
+                    }
+                    deferredCommandPreparations.removeValue(forKey: id)
+                }
                 switch execution.poll(checkStreamPolicy: {
                     guard let check = self.commandStreamChecks[id] else { throw CommandExecutionError.unavailable }
                     try check()
@@ -1187,24 +1261,36 @@ extension AuthorityJournal {
                 case .prepared:
                     do {
                         guard let requests, let validate = commandRuntimeChecks[id] else { throw CommandExecutionError.unavailable }
-                        if let probe = execution.filesystemProbe {
-                            guard try probe.consumeIfReady() != nil else { continue }
-                            execution.filesystemProbe = nil
+                        guard let probe = execution.filesystemProbe else {
                             try validate()
-                            try execution.recheck(filesystemChecked: true)
-                            guard ContinuousClock.now < probe.deadline else { throw CommandFilesystemProbeError.expired }
-                            if execution.dispatchRevision == 0 {
-                                _ = try requests.recordOutcome(requestID: id, expectedRevision: 0, event: .beginDispatch,
-                                    now: execution.clock(), receiptTimeMs: execution.receiptTime())
-                                execution.dispatchRevision = 1
-                            } else {
-                                try execution.release()
-                                continue
-                            }
+                            do { execution.filesystemProbe = try startExecutionFilesystemProbe(execution) }
+                            catch CommandFilesystemProbeError.atCapacity { }
+                            continue
                         }
-                        let check = try execution.resources.makeFilesystemRecheck()
-                        execution.filesystemProbe = try commandFilesystem.start { try check.run(deadline: $0) }
-                    } catch { execution.cancelBeforeRelease() }
+                        guard try probe.consumeIfReady() != nil else { continue }
+                        execution.filesystemProbe = nil
+                        try validate()
+                        try execution.recheck(filesystemChecked: true)
+                        guard ContinuousClock.now < probe.deadline else { throw CommandFilesystemProbeError.expired }
+                        if !execution.needsFinalFilesystemProbe {
+                            try execution.validateLauncher()
+                            try execution.validateElevation(execution.resources.capture)
+                            execution.needsFinalFilesystemProbe = true
+                            continue
+                        }
+                        // No observer can see .executing between the commit and the native release attempt.
+                        _ = try requests.recordOutcome(requestID: id, expectedRevision: 0, event: .beginDispatch,
+                            now: execution.clock(), receiptTimeMs: execution.receiptTime())
+                        execution.dispatchRevision = 1
+                        try execution.validateLauncher()
+                        try execution.validateElevation(execution.resources.capture)
+                        try execution.recheck(filesystemChecked: true)
+                        try commandActivity[id]?.validate()
+                        guard ContinuousClock.now < probe.deadline else { throw CommandFilesystemProbeError.expired }
+                        try execution.release()
+                    } catch {
+                        execution.cancelBeforeRelease()
+                    }
                 case .terminal(let nativeOutcome):
                     finishCommandExecution(id, execution: execution, observedOutcome: nativeOutcome)
                 }
@@ -1216,20 +1302,28 @@ extension AuthorityJournal {
     /// The caller owns one request operation. Restore the lock and its guard before publishing any result.
     private func awaitCommandFilesystem<Value>(_ probe: CommandFilesystemProbe<Value>,
                                                checkCancellation: () throws -> Void = {}) throws -> Value {
-        requestOperationActive = false
-        lock.unlock()
-        let result = Result { try probe.wait() }
-        lock.lock()
-        requestOperationActive = true
-        try checkCancellation()
-        guard ContinuousClock.now < probe.deadline else { throw CommandFilesystemProbeError.expired }
-        return try result.get()
+        precondition(lock.depth == 1 && requestOperationActive)
+        do {
+            while true {
+                requestOperationActive = false
+                lock.unlock()
+                probe.waitForProgress()
+                lock.lock()
+                requestOperationActive = true
+                try checkCancellation()
+                if let result = try probe.consumeIfReady() { return result }
+            }
+        } catch {
+            probe.cancel()
+            throw error
+        }
     }
 
-    private func recheckCommandFilesystem(_ command: RetainedCommandCapture, checkCancellation: () throws -> Void) throws {
-        let check = try command.makeFilesystemRecheck()
-        let probe = try commandFilesystem.start { try check.run(deadline: $0) }
-        try awaitCommandFilesystem(probe, checkCancellation: checkCancellation)
+    private func startExecutionFilesystemProbe(_ execution: CommandExecution) throws -> CommandFilesystemProbe<Void> {
+        let check = try execution.resources.makeFilesystemRecheck()
+        return try commandFilesystem.start(.execution) { deadline, checkProbe in
+            try check.run(deadline: deadline, checkProbe: checkProbe)
+        }
     }
 
     private static func requireDispatchRevision(_ tx: JournalTransaction, requestID: Data,
@@ -1269,6 +1363,7 @@ extension AuthorityJournal {
         execution.deliverTerminal(delivered)
         if execution.dispose() {
             commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id); commandStreamChecks.removeValue(forKey: id)
+            deferredCommandPreparations.removeValue(forKey: id)
             commandActivity.removeValue(forKey: id)?.close()
         }
         if commandExecutions.isEmpty { commandCleanupTimer?.cancel(); commandCleanupTimer = nil; commandPollIntervalMilliseconds = nil }

@@ -34,6 +34,8 @@ final class CommandExecution {
     private var terminalDeliveryFinished = false
     var dispatchRevision: UInt64 = 0
     var filesystemProbe: CommandFilesystemProbe<Void>?
+    var needsFinalFilesystemProbe = false
+    var canPrepare: Bool { !disposed && !cancelledBeforeRelease && monitor == nil }
     var terminalCommitFailed = false
 
     private init(resources: RetainedCommandExecutionResources, approval: CommandExecutionApproval,

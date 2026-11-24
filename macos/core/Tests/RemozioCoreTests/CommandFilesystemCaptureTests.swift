@@ -121,6 +121,63 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         XCTAssertEqual(checks, 1)
     }
 
+    func testExecutableResolvesRelativeAndAbsoluteChainsThroughDirectoryDotDot() throws {
+        let fixture = try Fixture()
+        let nested = fixture.root + "/nested", deeper = nested + "/deeper"
+        try FileManager.default.createDirectory(atPath: deeper, withIntermediateDirectories: true)
+        XCTAssertEqual(symlink("nested/deeper", fixture.root + "/directory-link"), 0)
+        XCTAssertEqual(symlink("../tool", nested + "/relative-link"), 0)
+        XCTAssertEqual(symlink(fixture.root + "/directory-link/../relative-link", fixture.root + "/absolute-link"), 0)
+        let requested = Data((fixture.root + "/absolute-link").utf8)
+        let capture = try CommandFilesystemCapture(executablePath: requested, directoryPath: Data(fixture.cwd.utf8))
+        let resolved = try XCTUnwrap(realpath(fixture.executable, nil))
+        defer { free(resolved) }
+        XCTAssertEqual(capture.executable.path, requested)
+        XCTAssertEqual(capture.resolvedExecutablePath, Data(String(cString: resolved).utf8))
+        try capture.recheck()
+    }
+
+    func testExecutableResolverRejectsSymlinkCyclesAndSpecialTargets() throws {
+        let fixture = try Fixture()
+        let link = fixture.root + "/link"
+        XCTAssertEqual(symlink("link", link), 0)
+        func capture() throws -> CommandFilesystemCapture {
+            try CommandFilesystemCapture(executablePath: Data(link.utf8), directoryPath: Data(fixture.cwd.utf8))
+        }
+        XCTAssertThrowsError(try capture()) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .system(ELOOP)) }
+        XCTAssertEqual(mkfifo(fixture.root + "/fifo", 0o700), 0)
+        XCTAssertEqual(chmod(fixture.executable, 0o644), 0)
+        for target in ["cwd", "fifo", "tool"] {
+            XCTAssertEqual(unlink(link), 0)
+            XCTAssertEqual(symlink(target, link), 0)
+            XCTAssertThrowsError(try capture()) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .invalidExecutable) }
+        }
+    }
+
+    func testExecutableResolverRejectsDirectoryLinkReplacementDuringWalk() throws {
+        let fixture = try Fixture()
+        let canonical = try XCTUnwrap(realpath(fixture.root, nil))
+        defer { free(canonical) }
+        let root = String(cString: canonical)
+        for name in ["first", "second"] {
+            try FileManager.default.createDirectory(atPath: root + "/" + name, withIntermediateDirectories: false)
+            try FileManager.default.copyItem(atPath: fixture.executable, toPath: root + "/" + name + "/tool")
+        }
+        let link = root + "/walk"
+        XCTAssertEqual(symlink("first", link), 0)
+        let firstTargetComponent = root.split(separator: "/").count + 3
+        var componentsChecked = 0
+        XCTAssertThrowsError(try CommandFilesystemCapture(executablePath: Data((link + "/tool").utf8),
+            directoryPath: Data(fixture.cwd.utf8), deadline: ContinuousClock.now + .seconds(5), checkProbe: {
+                componentsChecked += 1
+                if componentsChecked == firstTargetComponent {
+                    XCTAssertEqual(unlink(link), 0)
+                    XCTAssertEqual(symlink("second", link), 0)
+                }
+            })) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
+        XCTAssertGreaterThan(componentsChecked, firstTargetComponent)
+    }
+
     func testExecutableReplacementRetiresTheOriginalCapture() throws {
         let fixture = try Fixture(), capture = try fixture.capture()
         XCTAssertEqual(rename(fixture.executable, fixture.executable + ".old"), 0)

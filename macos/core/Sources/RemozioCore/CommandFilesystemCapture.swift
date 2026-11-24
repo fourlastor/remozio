@@ -25,23 +25,25 @@ public final class CommandFilesystemCapture {
     }
 
     init(executablePath: Data, directoryPath: Data, deadline: ContinuousClock.Instant,
+         checkProbe: () throws -> Void = {},
          checkCancellation: () throws -> Void = {}) throws {
         try Self.validatePath(executablePath)
         try Self.validatePath(directoryPath)
-        try Self.checkDeadline(deadline)
+        try Self.checkDeadline(deadline, checkProbe: checkProbe)
         try checkCancellation()
         let cwd = try Self.openPath(directoryPath, flags: O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK)
         var file: Int32 = -1
         do {
             let cwdInfo = try Self.directoryInfo(cwd)
-            let resolved = try Self.openExecutable(executablePath, deadline: deadline)
+            let resolved = try Self.openExecutable(executablePath, deadline: deadline, checkProbe: checkProbe)
             file = resolved.descriptor
             let fileInfo = try Self.executableInfo(file)
-            let digest = try Self.digest(file, initial: fileInfo, deadline: deadline, checkCancellation: checkCancellation)
+            let digest = try Self.digest(file, initial: fileInfo, deadline: deadline, checkProbe: checkProbe,
+                checkCancellation: checkCancellation)
             try Self.checkNamedExecutable(executablePath, held: fileInfo)
             try Self.checkNamedExecutable(resolved.path, held: fileInfo, followLink: false)
             try Self.checkDirectory(cwd, path: directoryPath, identity: Self.identity(cwdInfo))
-            try Self.checkDeadline(deadline)
+            try Self.checkDeadline(deadline, checkProbe: checkProbe)
             try checkCancellation()
             executable = CapturedExecutable(path: executablePath, identity: Self.identity(fileInfo), sha256: digest)
             directory = CapturedDirectory(path: directoryPath, identity: Self.identity(cwdInfo))
@@ -95,9 +97,10 @@ public final class CommandFilesystemCapture {
             self.executable = executable; self.directory = directory; self.resolvedPath = resolvedPath
         }
 
-        func run(deadline: ContinuousClock.Instant) throws {
+        func run(deadline: ContinuousClock.Instant, checkProbe: () throws -> Void) throws {
             try CommandFilesystemCapture.recheck(executableFD: executableFD, directoryFD: directoryFD,
-                executable: executable, directory: directory, resolvedPath: resolvedPath, deadline: deadline, checkCancellation: {})
+                executable: executable, directory: directory, resolvedPath: resolvedPath, deadline: deadline,
+                checkProbe: checkProbe, checkCancellation: {})
         }
 
         deinit {
@@ -108,21 +111,23 @@ public final class CommandFilesystemCapture {
 
     private static func recheck(executableFD: Int32, directoryFD: Int32, executable: CapturedExecutable,
                                 directory: CapturedDirectory, resolvedPath: Data, deadline: ContinuousClock.Instant,
+                                checkProbe: () throws -> Void = {},
                                 checkCancellation: () throws -> Void) throws {
-        try checkDeadline(deadline)
+        try checkDeadline(deadline, checkProbe: checkProbe)
         try checkCancellation()
         try checkDirectory(directoryFD, path: directory.path, identity: directory.identity)
         let info = try executableInfo(executableFD)
         guard identity(info) == executable.identity else { throw CommandFilesystemCaptureError.changed }
         try checkNamedExecutable(executable.path, held: info)
         try checkNamedExecutable(resolvedPath, held: info, followLink: false)
-        let observed = try digest(executableFD, initial: info, deadline: deadline, checkCancellation: checkCancellation)
+        let observed = try digest(executableFD, initial: info, deadline: deadline, checkProbe: checkProbe,
+            checkCancellation: checkCancellation)
         guard observed == executable.sha256 else { throw CommandFilesystemCaptureError.changed }
         try checkCancellation()
         try checkNamedExecutable(executable.path, held: info)
         try checkNamedExecutable(resolvedPath, held: info, followLink: false)
         try checkDirectory(directoryFD, path: directory.path, identity: directory.identity)
-        try checkDeadline(deadline)
+        try checkDeadline(deadline, checkProbe: checkProbe)
     }
 
     /// Borrow the retained directory only for this call. Do not close, retain, or pass the descriptor to another thread.
@@ -157,7 +162,8 @@ public final class CommandFilesystemCapture {
     }
 
     /// Retain each parent across lookup. Keep the path as bytes for argv and filesystem compatibility.
-    private static func openExecutable(_ requested: Data, deadline: ContinuousClock.Instant) throws -> (descriptor: Int32, path: Data) {
+    private static func openExecutable(_ requested: Data, deadline: ContinuousClock.Instant,
+                                       checkProbe: () throws -> Void) throws -> (descriptor: Int32, path: Data) {
         let directoryFlags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW
         var parents = [try openPath(Data([0x2f]), flags: directoryFlags)]
         defer { for parent in parents { _ = Darwin.close(parent) } }
@@ -165,7 +171,7 @@ public final class CommandFilesystemCapture {
         var components = requested.dropFirst().split(separator: 0x2f, omittingEmptySubsequences: false).map { Data($0) }
         var linksRemaining = 40
         while !components.isEmpty {
-            try checkDeadline(deadline)
+            try checkDeadline(deadline, checkProbe: checkProbe)
             let name = components.removeFirst()
             if name.isEmpty || name == Data([0x2e]) { continue }
             if name == Data([0x2e, 0x2e]) {
@@ -222,7 +228,8 @@ public final class CommandFilesystemCapture {
                     path.append(component)
                 }
                 try validatePath(path)
-                let descriptor = try openComponent(parent, name, flags: O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)
+                try checkDeadline(deadline, checkProbe: checkProbe)
+                let descriptor = try openComponent(parent, name, flags: O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW | O_NOCTTY)
                 do {
                     guard stable(entry, try executableInfo(descriptor)) else { throw CommandFilesystemCaptureError.changed }
                     return (descriptor, path)
@@ -302,17 +309,19 @@ public final class CommandFilesystemCapture {
             before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec && before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec
     }
 
-    private static func checkDeadline(_ deadline: ContinuousClock.Instant) throws {
+    private static func checkDeadline(_ deadline: ContinuousClock.Instant, checkProbe: () throws -> Void) throws {
+        try checkProbe()
         guard ContinuousClock.now < deadline else { throw CommandFilesystemCaptureError.timedOut }
     }
 
     private static func digest(_ fd: Int32, initial: stat, deadline: ContinuousClock.Instant,
+                               checkProbe: () throws -> Void,
                                checkCancellation: () throws -> Void) throws -> Data {
         var hash = SHA256()
         var offset: off_t = 0
         var buffer = [UInt8](repeating: 0, count: 65_536)
         while offset < initial.st_size {
-            try checkDeadline(deadline)
+            try checkDeadline(deadline, checkProbe: checkProbe)
             try checkCancellation()
             let length = Int(min(off_t(buffer.count), initial.st_size - offset))
             let count = buffer.withUnsafeMutableBytes { pread(fd, $0.baseAddress, length, offset) }
@@ -324,6 +333,7 @@ public final class CommandFilesystemCapture {
             hash.update(data: Data(buffer.prefix(count)))
             offset += off_t(count)
         }
+        try checkDeadline(deadline, checkProbe: checkProbe)
         try checkCancellation()
         guard stable(initial, try executableInfo(fd)) else { throw CommandFilesystemCaptureError.changed }
         return Data(hash.finalize())
