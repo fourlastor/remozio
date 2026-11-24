@@ -2,8 +2,9 @@
 """Choose the Checks jobs that a pull request needs, and the macos/core tests that it runs, from the paths it changes.
 
 Jobs. Each job runs when the pull request changes a path that the job builds or tests. A path that no rule below
-claims runs every job: scripts/, .github/, gradle/, third-party/, protocol/ outside its Kotlin and Swift packages,
-and every top-level file except Markdown files and LICENSE. The Python checks job is not listed: it runs on every
+claims runs every job: scripts/, .github/, gradle/, third-party/, protocol/ outside its Kotlin and Swift packages
+(protocol/vectors/ among them), and every top-level file except Markdown files and LICENSE. Markdown files directly
+under protocol/ are documentation, like docs/, and run no job. The Python checks job is not listed: it runs on every
 pull request. The macos/core test weights file (WEIGHTS) runs no job by itself: it changes only how the shards split
 the tests and which classes run at method level, never which tests exist, and the Python checks validate its names.
 
@@ -133,6 +134,8 @@ def jobs_for(path):
     """The jobs that one changed repository path needs."""
     if '/' not in path:
         return frozenset() if path.endswith('.md') or path == 'LICENSE' else EVERY_JOB
+    if PurePosixPath(path).parent == PurePosixPath('protocol') and path.endswith('.md'):
+        return frozenset()  # Protocol documentation. No build or test reads it; the Python checks still run.
     jobs = next((jobs for prefix, jobs in PREFIXES if path.startswith(prefix)), EVERY_JOB)
     if PurePosixPath(path).name in SWIFT_PACKAGE_FILES:
         jobs |= SHARED_SWIFT | {'ios'}
