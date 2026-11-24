@@ -12,7 +12,7 @@ enum PairingRecoveryIPC {
     case begin(PairingRecoveryQuery, exporter: Data, deadline: UInt64)
     case finish(Data)
 
-    static func begin(_ query: PairingRecoveryQuery, exporter: Data, deadline: UInt64) throws -> Data {
+    static func encodeBegin(_ query: PairingRecoveryQuery, exporter: Data, deadline: UInt64) throws -> Data {
         guard exporter.count == 32 else { throw PairingRecoveryFrameError.invalidFrame }
         let deadlineBytes = withUnsafeBytes(of: deadline.bigEndian) { Data($0) }
         return try PairingRecoveryFrame.lookup(query).encode() + exporter + deadlineBytes

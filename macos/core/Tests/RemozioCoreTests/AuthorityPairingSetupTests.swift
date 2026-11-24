@@ -1550,7 +1550,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let endpoint = try existing ?? lookupEndpoint(f)
         defer { endpoint.close() }
         let exporter = Data(repeating: 81, count: 32)
-        let response = try lookupBytes(endpoint, PairingRecoveryIPC.begin(query, exporter: exporter,
+        let response = try lookupBytes(endpoint, PairingRecoveryIPC.encodeBegin(query, exporter: exporter,
             deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000))
         guard case let .challenge(nonce) = try PairingRecoveryFrame.decode(response) else { throw Fault.injected }
         let input = try (signingQuery ?? query).signingInput(
@@ -1654,7 +1654,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         XCTAssertTrue(try f.access.isExpired(attempt))
         let exporter = Data(repeating: 81, count: 32)
         let endpoint = try lookupEndpoint(f)
-        let request = try PairingRecoveryIPC.begin(query, exporter: exporter,
+        let request = try PairingRecoveryIPC.encodeBegin(query, exporter: exporter,
             deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000)
         guard case let .challenge(nonce) = try PairingRecoveryFrame.decode(lookupBytes(endpoint, request)) else {
             return XCTFail("Expected a challenge")
@@ -1827,7 +1827,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
                 defer { root.close() }
                 var exchange = PairingRecoveryNetworkExchange(channel: channel)
                 try await exchange.run(deadline: deadline, begin: { query in
-                    let request = try PairingRecoveryIPC.begin(query, exporter: exporter, deadline: uptimeDeadline)
+                    let request = try PairingRecoveryIPC.encodeBegin(query, exporter: exporter, deadline: uptimeDeadline)
                     let reply = try lookupBytes(root, request)
                     guard case let .challenge(challenge) = try PairingRecoveryFrame.decode(reply) else { throw Fault.injected }
                     return challenge

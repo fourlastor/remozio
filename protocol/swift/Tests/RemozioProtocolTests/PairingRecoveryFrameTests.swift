@@ -21,8 +21,14 @@ final class PairingRecoveryFrameTests: XCTestCase {
 
     func testDecoderRejectsUnknownTagsMissingBytesAndTrailingData() throws {
         let lookup = try PairingRecoveryFrame.lookup(makeQuery()).encode()
-        for invalid in [Data(), Data([255]), Data([3, 0]), Data(lookup.dropLast()), lookup + Data([0]),
-                        Data([1]) + Data(count: 31), Data([2]) + Data(count: 63), Data([4]) + Data(count: 65)] {
+        let truncatedLookup = Data(lookup.dropLast())
+        let extendedLookup = lookup + Data([0])
+        let shortChallenge = Data([1]) + Data(count: 31)
+        let shortProof = Data([2]) + Data(count: 63)
+        let longCommit = Data([4]) + Data(count: 65)
+        let invalidFrames: [Data] = [Data(), Data([255]), Data([3, 0]), truncatedLookup, extendedLookup,
+                                     shortChallenge, shortProof, longCommit]
+        for invalid in invalidFrames {
             XCTAssertThrowsError(try PairingRecoveryFrame.decode(invalid))
         }
         XCTAssertThrowsError(try PairingRecoveryFrame.decode(Data(count: PairingRecoveryFrame.maximumBytes + 1)))

@@ -357,7 +357,7 @@ public actor AuthorityXPCChannel {
     }
 
     func beginPairingLookup(_ query: PairingRecoveryQuery, exporter: Data, deadline: UInt64) async throws -> Data {
-        let request = try PairingRecoveryIPC.begin(query, exporter: exporter, deadline: deadline)
+        let request = try PairingRecoveryIPC.encodeBegin(query, exporter: exporter, deadline: deadline)
         guard case let .challenge(challenge) = try await exchangePairingLookup(request) else {
             throw AuthorityXPCError.invalidMessage
         }
