@@ -209,7 +209,7 @@ public actor TransportPairingSetupOwner {
             try active()
             guard !started, proofClient == nil else { throw TransportPairingControlError.busy }
             proofClient = client
-            let ingress = try PairingSetupV2Ingress(windowID: window.id, lifetimeMilliseconds: window.lifetimeMilliseconds,
+            let ingress = PairingSetupV2Ingress(windowID: window.id, lifetimeMilliseconds: window.lifetimeMilliseconds,
                                                    authority: client)
             return try await beginV2(window, identity: holder.identity, ingress: ingress)
         } catch {

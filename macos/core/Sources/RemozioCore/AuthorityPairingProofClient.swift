@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// A native proof link. Registration and unproved cleanup can expire independently of the link.
 final class AuthorityPairingProofClient: @unchecked Sendable {
@@ -47,14 +48,23 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
                      bootstrap makeBootstrap: (ApprovalTransportConfiguration, @escaping @Sendable () -> Void) throws -> Bootstrap)
         async throws -> AuthorityPairingProofClient {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
-        let peer = try makeBootstrap(configuration, onClose)
+        let notified = Mutex(false)
+        let ended: @Sendable () -> Void = {
+            let first = notified.withLock { value in
+                guard !value else { return false }
+                value = true
+                return true
+            }
+            if first { onClose() }
+        }
+        let peer = try makeBootstrap(configuration, ended)
         let bootstrap = peer.channel
         do {
             try await bootstrap.start()
             guard let endpoint = try await bootstrap.openPairingProof() else { throw AuthorityXPCError.failed }
             let client = AuthorityPairingProofClient(endpoint: endpoint, peerPolicy: peer.policy, onClose: {
                 Task { await bootstrap.close() }
-                onClose()
+                ended()
             }, configure: peer.configure)
             try await client.start(windowID: windowID)
             return client

@@ -11,24 +11,21 @@ struct PairingSetupV2Ingress: Sendable {
     private let localReserve: (@Sendable (PairingSetupV2Proof) throws -> Void)?
     private let localDisconnect: (@Sendable (UUID) -> Void)?
     private let authority: AuthorityPairingProofClient?
-    private let clock: AuthorityClock?
 
     init(windowID: Data, lifetimeMilliseconds: UInt64, reserve: @escaping @Sendable (PairingSetupV2Proof) throws -> Void,
          disconnect: @escaping @Sendable (UUID) -> Void) {
         self.windowID = windowID; self.lifetimeMilliseconds = lifetimeMilliseconds
-        localReserve = reserve; localDisconnect = disconnect; authority = nil; clock = nil
+        localReserve = reserve; localDisconnect = disconnect; authority = nil
     }
 
-    init(windowID: Data, lifetimeMilliseconds: UInt64, authority: AuthorityPairingProofClient) throws {
+    init(windowID: Data, lifetimeMilliseconds: UInt64, authority: AuthorityPairingProofClient) {
         self.windowID = windowID; self.lifetimeMilliseconds = lifetimeMilliseconds
-        localReserve = nil; localDisconnect = nil; self.authority = authority; clock = try AuthorityClock()
+        localReserve = nil; localDisconnect = nil; self.authority = authority
     }
 
-    func acceptTime() throws -> UInt64? { try clock?.now().milliseconds }
-
-    func register(connection: UUID, acceptedAt: UInt64?, peerPoint: Data, exporter: Data,
+    func register(connection: UUID, acceptedAt: UInt64, peerPoint: Data, exporter: Data,
                   deadline: ContinuousClock.Instant) async throws -> PairingSetupV2Connection {
-        if let authority, let acceptedAt {
+        if let authority {
             let candidate = try await authority.register(connectionID: connection, acceptedAt: acceptedAt,
                 peerPoint: peerPoint, exporter: exporter, deadline: deadline)
             return .init(connection: candidate.id, challenge: candidate.challenge, publicationDeadline: deadline,
@@ -62,6 +59,8 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let invitation: PairingInvitation
     private let v2: PairingSetupV2Ingress?
     private let applicationProtocol: String
+    private let intakeClock: AuthorityClock?
+    private var intakeBudget = PairingRegistrationBudget()
     private var v2Admissions = PairingSetupV2Admissions()
     private var sources: [String: (until: ContinuousClock.Instant, count: Int)] = [:]
     private var expiry: Task<Void, Never>?
@@ -105,6 +104,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         self.invitation = invitation; self.maximumConnections = maximumConnections
         self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.setupTimeoutMilliseconds = setupTimeoutMilliseconds
         self.handler = handler; self.event = event; self.v2 = v2; self.proofTime = proofTime
+        intakeClock = try v2.map { _ in try AuthorityClock() }
         let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
         self.applicationProtocol = applicationProtocol
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
@@ -175,8 +175,8 @@ public final class PairingSetupListener: @unchecked Sendable {
         let id = UUID()
         let accepted = ContinuousClock.now
         let deadline = accepted.advanced(by: PairingSetupV2Admissions.proofTimeout)
-        let acceptedAt: UInt64?
-        do { acceptedAt = try v2?.acceptTime() }
+        let acceptedAt: AuthorityMoment?
+        do { acceptedAt = try intakeClock?.now() }
         catch { connection.cancel(); return }
         let applicationProtocol = applicationProtocol
         var evicted: Slot?
@@ -185,7 +185,8 @@ public final class PairingSetupListener: @unchecked Sendable {
             if self.v2 == nil {
                 guard slots.count < maximumConnections else { return nil }
             } else {
-                guard admitSource(connection.endpoint, at: accepted) else { return nil }
+                guard let acceptedAt, admitSource(connection.endpoint, at: accepted),
+                      intakeBudget.spend(at: acceptedAt) else { return nil }
                 switch v2Admissions.admit(id, deadline: deadline, draining: retired.count) {
                 case .rejected: return nil
                 case .admitted(let victim):
@@ -223,8 +224,8 @@ public final class PairingSetupListener: @unchecked Sendable {
                           let point = Self.candidatePoint(metadata: metadata) else { throw DirectListenerError.invalidIdentity }
                     let proof: PairingSetupV2Connection?
                     if let windowV2 {
-                        guard ContinuousClock.now < deadline else { throw PairingSetupChannelError.rejected }
-                        let candidate = try await windowV2.register(connection: id, acceptedAt: acceptedAt, peerPoint: point,
+                        guard let acceptedAt, ContinuousClock.now < deadline else { throw PairingSetupChannelError.rejected }
+                        let candidate = try await windowV2.register(connection: id, acceptedAt: acceptedAt.milliseconds, peerPoint: point,
                             exporter: Self.exporter(metadata), deadline: deadline)
                         registeredProof = candidate
                         proof = .init(connection: candidate.connection, challenge: candidate.challenge,

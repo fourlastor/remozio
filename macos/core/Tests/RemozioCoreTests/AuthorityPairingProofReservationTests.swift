@@ -225,17 +225,71 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
         XCTAssertEqual(reservations.pendingCount, 1)
     }
 
-    func testReplayLedgerCannotGrowPastTheLifetimeRegistrationLimit() throws {
-        let fixture = try Fixture(), reservations = try fixture.reservations()
-        let limit = AuthorityPairingProofReservations.maximumRegistrations
-        for index in 0..<limit {
+    func testReplayCapacityExceedsAllRegistrationsTheBudgetCanAdmitDuringAWindow() {
+        let duration = AuthorityPairingSetupConfiguration.maximumLifetimeMilliseconds
+        let rate = PairingRegistrationBudget.registrationsPerSecond
+        let required = PairingRegistrationBudget.burst + (duration * rate + 999) / 1_000
+        XCTAssertLessThan(required, UInt64(AuthorityPairingProofReservations.maximumRegistrations))
+    }
+
+    func testRegistrationRecoversAfterMoreThan256RetirementsInOneWindow() throws {
+        let fixture = try Fixture(lifetime: AuthorityPairingSetupConfiguration.maximumLifetimeMilliseconds)
+        let reservations = try fixture.reservations()
+        let interval = (1_000 + PairingRegistrationBudget.registrationsPerSecond - 1) / PairingRegistrationBudget.registrationsPerSecond
+        for index in 0...256 {
+            let accepted = 100 + UInt64(index) * interval
+            fixture.clock.advance(to: accepted)
             var exporter = Data(repeating: 0, count: 32)
             exporter[0] = UInt8(truncatingIfNeeded: index)
             exporter[1] = UInt8(truncatingIfNeeded: index >> 8)
-            let candidate = try fixture.register(reservations, exporter: exporter)
+            let candidate = try fixture.register(reservations, acceptedAt: accepted, exporter: exporter)
             reservations.retire(candidate: candidate.id)
         }
-        XCTAssertThrowsError(try fixture.register(reservations))
+        let accepted = fixture.clock.now().milliseconds + interval
+        fixture.clock.advance(to: accepted)
+        let exporter = Data(repeating: 20, count: 32)
+        let candidate = try fixture.register(reservations, acceptedAt: accepted, exporter: exporter)
+        try fixture.verify(reservations, candidate, exporter: exporter)
+        try reservations.confirm(candidate: candidate.id)
+        XCTAssertNoThrow(try fixture.window.takeProposal(connection: candidate.id, matching: fixture.proposal.encode(), at: fixture.clock.now()))
+    }
+
+    func testRejectedRegistrationsSpendBudgetUntilRefill() throws {
+        let fixture = try Fixture(), reservations = try fixture.reservations()
+        let duplicate = UUID()
+        let candidate = try fixture.register(reservations, connection: duplicate)
+        reservations.retire(candidate: candidate.id)
+        for _ in 1..<PairingRegistrationBudget.burst {
+            XCTAssertThrowsError(try fixture.register(reservations, connection: duplicate))
+        }
+        let refill = (1_000 + PairingRegistrationBudget.registrationsPerSecond - 1) / PairingRegistrationBudget.registrationsPerSecond
+        fixture.clock.advance(to: 100 + refill - 1)
+        XCTAssertThrowsError(try fixture.register(reservations, acceptedAt: 100 + refill - 1, exporter: Data(repeating: 21, count: 32)))
+        fixture.clock.advance(to: 100 + refill)
+        XCTAssertNoThrow(try fixture.register(reservations, acceptedAt: 100 + refill, exporter: Data(repeating: 21, count: 32)))
+    }
+
+    func testRegistrationBudgetRejectsARegressedOrChangedClock() {
+        let epoch = UUID()
+        for invalid in [AuthorityMoment(epoch: epoch, milliseconds: 99), .init(epoch: UUID(), milliseconds: 101)] {
+            var budget = PairingRegistrationBudget()
+            XCTAssertTrue(budget.spend(at: .init(epoch: epoch, milliseconds: 100)))
+            XCTAssertFalse(budget.spend(at: invalid))
+            XCTAssertFalse(budget.spend(at: .init(epoch: epoch, milliseconds: 1_100)))
+        }
+    }
+
+    func testRegistrationBudgetRefillSaturatesAfterALargeClockAdvance() {
+        let epoch = UUID()
+        var budget = PairingRegistrationBudget()
+        for _ in 0..<PairingRegistrationBudget.burst {
+            XCTAssertTrue(budget.spend(at: .init(epoch: epoch, milliseconds: 100)))
+        }
+        XCTAssertFalse(budget.spend(at: .init(epoch: epoch, milliseconds: 100)))
+        for _ in 0..<PairingRegistrationBudget.burst {
+            XCTAssertTrue(budget.spend(at: .init(epoch: epoch, milliseconds: UInt64.max)))
+        }
+        XCTAssertFalse(budget.spend(at: .init(epoch: epoch, milliseconds: UInt64.max)))
     }
 
     func testDuplicateLinkAttachmentDoesNotRetireTheLiveReservation() throws {

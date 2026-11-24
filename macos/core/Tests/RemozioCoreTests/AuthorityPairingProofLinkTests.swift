@@ -249,6 +249,81 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try window.takeProposal(connection: id, matching: bytes, at: instant).encode(), bytes)
     }
 
+    func testConcurrentRegistrationDoesNotInterruptValidVerificationAndConfirmation() async throws {
+        let f = try TransportPairingFixture()
+        let now = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+        let owner = UUID()
+        let full = try PairingInvitationV2(invitation: f.invitation, windowID: Data(repeating: 5, count: 16),
+            secret: Data(repeating: 6, count: 32), lifetimeMilliseconds: 5_000)
+        let window = try AuthorityPairingV2Window(invitation: full, predecessor: nil, started: now, authorityOwner: owner)
+        let pause = Mutex(false)
+        let verifying = expectation(description: "Valid verification entered Authority")
+        let release = DispatchSemaphore(value: 0)
+        let fixture = try Fixture(bindReservations: { id, link in
+            guard id == full.windowID else { throw FixtureError.retiredRole }
+            return try .init(window: window, authorityOwner: owner, link: link, now: { now },
+                makeChallenge: { Data(repeating: 7, count: 32) }, verifyWindow: {
+                    let armed = pause.withLock { armed in
+                        let previous = armed
+                        armed = false
+                        return previous
+                    }
+                    if armed {
+                        verifying.fulfill()
+                        guard release.wait(timeout: .now() + .seconds(2)) == .success else { throw FixtureError.retiredRole }
+                    }
+                })
+        })
+        let primary = try await bootstrap(fixture)
+        defer { primary.invalidate() }
+        let offered = await offer(on: primary)
+        let client = proofConnection(to: try XCTUnwrap(offered.1), requirement: fixture.requirement)
+        defer { client.invalidate() }
+        let version = await hello(on: client)
+        XCTAssertEqual(version, 2)
+        let bound = await proofExchange(on: client, fallback: false) {
+            $0.bindWindow(full.windowID, reply: $1)
+        }
+        XCTAssertTrue(bound)
+
+        let exporter = Data(repeating: 9, count: 32), proposal = try f.proposal.encode()
+        let registration: (Data?, Data?) = await proofExchange(on: client, fallback: (nil, nil)) { proxy, reply in
+            proxy.registerCandidate(AuthorityPairingProofWire.bytes(UUID()), acceptedAt: now.milliseconds,
+                peerPoint: f.proposal.transportKey.publicKey, exporter: exporter) { reply(($0, $1)) }
+        }
+        let candidate = try XCTUnwrap(registration.0), challenge = try XCTUnwrap(registration.1)
+        let tag = try full.proof(proposal: f.proposal, challenge: challenge, exporter: exporter)
+        pause.withLock { $0 = true }
+        let completed = expectation(description: "Valid verification returned")
+        let verification = ResultBox<Bool>()
+        let reply: @Sendable (Bool) -> Void = { result in
+            let first = verification.value.withLock { value in
+                guard value == nil else { return false }
+                value = result
+                return true
+            }
+            if first { completed.fulfill() }
+        }
+        let proxy = try XCTUnwrap(client.remoteObjectProxyWithErrorHandler { _ in reply(false) }
+            as? any AuthorityPairingProofXPCProtocol)
+        proxy.verifyCandidate(candidate, proposal: proposal, tag: tag, reply: reply)
+        await fulfillment(of: [verifying], timeout: 2)
+        let competing: (Data?, Data?) = await proofExchange(on: client, fallback: (Data(), Data())) { proxy, reply in
+            proxy.registerCandidate(AuthorityPairingProofWire.bytes(UUID()), acceptedAt: now.milliseconds,
+                peerPoint: f.proposal.transportKey.publicKey, exporter: Data(repeating: 10, count: 32)) { reply(($0, $1)) }
+            release.signal()
+        }
+        XCTAssertNil(competing.0)
+        await fulfillment(of: [completed], timeout: 3)
+        XCTAssertEqual(verification.value.withLock { $0 }, true)
+        let confirmed = await proofExchange(on: client, fallback: false) {
+            $0.confirmCandidate(candidate, reply: $1)
+        }
+        XCTAssertTrue(confirmed)
+        let selected = try window.takeProposal(connection: AuthorityPairingProofWire.identifier(candidate), matching: proposal, at: now)
+        XCTAssertEqual(try selected.encode(), proposal)
+    }
+
     private func proofExchange<Value: Sendable>(on connection: NSXPCConnection, fallback: Value,
         send: (any AuthorityPairingProofXPCProtocol, @escaping @Sendable (Value) -> Void) -> Void) async -> Value {
         await exchange(fallback: fallback) { reply in
@@ -297,9 +372,13 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let driver = NativeAuthorityXPC(connection: bootstrapConnection, policy: fixture.policy,
                                        configure: { $0.setCodeSigningRequirement(fixture.requirement) })
         let attemptedPublication = Mutex(false)
+        let closeCount = Mutex(0)
         let owner = TransportPairingSetupOwner(configuration: pairing, factory: { _, _, _ in throw FixtureError.retiredRole },
             openProofClient: { configuration, windowID, onClose in
-                try await AuthorityPairingProofClient.open(configuration: configuration, windowID: windowID, onClose: onClose) { supplied, ended in
+                try await AuthorityPairingProofClient.open(configuration: configuration, windowID: windowID, onClose: {
+                    closeCount.withLock { $0 += 1 }
+                    onClose()
+                }) { supplied, ended in
                     XCTAssertEqual(supplied.canonicalBytes, approval.canonicalBytes)
                     let bootstrap = AuthorityXPCChannel(driver: driver, onClose: ended)
                     return .init(channel: bootstrap, policy: fixture.policy, configure: { $0.setCodeSigningRequirement(fixture.requirement) })
@@ -344,8 +423,9 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         if let phone, case .success = await phone.result {
             XCTFail("The candidate received a pairing receipt after its deadline")
         }
-        let cleared = try await waitFor { reservations.pendingCount == 0 }
+        let cleared = try await waitFor { reservations.pendingCount == 0 && fixture.events.closedBootstrapLinks.withLock { $0 } > 0 }
         XCTAssertTrue(cleared)
+        XCTAssertEqual(closeCount.withLock { $0 }, 1)
         XCTAssertThrowsError(try window.export(at: clock.now()))
     }
 
@@ -357,7 +437,11 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         try await pairUsingDedicatedLink(rePair: true)
     }
 
-    private func pairUsingDedicatedLink(rePair: Bool) async throws {
+    func testNativePairingRecoversAfterTemporaryRegistrationRefusal() async throws {
+        try await pairUsingDedicatedLink(rePair: false, exhaustBudget: true)
+    }
+
+    private func pairUsingDedicatedLink(rePair: Bool, exhaustBudget: Bool = false) async throws {
         let authority = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey()
         let macID = Data(repeating: 1, count: 16), accountID = Data(repeating: 2, count: 16)
         let invitation = try PairingInvitation(macID: macID, accountID: accountID, label: "Proof fixture",
@@ -369,10 +453,19 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
             secret: Data(repeating: 6, count: 32), replacement: predecessor?.predecessor, lifetimeMilliseconds: 15_000)
         let clock = try AuthorityClock(), owner = UUID()
         let window = try AuthorityPairingV2Window(invitation: full, predecessor: predecessor, started: clock.now(), authorityOwner: owner)
+        let frozenTime = Mutex<AuthorityMoment?>(nil)
+        let sampled = Mutex(0)
+        let bound = Mutex<AuthorityPairingProofReservations?>(nil)
         let fixture = try Fixture(bindReservations: { id, link in
             guard id == full.windowID else { throw FixtureError.retiredRole }
-            return try .init(window: window, authorityOwner: owner, link: link, now: clock.now,
-                makeChallenge: { try AuthorityPairingSetupAccess.secureRandom(32) }, verifyWindow: {})
+            let reservations = try AuthorityPairingProofReservations(window: window, authorityOwner: owner, link: link,
+                now: {
+                    sampled.withLock { $0 += 1 }
+                    if let frozen = frozenTime.withLock({ $0 }) { return frozen }
+                    return try clock.now()
+                }, makeChallenge: { try AuthorityPairingSetupAccess.secureRandom(32) }, verifyWindow: {})
+            bound.withLock { $0 = reservations }
+            return reservations
         })
         let primary = try await bootstrap(fixture)
         defer { primary.invalidate() }
@@ -383,7 +476,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         defer { client.close() }
         try await client.start(windowID: full.windowID)
 
-        let ingress = try PairingSetupV2Ingress(windowID: full.windowID, lifetimeMilliseconds: full.lifetimeMilliseconds, authority: client)
+        let ingress = PairingSetupV2Ingress(windowID: full.windowID, lifetimeMilliseconds: full.lifetimeMilliseconds, authority: client)
         let ready = AsyncStream<UInt16>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let served = Mutex(false)
         let listener = try PairingSetupListener(identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport),
@@ -407,8 +500,31 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         do {
             try listener.start()
             var ports = ready.stream.makeAsyncIterator()
-            let port = await ports.next()
-            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: XCTUnwrap(port), invitation: full)
+            let readyPort = await ports.next()
+            let port = try XCTUnwrap(readyPort)
+            if exhaustBudget {
+                let reservations = try XCTUnwrap(bound.withLock { $0 })
+                let now = try clock.now()
+                frozenTime.withLock { $0 = now }
+                for attempt in 0..<PairingRegistrationBudget.burst {
+                    let candidate = try reservations.register(connection: UUID(), acceptedAt: now.milliseconds,
+                        peerPoint: transport.publicKey.x963Representation, exporter: Data(repeating: UInt8(attempt), count: 32))
+                    reservations.retire(candidate: candidate.id)
+                }
+                let before = sampled.withLock { $0 }
+                do {
+                    try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full)
+                    XCTFail("Pairing completed while Authority had no registration credit")
+                } catch {}
+                XCTAssertGreaterThan(sampled.withLock { $0 }, before)
+                XCTAssertFalse(served.withLock { $0 })
+                frozenTime.withLock { $0 = nil }
+                let refill = (1_000 + PairingRegistrationBudget.registrationsPerSecond - 1) / PairingRegistrationBudget.registrationsPerSecond
+                while try clock.now().milliseconds < now.milliseconds + refill {
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            }
+            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full)
         } catch {
             await listener.closeAndWait()
             throw error

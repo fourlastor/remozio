@@ -299,7 +299,7 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
                         handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void)
         async throws -> (PairingSetupListener, UInt16) {
         let ready = AsyncStream<UInt16>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        let ingress = try PairingSetupV2Ingress(windowID: invitation.windowID, lifetimeMilliseconds: invitation.lifetimeMilliseconds, authority: client)
+        let ingress = PairingSetupV2Ingress(windowID: invitation.windowID, lifetimeMilliseconds: invitation.lifetimeMilliseconds, authority: client)
         let listener = try PairingSetupListener(identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(fixture.macTransport),
             invitation: fixture.invitation, binding: .loopback, maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
             setupTimeoutMilliseconds: invitation.lifetimeMilliseconds, v2: ingress, proofTime: proofTime, event: { event in
