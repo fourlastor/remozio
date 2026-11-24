@@ -371,7 +371,7 @@ public actor AuthorityPairingChannel {
         switch call {
         case .hello: guard state == .opening else { throw AuthorityPairingChannelError.closed }
         case .context: guard state == .opening else { throw AuthorityPairingChannelError.closed }
-        case .stage, .commit, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
+        case .openV2, .stageV2, .stage, .commit, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
             guard state == .open else { throw AuthorityPairingChannelError.closed }
         }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }
