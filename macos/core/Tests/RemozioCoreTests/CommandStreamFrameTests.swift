@@ -10,7 +10,7 @@ final class CommandStreamFrameTests: XCTestCase {
             callerBinding: Data(repeating: 1, count: 16), macID: Data(repeating: 2, count: 16), accountID: Data(repeating: 3, count: 16)),
             submission: .init(id: Data(repeating: 4, count: 16), nonce: Data(repeating: 5, count: 32), callerBinding: Data(repeating: 1, count: 16)),
             submissionDigest: Data(repeating: 6, count: 32),
-            request: .init(requestID: Data(repeating: 7, count: 16), requestDigest: Data(repeating: 8, count: 32), challenge: Data(repeating: 9, count: 32)))
+            request: .init(requestID: Data(repeating: 7, count: 16), requestToken: Data(repeating: 8, count: 32), challenge: Data(repeating: 9, count: 32)))
     }
     func testEveryBodyRoundTripsWithExactBinaryBytesAndDirection() throws {
         let bodies: [CommandStreamFrame.Body] = [.opened, .output(Data((0..<4096).map { UInt8($0 % 251) })), .outputEnd,
