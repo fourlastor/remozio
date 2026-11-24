@@ -13,6 +13,8 @@ import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 import platform.CoreCrypto.CC_SHA256
 import platform.CoreCrypto.CC_SHA256_DIGEST_LENGTH
+import platform.CoreCrypto.CCHmac
+import platform.CoreCrypto.kCCHmacAlgSHA256
 import platform.CoreFoundation.CFDataCreate
 import platform.CoreFoundation.CFDataRef
 import platform.CoreFoundation.CFDictionaryAddValue
@@ -42,6 +44,20 @@ internal actual fun sha256(input: ByteArray): ByteArray {
         }
     }
     return digest
+}
+
+internal actual fun hmacSha256(key: ByteArray, input: ByteArray): ByteArray {
+    val result = ByteArray(CC_SHA256_DIGEST_LENGTH)
+    key.usePinned { keyBytes ->
+        input.usePinned { inputBytes ->
+            result.usePinned { output ->
+                CCHmac(kCCHmacAlgSHA256.toUInt(),
+                    if (key.isEmpty()) null else keyBytes.addressOf(0), key.size.toULong(),
+                    if (input.isEmpty()) null else inputBytes.addressOf(0), input.size.toULong(), output.addressOf(0))
+            }
+        }
+    }
+    return result
 }
 
 /** Security imports the point with corecrypto, which rejects coordinates at or above p and off-curve points. */

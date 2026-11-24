@@ -28,6 +28,7 @@ val commonTestVectors = mapOf(
     "pairingExpiryReceipt" to "protocol/vectors/pairing-expiry-receipt-v1.json",
     "pairingRecoveryFrames" to "protocol/vectors/pairing-recovery-frames-v1.json",
     "pairingInvitation" to "protocol/vectors/pairing-invitation-v1.json",
+    "pairingInvitationV2" to "protocol/vectors/pairing-invitation-v2.json",
     "pairingReceipt" to "protocol/vectors/pairing-receipt-v1.json",
     "pairingSetup" to "protocol/vectors/pairing-setup-v1.json",
     "pairing" to "protocol/vectors/pairing-v1.json",

@@ -11,8 +11,16 @@ import java.security.spec.ECParameterSpec
 import java.security.spec.ECPoint
 import java.security.spec.ECPublicKeySpec
 import java.util.Collections
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 internal actual fun sha256(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(input)
+
+internal actual fun hmacSha256(key: ByteArray, input: ByteArray): ByteArray =
+    Mac.getInstance("HmacSHA256").run {
+        init(SecretKeySpec(key, "HmacSHA256"))
+        doFinal(input)
+    }
 
 internal actual fun pairingPoint(bytes: ByteArray) {
     require(bytes.size == 65 && bytes[0] == 4.toByte())
