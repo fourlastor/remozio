@@ -14,6 +14,10 @@ public final class RetainedCommandCapture {
     private let controlTerminal: RetainedCommandInputDescriptor?
     private let stdioObservation: RetainedCommandStdioObservation?
     private let filesystem: CommandFilesystemCapture
+    func makeFilesystemRecheck() throws -> CommandFilesystemCapture.Recheck {
+        guard !closed else { throw RetainedCommandCaptureError.closed }
+        return try filesystem.makeRecheck()
+    }
     let outputs: RetainedCommandOutputChannels?
     let admissionProfile: CommandHandshakeProfile?
     let submissionDigest: Data
@@ -53,7 +57,7 @@ public final class RetainedCommandCapture {
          captureSchemaVersion: UInt64, expression: String, userID: uid_t, auditSessionID: au_asid_t?, resolvedTarget: CommandTarget,
          minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
          maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {},
-         admissionProfile: CommandHandshakeProfile? = nil) throws {
+         admissionProfile: CommandHandshakeProfile? = nil, capturedFilesystem: CommandFilesystemCapture? = nil) throws {
         try received.claimForCaptureOwner()
         var heldFilesystem: CommandFilesystemCapture?
         do {
@@ -72,9 +76,12 @@ public final class RetainedCommandCapture {
                 }
             }
             let environment = try Self.environment(minimal: minimalEnvironment, additions: submission.environmentAdditions)
-            let filesystem = try CommandFilesystemCapture(executablePath: submission.executablePath,
+            let filesystem = try capturedFilesystem ?? CommandFilesystemCapture(executablePath: submission.executablePath,
                 directoryPath: submission.directoryPath, checkCancellation: checkCancellation)
             heldFilesystem = filesystem
+            guard filesystem.executable.path == submission.executablePath, filesystem.directory.path == submission.directoryPath else {
+                throw RetainedCommandCaptureError.binding
+            }
             let stdioObservation: RetainedCommandStdioObservation?
             let source: CapturedCommandInput
             let requester: CapturedRequester
@@ -101,7 +108,7 @@ public final class RetainedCommandCapture {
                 input: source, ioMode: submission.ioMode, disconnectBehavior: submission.disconnectBehavior,
                 requester: requester, ancestry: ancestry, unverifiedRationale: submission.unverifiedRationale,
                 submission: submission.binding, stdioLayout: stdioObservation?.layout, limits: captureLimits)
-            try filesystem.recheck(checkCancellation: checkCancellation)
+            if capturedFilesystem == nil { try filesystem.recheck(checkCancellation: checkCancellation) }
             if let stdioObservation, let outputs = received.outputs {
                 try stdioObservation.recheck(input: received.input, outputs: outputs, controlTerminal: received.controlTerminal)
                 try received.caller.recheckTerminalContext(stdioObservation.context, expression: expression, userID: userID, auditSessionID: auditSessionID)
@@ -145,12 +152,13 @@ public final class RetainedCommandCapture {
             auditSessionID: currentPolicy.expectedAuditSessionID, checkCancellation: checkCancellation)
     }
 
-    func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCancellation: () throws -> Void = {}) throws {
+    func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCancellation: () throws -> Void = {},
+                 filesystemChecked: Bool = false) throws {
         guard !closed else { throw RetainedCommandCaptureError.closed }
         do {
             try checkCancellation()
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
-            try filesystem.recheck(checkCancellation: checkCancellation)
+            if !filesystemChecked { try filesystem.recheck(checkCancellation: checkCancellation) }
             try input.withBorrowedDescriptor { _ in () }
             try outputs?.recheck()
             if let stdioObservation, let outputs {

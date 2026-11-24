@@ -54,6 +54,10 @@ The receiver applies the next revision in one transaction. An exact retry return
 
 Execute the captured command by pathname after a final executable identity/content and working-directory recheck. Preserve the captured argv, deterministic environment, caller lifetime and input-source contract. Do not add an implicit shell.
 
+On macOS, the Authority opens the symlink target from retained directories. The private child frame uses the resolved path and preserves the captured argv, including its first entry. The approval payload keeps the requested path.
+
+The Authority hashes up to 512 MiB per executable. Each filesystem phase has a five-second monotonic deadline and uses a bounded worker pool outside the journal lock. A timed-out operation holds its slot until the filesystem call returns.
+
 A process can still replace or modify the executable after the recheck and before the OS executes it. Scripts and dependencies can also change. Approval binds the invocation; it does not guarantee immutable approved program bytes or transitive behavior.
 
 Do not silently relocate executable files, force another interpreter, or restrict commands to an immutable allowlist. The user accepted the documented race to preserve ordinary executable-location and argv behavior.

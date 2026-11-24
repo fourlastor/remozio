@@ -7,18 +7,20 @@ struct CommandChildLaunchSpecification {
     static let maximumEntries = 262_144
     let canonicalBytes: Data
 
-    init(capture: CommandCapture, preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
-        try self.init(capture: capture, preparationMilliseconds: preparationMilliseconds,
+    init(capture: CommandCapture, resolvedExecutablePath: Data? = nil,
+         preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
+        try self.init(capture: capture, executablePath: resolvedExecutablePath ?? capture.executable.path,
+            preparationMilliseconds: preparationMilliseconds,
             fileCreationMask: fileCreationMask, directoryAccount: true)
     }
 
     /// Encodes the historical static-group format for compatibility controls. The production child refuses it.
     init(legacyCapture capture: CommandCapture, preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
-        try self.init(capture: capture, preparationMilliseconds: preparationMilliseconds,
+        try self.init(capture: capture, executablePath: capture.executable.path, preparationMilliseconds: preparationMilliseconds,
             fileCreationMask: fileCreationMask, directoryAccount: false)
     }
 
-    private init(capture: CommandCapture, preparationMilliseconds: UInt32, fileCreationMask: UInt32,
+    private init(capture: CommandCapture, executablePath: Data, preparationMilliseconds: UInt32, fileCreationMask: UInt32,
                  directoryAccount: Bool) throws {
         guard (100...60_000).contains(preparationMilliseconds), fileCreationMask <= 0o777,
               capture.target.uid != UInt32.max, capture.target.gid != UInt32.max,
@@ -52,8 +54,8 @@ struct CommandChildLaunchSpecification {
         }
         for group in capture.target.supplementaryGroups { appendWord(group) }
         if let accountName { try appendString(accountName) }
-        guard capture.executable.path.first == 0x2f else { throw CommandChildSpecificationError.invalid }
-        try appendString(capture.executable.path)
+        guard executablePath.first == 0x2f else { throw CommandChildSpecificationError.invalid }
+        try appendString(executablePath)
         for argument in capture.arguments { try appendString(argument) }
         var previous: Data?
         for entry in capture.environment {

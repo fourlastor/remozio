@@ -499,10 +499,10 @@ public final class ApprovalRequestCoordinator {
     /// Production always uses the exclusive transfer and protected release policy above.
     func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, expression: String,
                       userID: uid_t, auditSessionID: au_asid_t?, now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
-                      checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+                      checkCancellation: () throws -> Void = {}, filesystemChecked: Bool = false) throws -> IssuedRequestPayload {
         try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs) {
             try command.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID,
-                checkCancellation: checkCancellation)
+                checkCancellation: checkCancellation, filesystemChecked: filesystemChecked)
         }
     }
 

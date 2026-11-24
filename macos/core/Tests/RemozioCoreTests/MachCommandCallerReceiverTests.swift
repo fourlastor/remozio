@@ -722,6 +722,62 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testAdmissionFilesystemProbeAllowsAnIndependentJournalRead() throws {
+        let owner = OSAllocatedUnfairLock<AuthorityJournal?>(initialState: nil)
+        let reads = OSAllocatedUnfairLock(initialState: 0)
+        let pool = CommandFilesystemProbePool(beforeWork: {
+            guard let authority = owner.withLock({ $0 }) else { return }
+            do {
+                try authority.read { _ in () }
+                reads.withLock { $0 += 1 }
+            } catch { XCTFail("The filesystem probe blocked a journal read: \(error)") }
+        })
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandFilesystem: pool)
+        let authority = try XCTUnwrap(fixture.authority)
+        owner.withLock { $0 = authority }
+        defer { owner.withLock { $0 = nil } }
+        let reply = try Endpoint()
+        let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+        _ = try admitAttempt(attempt, fixture: fixture)
+        XCTAssertEqual(reads.withLock { $0 }, 3)
+        guard case .admitted = try typedOutcome(reply, submission: submission, profile: profile) else {
+            return XCTFail("Expected the request to commit")
+        }
+    }
+
+    func testAdmissionDiscardsFilesystemResultAfterFrontendPolicyChanges() throws {
+        let owner = OSAllocatedUnfairLock<AuthorityJournal?>(initialState: nil)
+        let pool = CommandFilesystemProbePool(beforeWork: {
+            let authority = owner.withLock { owner in
+                defer { owner = nil }
+                return owner
+            }
+            guard let authority else { return }
+            do {
+                try authority.write { tx in
+                    let policy = try XCTUnwrap(tx.codePolicy())
+                    let old = try XCTUnwrap(policy.policy.entries.first { $0.role == .commandFrontend })
+                    let replacement = try AuthorityCodeEntry(role: old.role, teamID: old.teamID, identifier: old.identifier,
+                        installedGeneration: old.installedGeneration, minimumGeneration: old.minimumGeneration,
+                        codeDirectoryHash: Data(repeating: 0xfa, count: 20), active: true)
+                    _ = try tx.installCodePolicy(
+                        AuthorityCodePolicy(entries: policy.policy.entries.filter { $0.role != .commandFrontend } + [replacement]),
+                        expectedRevision: policy.revision)
+                }
+            } catch { XCTFail("Could not change the fixture frontend policy: \(error)") }
+        })
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandFilesystem: pool)
+        owner.withLock { $0 = fixture.authority }
+        defer { owner.withLock { $0 = nil } }
+        let reply = try Endpoint()
+        let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+        XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture)) {
+            XCTAssertEqual($0 as? CommandExecutionError, .policyChanged)
+        }
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+        XCTAssertNil(try fixture.reservation(submission.binding.id))
+    }
+
     func testAdmissionCaptureClassifierNeverTreatsHostResourceOrUnknownFailuresAsInvalidCommands() {
         for code in [EMFILE, ENFILE, EIO, ENOMEM, ENOSPC, EAGAIN, EINTR, EACCES, EPERM, ESTALE, Int32.max] {
             XCTAssertNil(AuthorityJournal.commandCaptureRefusal(CommandFilesystemCaptureError.system(code)))
@@ -2113,7 +2169,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let contract: RequestContract
         var continuity: ContinuityStore?
         init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true, commandSchema: UInt64 = 1,
-             installReplay: Bool = true, maximumSubmissions: Int = 30, retiredEnrollmentEpoch: UInt8? = nil) throws {
+             installReplay: Bool = true, maximumSubmissions: Int = 30, retiredEnrollmentEpoch: UInt8? = nil,
+             commandFilesystem: CommandFilesystemProbePool = .init()) throws {
             limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
             contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: commandSchema)
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw MachCommandCallerError.unavailable }
@@ -2198,7 +2255,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                         try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid()),
                             macID: mac, accountID: account, initialize: nil)
                     })
-                    let authority = try AuthorityJournal(storage: storage)
+                    let authority = try AuthorityJournal(storage: storage, commandFilesystem: commandFilesystem)
                     if ready { try authority.prepareRequests(clockEpoch: clock, maximumPayloadBytes: 16384) }
                     self.authority = authority
                     standaloneRequests = nil

@@ -104,8 +104,21 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         let cwd = Data((fixture.root + "/cwd-link/../cwd-link").utf8)
         let capture = try CommandFilesystemCapture(executablePath: executable, directoryPath: cwd)
         XCTAssertEqual(capture.executable.path, executable)
+        let resolved = try XCTUnwrap(realpath(fixture.executable, nil))
+        defer { free(resolved) }
+        XCTAssertEqual(capture.resolvedExecutablePath, Data(String(cString: resolved).utf8))
         XCTAssertEqual(capture.directory.path, cwd)
         try capture.recheck()
+    }
+
+    func testRejectsExecutableSizeAboveLimitBeforeHashing() throws {
+        let fixture = try Fixture()
+        XCTAssertEqual(truncate(fixture.executable, CommandFilesystemCapture.maximumExecutableBytes + 1), 0)
+        var checks = 0
+        XCTAssertThrowsError(try fixture.capture {
+            checks += 1
+        }) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .invalidExecutable) }
+        XCTAssertEqual(checks, 1)
     }
 
     func testExecutableReplacementRetiresTheOriginalCapture() throws {
