@@ -14,6 +14,8 @@ import RemozioProtocol
     func requestExchangeVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func exchangeRequest(_ binding: Data, query: Data, reply: @escaping @Sendable (Data?) -> Void)
     /// Read-only receipt recovery. Negotiate before sending a retained setup ID or phone binding.
+    func pairingLookupVersion(reply: @escaping @Sendable (UInt64, UInt64) -> Void)
+    func pairingLookup(_ request: Data, reply: @escaping @Sendable (Data?) -> Void)
     func pairingReceiptVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func pairingReceipt(_ binding: Data, setupID: Data, reply: @escaping @Sendable (Data?) -> Void)
     /// Optional audit reads. Negotiate before sending a binding or cursor.
@@ -38,8 +40,8 @@ import RemozioProtocol
     func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void)
 }
 
-public enum AuthorityXPCError: Error { case unsupportedPhoneUpdateScheduling, unsupportedPhoneRouting, unsupportedPhoneAudit, unsupportedPhonePushRecovery, unsupportedPhonePushRegistration, unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
-enum AuthorityXPCReply: Sendable { case updateSchedulingVersion(UInt64), updateScheduling(Data), routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
+public enum AuthorityXPCError: Error { case unsupportedPairingLookup, unsupportedPhoneUpdateScheduling, unsupportedPhoneRouting, unsupportedPhoneAudit, unsupportedPhonePushRecovery, unsupportedPhonePushRegistration, unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
+enum AuthorityXPCReply: Sendable { case pairingLookupVersion(UInt64, UInt64), pairingLookup(Data), updateSchedulingVersion(UInt64), updateScheduling(Data), routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
 protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -49,6 +51,8 @@ protocol AuthorityXPCDriver: Sendable {
     func pendingRequests(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func receiptVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func receipt(_ binding: Data, setupID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func auditVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -67,6 +71,8 @@ protocol AuthorityXPCDriver: Sendable {
 }
 
 extension AuthorityXPCDriver {
+    func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.pairingLookupVersion(0, 0)) }
+    func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.updateSchedulingVersion(0)) }
     func updateScheduling(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func auditVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.auditVersion(0)) }
@@ -142,6 +148,14 @@ private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable 
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.pairingReceiptVersion { [self] version in checked(.receiptVersion(version), reply) }
     }
+    func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.pairingLookupVersion { [self] version, quota in checked(.pairingLookupVersion(version, quota), reply) }
+    }
+    func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.pairingLookup(request) { [self] bytes in checked(bytes.map(AuthorityXPCReply.pairingLookup) ?? .failed, reply) }
+    }
     func receipt(_ binding: Data, setupID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.pairingReceipt(binding, setupID: setupID) { [self] bytes in checked(bytes.map(AuthorityXPCReply.receipt) ?? .failed, reply) }
@@ -213,12 +227,13 @@ public actor AuthorityXPCChannel {
     public static let maximumSnapshotBytes = 1_048_576
     public static let maximumBindingBytes = 4096
     private enum State { case new, opening, open, closed }
-    private enum Operation { case updateSchedulingVersion, updateScheduling, routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private enum Operation { case pairingLookupVersion, pairingLookup, updateSchedulingVersion, updateScheduling, routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
     private var updateSchedulingVersion: UInt64?
     private var routingVersion: UInt64?
     private var auditVersion: UInt64?
     private var recoveryVersion: UInt64?
     private var registrationVersion: UInt64?
+    private var pairingLookupQuota: Int?
     private var receiptVersion: UInt64?
     private var exchangeVersion: UInt64?
     private var discoveryVersion: UInt64?
@@ -331,6 +346,44 @@ public actor AuthorityXPCChannel {
     }
 
     /// Missing receipts do not establish that enrollment was never committed.
+    func requirePairingLookupSupport() async throws -> Int {
+        if let pairingLookupQuota { return pairingLookupQuota }
+        guard case let .pairingLookupVersion(version, quota) = try await perform(.pairingLookupVersion) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        guard version == 1 else { throw AuthorityXPCError.unsupportedPairingLookup }
+        guard (1...UInt64(AuthorityTransportConnectionCapacity.recoveryQuota(64))).contains(quota) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        let result = Int(quota)
+        pairingLookupQuota = result
+        return result
+    }
+
+    func beginPairingLookup(_ query: PairingRecoveryQuery, exporter: Data, deadline: UInt64) async throws -> Data {
+        let request = try PairingRecoveryIPC.encodeBegin(query, exporter: exporter, deadline: deadline)
+        guard case let .challenge(challenge) = try await exchangePairingLookup(request) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        return challenge
+    }
+
+    func finishPairingLookup(_ proof: Data) async throws -> PairingRecoveryFrame {
+        let frame = try await exchangePairingLookup(PairingRecoveryFrame.proof(proof).encode())
+        switch frame {
+        case .refused, .committed, .expired: return frame
+        default: throw AuthorityXPCError.invalidMessage
+        }
+    }
+
+    private func exchangePairingLookup(_ request: Data) async throws -> PairingRecoveryFrame {
+        _ = try await requirePairingLookupSupport()
+        guard case let .pairingLookup(bytes) = try await perform(.pairingLookup, query: request) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        return try PairingRecoveryFrame.decode(bytes)
+    }
+
     public func pairingReceipt(binding: AuthorityPeerBinding, setupID: Data) async throws -> Data? {
         guard setupID.count == 16 else { throw AuthorityXPCError.invalidMessage }
         if receiptVersion == nil {
@@ -516,6 +569,8 @@ public actor AuthorityXPCChannel {
                     case .recovery: driver.recovery(binding!, frame: query!, reply)
                     case .registrationVersion: driver.registrationVersion(reply)
                     case .registration: driver.registration(binding!, frame: query!, reply)
+                    case .pairingLookupVersion: driver.pairingLookupVersion(reply)
+                    case .pairingLookup: driver.pairingLookup(query!, reply)
                     case .receiptVersion: driver.receiptVersion(reply)
                     case .receipt: driver.receipt(binding!, setupID: setupID!, reply)
                     case .exchangeVersion: driver.exchangeVersion(reply)
@@ -554,6 +609,8 @@ public actor AuthorityXPCChannel {
         case (.recovery, .recovery(let bytes)) where !bytes.isEmpty && bytes.count <= PhonePushRecoveryFrame.maximumBytes: break
         case (.registrationVersion, .registrationVersion): break
         case (.registration, .registration(let bytes)) where !bytes.isEmpty && bytes.count <= PhonePushRegistrationFrame.maximumBytes: break
+        case (.pairingLookupVersion, .pairingLookupVersion): break
+        case (.pairingLookup, .pairingLookup(let bytes)) where (1...PairingRecoveryFrame.maximumBytes).contains(bytes.count): break
         case (.receiptVersion, .receiptVersion): break
         case (.receipt, .receipt(let bytes)) where bytes.isEmpty || bytes.count == 64: break
         case (.exchangeVersion, .exchangeVersion): break

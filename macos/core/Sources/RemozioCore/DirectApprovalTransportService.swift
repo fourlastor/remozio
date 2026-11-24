@@ -79,6 +79,17 @@ public actor DirectApprovalTransportService {
             }
             try await feed.start(host: host)
             if useDefaultDelivery {
+                let pairingLookupQuota: Int
+                do { pairingLookupQuota = try await feed.withPairingLookup { try await $0.requirePairingLookupSupport() } }
+                catch is CancellationError { throw CancellationError() }
+                catch { pairingLookupQuota = 0 }
+                if pairingLookupQuota > 0 {
+                    try await host.configurePairingRecovery(quota: pairingLookupQuota) { [weak self] channel, exporter, uptimeDeadline, deadline in
+                        guard let self else { throw DirectHostError.stopped }
+                        try await self.runPairingLookup(on: channel, exporter: exporter,
+                            uptimeDeadline: uptimeDeadline, deadline: deadline)
+                    }
+                }
                 let routingSupported: Bool
                 do { try await feed.requirePhoneRoutingSupport(); routingSupported = true }
                 catch is CancellationError { throw CancellationError() }
@@ -241,6 +252,21 @@ public actor DirectApprovalTransportService {
         let response = try await feed.phonePushRecovery(session.peer, revision: session.revision, frame: frame)
         try await validate(session)
         return response
+    }
+
+    private func runPairingLookup(on channel: NetworkByteChannel, exporter: Data, uptimeDeadline: UInt64,
+                                  deadline: ContinuousClock.Instant) async throws {
+        guard started, !closed else { throw DirectHostError.stopped }
+        let feed = feed
+        let exchange = PairingRecoveryNetworkExchange(channel: channel, deadline: deadline)
+        try await exchange.run(lookup: { query, exchange in
+            try await feed.withPairingLookup { link in
+                let challenge = try await link.beginPairingLookup(query, exporter: exporter, deadline: uptimeDeadline)
+                try await feed.requirePairingLookupAuthority()
+                let proof = try await exchange.receiveProof(challenge: challenge)
+                return try await link.finishPairingLookup(proof)
+            }
+        }, verifyReply: { try await feed.requirePairingLookupAuthority() })
     }
 
     /// Returns only the existing commit proof for this admitted phone and retained setup ID.

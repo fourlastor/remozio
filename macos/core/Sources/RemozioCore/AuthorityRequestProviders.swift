@@ -25,6 +25,7 @@ public struct AuthorityRequestProviders: Sendable {
     let pendingRequestIDs: AuthorityPendingRequestsProvider
     let exchangeRequest: AuthorityRequestExchangeProvider
     let pairingReceipt: AuthorityPairingReceiptProvider
+    private let pairingLookup: @Sendable (@escaping @Sendable () throws -> AuthorityMoment) -> AuthorityPairingLookupProvider
     let phoneRouting: AuthorityPhoneRoutingProvider?
     let phoneAudit: AuthorityPhoneAuditProvider?
     let receiptTime: @Sendable () -> UInt64?
@@ -110,6 +111,15 @@ public struct AuthorityRequestProviders: Sendable {
                     maximumFrameBytes: maximum, now: clock, validateTransport: validateTransport, signer: signing)
             }
         } else { phoneAudit = nil }
+        pairingLookup = { clock in
+            { owner, query, input, proof, validateTransport in
+                try owner.recoverPairing(query, signingInput: input, proof: proof, authorityPublicKey: publicKey,
+                    now: clock, verifyHost: { transaction in
+                        try receiptValidation(transaction)
+                        try validateTransport(transaction)
+                    }, sign: signing)
+            }
+        }
         pairingReceipt = { owner, binding, setupID, validateTransport in
             try Self.requireScope(binding, configuration: configuration)
             guard setupID.count == 16 else { throw AuthorityXPCError.invalidMessage }
@@ -120,6 +130,10 @@ public struct AuthorityRequestProviders: Sendable {
                 }, sign: signing)
         }
     }
+    func pairingLookupProvider(clock: @escaping @Sendable () throws -> AuthorityMoment) -> AuthorityPairingLookupProvider {
+        pairingLookup(clock)
+    }
+
     func expirePending(_ owner: ApprovalRequestCoordinator, clock: @Sendable () throws -> AuthorityMoment) throws -> [ApprovalRequestState] {
         try owner.expirePending(now: clock(), receiptTimeMs: receiptTime())
     }

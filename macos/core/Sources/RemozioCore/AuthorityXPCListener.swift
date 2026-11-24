@@ -2,6 +2,17 @@ import Darwin
 import Foundation
 import RemozioProtocol
 
+enum AuthorityTransportConnectionCapacity {
+    // One trust link and one each for push registration, push recovery, audit, routing, and scheduling.
+    static let persistent = 6
+    static let replacementMargin = 1
+    static let maximumListenerRecovery = 2
+
+    static func recoveryQuota(_ maximum: Int) -> Int {
+        max(0, maximum - persistent - replacementMargin)
+    }
+}
+
 protocol OwnedAuthorityConnection: Sendable { func activate(); func close() }
 
 /// Reservations cover setup and handshake, not just fully configured connections.
@@ -100,6 +111,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
     private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+    private let pairingLookupHandler: AuthorityPairingLookupHandler?
+    private let pairingLookupBudget: AuthorityXPCWorkBudget?
     private let receipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let routingExchange: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)?
     private let updateSchedulingExchange: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)?
@@ -120,6 +133,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                 pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
                 exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
                 pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
+                pairingLookup: AuthorityPairingLookupHandler? = nil,
                 phonePushRegistration: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)? = nil,
                 phonePushRecovery: (@Sendable (AuthorityPeerBinding, PhonePushRecoveryFrame) throws -> PhonePushRecoveryFrame)? = nil,
                 phoneAudit: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)? = nil,
@@ -129,12 +143,16 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
+        let quota = AuthorityTransportConnectionCapacity.recoveryQuota(maximumConnections)
+        if pairingLookup != nil, quota > 0 { pairingLookupBudget = try .init(maximum: quota) }
+        else { pairingLookupBudget = nil }
         registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
         listener = NSXPCListener(machServiceName: serviceName)
         self.activityJournal = activityJournal
         policy = peerPolicy; self.macID = macID; self.accountID = accountID
         self.verifyHandshakePolicy = verifyHandshakePolicy; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
+        self.pairingLookupHandler = pairingLookupBudget == nil ? nil : pairingLookup
         self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting; self.updateSchedulingExchange = phoneUpdateScheduling
         super.init()
         policy.configure(listener)
@@ -150,6 +168,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                             pendingRequestIDs: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding) throws -> [Data])? = nil,
                             exchangeRequest: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
                             pairingReceipt: AuthorityPairingReceiptProvider? = nil,
+                            pairingLookup: AuthorityPairingLookupProvider? = nil,
                             phonePushRegistration: AuthorityPhonePushRegistrationProvider? = nil,
                             phonePushRecovery: AuthorityPhonePushRecoveryProvider? = nil,
                             phoneAudit: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneAuditFrame,
@@ -180,6 +199,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         if let pairingReceipt {
             receiptHandler = { binding, setupID in try access.pairingReceipt(binding: binding, setupID: setupID, handler: pairingReceipt) }
         } else { receiptHandler = nil }
+        let pairingLookupHandler = pairingLookup.map { access.pairingLookupHandler($0) }
         let registrationHandler: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)?
         if let phonePushRegistration {
             registrationHandler = { binding, frame in try access.phonePushRegistration(binding: binding, frame: frame, handler: phonePushRegistration) }
@@ -210,7 +230,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             maximumOperations: maximumOperations, activityJournal: journal, verifyHandshakePolicy: { try access.verifyCurrent() },
             snapshot: { try access.snapshot() }, validate: { try access.validate($0) },
             requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler,
-            pairingReceipt: receiptHandler, phonePushRegistration: registrationHandler, phonePushRecovery: recoveryHandler, phoneAudit: auditHandler, phoneRouting: routingHandler, phoneUpdateScheduling: updateSchedulingHandler, wakeHints: wakeHints)
+            pairingReceipt: receiptHandler, pairingLookup: pairingLookupHandler, phonePushRegistration: registrationHandler, phonePushRecovery: recoveryHandler, phoneAudit: auditHandler, phoneRouting: routingHandler, phoneUpdateScheduling: updateSchedulingHandler, wakeHints: wakeHints)
     }
     deinit { listener.invalidate(); registry.close() }
     public func start() throws {
@@ -230,7 +250,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                 let endpoint = try AuthorityXPCEndpoint(connection: connection, peerPolicy: policy, macID: macID, accountID: accountID,
                     budget: budget, activityJournal: activityJournal, verifyHandshakePolicy: verifyHandshakePolicy, onHandshake: { [weak registry] in registry?.handshake(id) },
                     onClose: { [weak registry] in registry?.remove(id) }, snapshot: snapshot, validate: validate, requestFrame: frame,
-                    pendingRequestIDs: pendingRequests, exchangeRequest: exchange, pairingReceipt: receipt, phonePushRegistration: pushRegistration, phonePushRecovery: pushRecovery, phoneAudit: auditExchange, phoneRouting: routingExchange, phoneUpdateScheduling: updateSchedulingExchange, wakeHints: wakeHints)
+                    pendingRequestIDs: pendingRequests, exchangeRequest: exchange, pairingReceipt: receipt, pairingLookup: pairingLookupHandler, pairingLookupBudget: pairingLookupBudget, phonePushRegistration: pushRegistration, phonePushRecovery: pushRecovery, phoneAudit: auditExchange, phoneRouting: routingExchange, phoneUpdateScheduling: updateSchedulingExchange, wakeHints: wakeHints)
                 let owner = NativeAuthorityConnection(connection: connection, endpoint: endpoint)
                 guard registry.install(owner, id: id) else { return false }
                 return true

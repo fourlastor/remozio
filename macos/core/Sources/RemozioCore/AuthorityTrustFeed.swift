@@ -27,6 +27,7 @@ public actor AuthorityTrustFeed {
     private var auditAdvertised = false
     private var emptyTrustSnapshot = false
     private var recoveryLink: (id: UUID, channel: AuthorityXPCChannel)?
+    private var pairingLookups: [UUID: AuthorityXPCChannel] = [:]
     private var registrationLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var timer: Task<Void, Never>?
     private var retiredTimer: Task<Void, Never>?
@@ -60,6 +61,7 @@ public actor AuthorityTrustFeed {
     }
     deinit {
         lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort(); recoveryLink?.channel.abort(); auditLink?.channel.abort(); routingLink?.channel.abort(); updateSchedulingLink?.channel.abort()
+        for value in pairingLookups.values { value.abort() }
         let host = host, lease = lease
         Task { await host?.authorityDisconnected(lease) }
     }
@@ -179,6 +181,34 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedRequestExchange
         } catch { await close(); throw error }
     }
+    /// Each network exchange owns a separate Root connection and one challenge.
+    func withPairingLookup<Value: Sendable>(
+        _ body: @Sendable (AuthorityXPCChannel) async throws -> Value
+    ) async throws -> Value {
+        try requirePairingLookupAuthority()
+        let id = UUID()
+        let link = try factory({})
+        pairingLookups[id] = link
+        inFlightOperations += 1
+        defer { pairingLookups[id] = nil; finishOperation() }
+        do {
+            try await link.start()
+            _ = try await link.requirePairingLookupSupport()
+            try requirePairingLookupAuthority()
+            let value = try await body(link)
+            try requirePairingLookupAuthority()
+            await link.close()
+            return value
+        } catch {
+            await link.close()
+            throw error
+        }
+    }
+
+    func requirePairingLookupAuthority() throws {
+        _ = try activeChannel()
+    }
+
     /// Receipt recovery shares the same ordered authority connection and current trust revision.
     public func pairingReceipt(_ peer: DirectApprovalPeer, revision: UUID, setupID: Data) async throws -> Data? {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID, setupID.count == 16 else {
@@ -228,7 +258,10 @@ public actor AuthorityTrustFeed {
     }
     private func openRecoveryLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let recoveryLink { return recoveryLink }
+        if let recoveryLink {
+            if recoveryLink.channel.lifetimeActive { return recoveryLink }
+            retireRecoveryLink(recoveryLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireRecoveryLink(id) } }
         recoveryLink = (id, value)
@@ -270,7 +303,10 @@ public actor AuthorityTrustFeed {
     }
     private func openRegistrationLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let registrationLink { return registrationLink }
+        if let registrationLink {
+            if registrationLink.channel.lifetimeActive { return registrationLink }
+            retireRegistrationLink(registrationLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireRegistrationLink(id) } }
         registrationLink = (id, value)
@@ -321,7 +357,10 @@ public actor AuthorityTrustFeed {
     }
     private func openAuditLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let auditLink { return auditLink }
+        if let auditLink {
+            if auditLink.channel.lifetimeActive { return auditLink }
+            retireAuditLink(auditLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireAuditLink(id) } }
         auditLink = (id, value)
@@ -368,7 +407,10 @@ public actor AuthorityTrustFeed {
     }
     private func openRoutingLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let routingLink { return routingLink }
+        if let routingLink {
+            if routingLink.channel.lifetimeActive { return routingLink }
+            retireRoutingLink(routingLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireRoutingLink(id) } }
         routingLink = (id, value)
@@ -415,7 +457,10 @@ public actor AuthorityTrustFeed {
     }
     private func openUpdateSchedulingLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let updateSchedulingLink { return updateSchedulingLink }
+        if let updateSchedulingLink {
+            if updateSchedulingLink.channel.lifetimeActive { return updateSchedulingLink }
+            retireUpdateSchedulingLink(updateSchedulingLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireUpdateSchedulingLink(id) } }
         updateSchedulingLink = (id, value)
@@ -440,6 +485,7 @@ public actor AuthorityTrustFeed {
             if let id = auditLink?.id { retireAuditLink(id) }
             if let id = routingLink?.id { retireRoutingLink(id) }
             if let id = updateSchedulingLink?.id { retireUpdateSchedulingLink(id) }
+            for link in pairingLookups.values { link.abort() }
             let pending = waiters; waiters.removeAll()
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
         }

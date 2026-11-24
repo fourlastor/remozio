@@ -146,7 +146,7 @@ public final class PairingSetupListener: @unchecked Sendable {
               pin.accepts(certificate: data) else { return nil }
         return point
     }
-    private static func candidatePoint(metadata: sec_protocol_metadata_t) -> Data? {
+    static func candidatePoint(metadata: sec_protocol_metadata_t) -> Data? {
         var leaf: SecCertificate?
         let accessible = sec_protocol_metadata_access_peer_certificate_chain(metadata) { certificate in
             if leaf == nil { leaf = sec_certificate_copy_ref(certificate).takeRetainedValue() }

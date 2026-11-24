@@ -9,7 +9,7 @@ protocol OwnedApprovalRelay: Sendable {
     func closeAndWait() async
 }
 
-private final class WebSocketByteConnection: ByteConnectionDriver, @unchecked Sendable {
+final class WebSocketByteConnection: ByteConnectionDriver, @unchecked Sendable {
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "dev.remozio.relay-channel")
     private let closed = Mutex(false)

@@ -1,9 +1,11 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Network
 import RemozioProtocol
 import Security
 import SQLite3
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -36,7 +38,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         var mac: Data { Data(repeating: 1, count: 16) }
         let account: Data
         init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false,
-             accountByte: UInt8 = 2, observePairingContention: @escaping @Sendable () -> Void = {}) throws {
+             accountByte: UInt8 = 2, configureTransport: Bool = false, observePairingContention: @escaping @Sendable () -> Void = {}) throws {
             self.account = Data(repeating: accountByte, count: 16)
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
             let ownedRoot = root
@@ -74,7 +76,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             let epochWriter = try db.write { try $0.createEpoch(descriptor) }
             writer = epochWriter
             let app = try Self.appEntry()
-            _ = try db.write { try $0.installCodePolicy(.init(entries: [app]), expectedRevision: nil) }
+            let entries = configureTransport ? [app, try Self.transportEntry()] : [app]
+            _ = try db.write { try $0.installCodePolicy(.init(entries: entries), expectedRevision: nil) }
             let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epochWriter.epoch, generation: 1, authorityGeneration: 1) }
             continuity = try .init(lease: .init(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
                 macID: mac, accountID: account, initialize: initial)
@@ -103,6 +106,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         static func appEntry(active: Bool = true) throws -> AuthorityCodeEntry {
             try .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.app", installedGeneration: 1,
                 minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: active)
+        }
+        static func transportEntry(active: Bool = true) throws -> AuthorityCodeEntry {
+            try .init(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
+                installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 5, count: 20), active: active)
         }
         func endpoint(budget: AuthorityXPCWorkBudget? = nil) throws -> AuthorityPairingXPCEndpoint {
             let environment = environment
@@ -1457,22 +1464,24 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         return try f.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(), proof: proof, authorize: authorize)
     }
 
-    private func proposal(_ f: Fixture, phone: UInt8 = 8) throws -> (PairingPhoneProposal, P256.Signing.PrivateKey) {
+    private func proposal(_ f: Fixture, phone: UInt8 = 8,
+                          transportKey: P256.Signing.PublicKey = P256.Signing.PrivateKey().publicKey) throws -> (PairingPhoneProposal, P256.Signing.PrivateKey) {
         let original = try ordinary(f, phone: phone)
         let recipient = DeliveryRecipient(phoneID: original.phone.scope.phoneID, enrollmentEpoch: original.phone.scope.enrollmentEpoch)
         let selection = try XCTUnwrap(f.access.pairedPhones().selection(for: recipient))
         _ = try f.access.revokePhone(selection, authorize: {})
-        return try replacement(f, selection: selection)
+        return try replacement(f, selection: selection, transportKey: transportKey)
     }
 
-    private func replacement(_ f: Fixture, selection: PairedPhoneSelection, epoch: UInt8 = 50) throws -> (PairingPhoneProposal, P256.Signing.PrivateKey) {
+    private func replacement(_ f: Fixture, selection: PairedPhoneSelection, epoch: UInt8 = 50,
+                             transportKey: P256.Signing.PublicKey = P256.Signing.PrivateKey().publicKey) throws -> (PairingPhoneProposal, P256.Signing.PrivateKey) {
         let key = P256.Signing.PrivateKey()
         let scope = try ChannelScope(macID: f.mac, accountID: f.account, phoneID: selection.phone.phoneID,
                                     enrollmentEpoch: Data(repeating: epoch, count: 16))
         let phone = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: epoch, count: 32),
             envelopeVersions: [1], requests: [.init(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [1])
         return (try PairingPhoneProposal(phone: phone,
-            transportKey: .init(keyID: Data(repeating: 70, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            transportKey: .init(keyID: Data(repeating: 70, count: 16), publicKey: transportKey.x963Representation),
             decisionKey: .init(keyID: Data(repeating: 71, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
             biometricKey: .init(keyID: Data(repeating: 72, count: 16), publicKey: key.publicKey.x963Representation),
             replacement: selection.predecessor), key)
@@ -1505,6 +1514,1054 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             try CheckpointedJournal(journal: requests.database, continuity: f.continuity)
                 .write(epoch: f.writer.epoch, recoverRejectedBody: true, body)
         }
+    }
+
+    private func lookupEndpoint(_ f: Fixture, journal: AuthorityJournal? = nil,
+                                clock: (@Sendable () -> AuthorityMoment)? = nil) throws -> AuthorityXPCEndpoint {
+        let journal = journal ?? f.journal
+        let now: @Sendable () -> AuthorityMoment = clock ?? { f.environment.now() }
+        let result = try AuthorityXPCEndpoint(macID: f.mac, accountID: f.account, budget: .init(maximum: 1),
+            activityJournal: journal, verify: {
+                if f.environment.peerDenied.value { throw Fault.injected }
+            }, verifyHandshakePolicy: {
+                if f.environment.selfDenied.value { throw Fault.injected }
+            }, invalidate: {}, snapshot: { throw Fault.injected }, validate: { _ in false },
+            pairingLookup: { query, input, proof in
+                try journal.withRequests { owner in
+                    try owner.recoverPairing(query, signingInput: input, proof: proof,
+                        authorityPublicKey: f.authority.publicKey.x963Representation,
+                        now: now, verifyHost: { _ in
+                            if f.environment.selfDenied.value { throw Fault.injected }
+                        }, sign: { try f.authority.signature(for: $0).rawRepresentation })
+                }
+            }, pairingLookupBudget: .init(maximum: 1))
+        result.hello { XCTAssertEqual($0, 1) }
+        result.pairingLookupVersion { version, capacity in
+            XCTAssertEqual(version, 1)
+            XCTAssertEqual(capacity, 1)
+        }
+        return result
+    }
+
+    private func lookupBytes(_ endpoint: AuthorityXPCEndpoint, _ request: Data) throws -> Data {
+        let response = Box<Data?>(nil)
+        endpoint.pairingLookup(request) { response.value = $0 }
+        return try XCTUnwrap(response.value)
+    }
+
+    private func lookupQuery(_ transcript: PairingTranscript) throws -> PairingRecoveryQuery {
+        try PairingRecoveryQuery(setupID: transcript.setupID, transcriptDigest: transcript.digest(), scope: transcript.phone.scope)
+    }
+
+    private func recover(_ f: Fixture, query: PairingRecoveryQuery, key: P256.Signing.PrivateKey,
+                         signingQuery: PairingRecoveryQuery? = nil, wrongExporter: Bool = false,
+                         wrongChallenge: Bool = false, endpoint existing: AuthorityXPCEndpoint? = nil) throws -> Data {
+        let endpoint = try existing ?? lookupEndpoint(f)
+        defer { endpoint.close() }
+        let exporter = Data(repeating: 81, count: 32)
+        let response = try lookupBytes(endpoint, PairingRecoveryIPC.encodeBegin(query, exporter: exporter,
+            deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000))
+        guard case let .challenge(nonce) = try PairingRecoveryFrame.decode(response) else { throw Fault.injected }
+        let input = try (signingQuery ?? query).signingInput(
+            exporter: wrongExporter ? Data(repeating: 82, count: 32) : exporter,
+            challenge: wrongChallenge ? Data(repeating: 83, count: 32) : nonce)
+        let proof = try PairingRecoveryFrame.proof(key.signature(for: input).rawRepresentation).encode()
+        let result = try lookupBytes(endpoint, proof)
+        XCTAssertEqual(try lookupBytes(endpoint, proof), try PairingRecoveryFrame.refused.encode())
+        return result
+    }
+
+    func testRecoveryReadsStayInconclusiveUntilTheOwnerRecordsExpiry() throws {
+        let f = try Fixture(), transport = P256.Signing.PrivateKey()
+        let (proposal, _) = try proposal(f, transportKey: transport.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        let deadline = try XCTUnwrap(retained(f, attempt)).deadline
+        let pending = try files(f)
+        let refusal = try PairingRecoveryFrame.refused.encode()
+        for time in [deadline - 1, deadline] {
+            f.environment.time.value = time
+            XCTAssertEqual(try recover(f, query: query, key: transport), refusal)
+            XCTAssertEqual(try files(f), pending)
+        }
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        let expired = try files(f)
+        guard case let .expired(receipt) = try PairingRecoveryFrame.decode(recover(f, query: query, key: transport)) else {
+            return XCTFail("Expected durable expiry proof")
+        }
+        XCTAssertEqual(receipt.reason, .deadlineElapsed)
+        XCTAssertTrue(try receipt.verify(transcript: attempt.transcript))
+        XCTAssertEqual(try files(f), expired)
+    }
+
+    func testRecoverySignsRetiredIncarnationAfterStartupReconciliation() throws {
+        let f = try Fixture(), transport = P256.Signing.PrivateKey()
+        let (proposal, _) = try proposal(f, transportKey: transport.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        try close(f)
+        let restarted = try AuthorityJournal(storage: open(f))
+        defer { try? restarted.close() }
+        let epoch = UUID()
+        try restarted.prepareRequests(clockEpoch: epoch, maximumPayloadBytes: 16_384)
+        let stored = try restarted.read { try $0.recoveryStage(setupID: query.setupID) }
+        XCTAssertEqual(stored?.state, .retiredIncarnation)
+        let retired = try files(f)
+        let endpoint = try lookupEndpoint(f, journal: restarted, clock: { .init(epoch: epoch, milliseconds: 1_000) })
+        let response = try recover(f, query: query, key: transport, endpoint: endpoint)
+        guard case let .expired(receipt) = try PairingRecoveryFrame.decode(response) else {
+            return XCTFail("Expected retired-incarnation proof")
+        }
+        XCTAssertEqual(receipt.reason, .retiredIncarnation)
+        XCTAssertTrue(try receipt.verify(transcript: attempt.transcript))
+        XCTAssertEqual(try files(f), retired)
+    }
+
+    func testRecoveryRecoversTheCommittedProofAfterTheStageSlotIsReleased() throws {
+        let f = try Fixture(), transport = P256.Signing.PrivateKey()
+        let (proposal, biometric) = try proposal(f, transportKey: transport.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        _ = try commit(f, attempt, key: biometric)
+        XCTAssertNil(try retained(f, attempt))
+        let committed = try files(f)
+        for _ in 0..<2 {
+            guard case let .committed(signature) = try PairingRecoveryFrame.decode(recover(f, query: query, key: transport)) else {
+                return XCTFail("Expected committed pairing proof")
+            }
+            XCTAssertTrue(try attempt.transcript.verify(signature: signature, publicKey: f.authority.publicKey.x963Representation,
+                purpose: .macCommit))
+        }
+        XCTAssertEqual(try files(f), committed)
+        try close(f)
+        let restarted = try AuthorityJournal(storage: open(f))
+        defer { try? restarted.close() }
+        let epoch = UUID()
+        try restarted.prepareRequests(clockEpoch: epoch, maximumPayloadBytes: 16_384)
+        let endpoint = try lookupEndpoint(f, journal: restarted, clock: { .init(epoch: epoch, milliseconds: 1_000) })
+        let before = try files(f)
+        let recovered = try recover(f, query: query, key: transport, endpoint: endpoint)
+        guard case let .committed(signature) = try PairingRecoveryFrame.decode(recovered) else {
+            return XCTFail("Restart could not recover the committed proof")
+        }
+        XCTAssertTrue(try attempt.transcript.verify(signature: signature, publicKey: f.authority.publicKey.x963Representation,
+            purpose: .macCommit))
+        XCTAssertNil(try restarted.read { try $0.recoveryStage(setupID: query.setupID) })
+        XCTAssertEqual(try files(f), before)
+    }
+
+    func testRecoveryUsesOneRefusalForUnknownAndWrongBindings() throws {
+        let f = try Fixture(), transport = P256.Signing.PrivateKey()
+        let (proposal, _) = try proposal(f, transportKey: transport.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        f.environment.time.value = try XCTUnwrap(retained(f, attempt)).deadline
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        let unknown = try PairingRecoveryQuery(setupID: Data(repeating: 91, count: 16),
+            transcriptDigest: query.transcriptDigest, scope: query.scope)
+        let wrongDigest = try PairingRecoveryQuery(setupID: query.setupID,
+            transcriptDigest: Data(repeating: 92, count: 32), scope: query.scope)
+        let replacementID = Data(repeating: 93, count: 16)
+        let scope = query.scope
+        let wrongScopes = [
+            try ChannelScope(macID: replacementID, accountID: scope.accountID,
+                phoneID: scope.phoneID, enrollmentEpoch: scope.enrollmentEpoch),
+            try ChannelScope(macID: scope.macID, accountID: replacementID,
+                phoneID: scope.phoneID, enrollmentEpoch: scope.enrollmentEpoch),
+            try ChannelScope(macID: scope.macID, accountID: scope.accountID,
+                phoneID: replacementID, enrollmentEpoch: scope.enrollmentEpoch),
+            try ChannelScope(macID: scope.macID, accountID: scope.accountID,
+                phoneID: scope.phoneID, enrollmentEpoch: replacementID),
+        ]
+        let refusal = try recover(f, query: unknown, key: transport)
+        XCTAssertEqual(refusal, try PairingRecoveryFrame.refused.encode())
+        XCTAssertEqual(try recover(f, query: wrongDigest, key: transport), refusal)
+        for wrongScope in wrongScopes {
+            let mismatch = try PairingRecoveryQuery(setupID: query.setupID, transcriptDigest: query.transcriptDigest, scope: wrongScope)
+            XCTAssertEqual(try recover(f, query: mismatch, key: transport), refusal)
+        }
+        XCTAssertEqual(try recover(f, query: query, key: P256.Signing.PrivateKey()), refusal)
+        XCTAssertEqual(try recover(f, query: query, key: transport, signingQuery: unknown), refusal)
+        XCTAssertEqual(try recover(f, query: query, key: transport, wrongExporter: true), refusal)
+        XCTAssertEqual(try recover(f, query: query, key: transport, wrongChallenge: true), refusal)
+    }
+
+    func testRecoveryRefusesRemovedSupersededAndRevokedAttempts() throws {
+        let f = try Fixture(), transport = P256.Signing.PrivateKey()
+        let original = try ordinary(f)
+        let recipient = DeliveryRecipient(phoneID: original.phone.scope.phoneID, enrollmentEpoch: original.phone.scope.enrollmentEpoch)
+        let selection = try XCTUnwrap(f.access.pairedPhones().selection(for: recipient))
+        _ = try f.access.revokePhone(selection, authorize: {})
+        let (first, _) = try replacement(f, selection: selection, transportKey: transport.publicKey)
+        let discarded = try stage(f, first)
+        f.environment.time.value = try XCTUnwrap(retained(f, discarded)).deadline
+        XCTAssertTrue(try f.access.isExpired(discarded))
+        let discardQuery = try lookupQuery(discarded.transcript)
+        try f.access.discardExpiredRePair(setupID: discardQuery.setupID, digest: discardQuery.transcriptDigest, authorize: {})
+        let refusal = try PairingRecoveryFrame.refused.encode()
+        XCTAssertEqual(try recover(f, query: discardQuery, key: transport), refusal)
+
+        let (second, _) = try replacement(f, selection: selection, epoch: 51, transportKey: transport.publicKey)
+        let superseded = try stage(f, second)
+        f.environment.time.value = try XCTUnwrap(retained(f, superseded)).deadline
+        XCTAssertTrue(try f.access.isExpired(superseded))
+        let (third, biometric) = try replacement(f, selection: selection, epoch: 52, transportKey: transport.publicKey)
+        let committed = try stage(f, third)
+        XCTAssertEqual(try recover(f, query: lookupQuery(superseded.transcript), key: transport), refusal)
+        _ = try commit(f, committed, key: biometric)
+        let committedQuery = try lookupQuery(committed.transcript)
+        let active = DeliveryRecipient(phoneID: committedQuery.scope.phoneID, enrollmentEpoch: committedQuery.scope.enrollmentEpoch)
+        let activeSelection = try XCTUnwrap(f.access.pairedPhones().selection(for: active))
+        _ = try f.access.revokePhone(activeSelection, authorize: {})
+        XCTAssertEqual(try recover(f, query: committedQuery, key: transport), refusal)
+    }
+
+    func testRecoveryOnAnOlderJournalUsesTheSameRefusalForMissingEvidence() throws {
+        let f = try Fixture(), transport = P256.Signing.PrivateKey()
+        let scope = try ChannelScope(macID: f.mac, accountID: f.account,
+            phoneID: Data(repeating: 15, count: 16), enrollmentEpoch: Data(repeating: 16, count: 16))
+        let query = try PairingRecoveryQuery(setupID: Data(repeating: 13, count: 16),
+            transcriptDigest: Data(repeating: 14, count: 32), scope: scope)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 13)
+        let before = try files(f)
+        XCTAssertEqual(try recover(f, query: query, key: transport), try PairingRecoveryFrame.refused.encode())
+        XCTAssertEqual(try files(f), before)
+    }
+
+    func testRecoveryDropsValidProofWhenTheJournalCannotBeVerified() async throws {
+        let f = try Fixture(configureTransport: true), transport = P256.Signing.PrivateKey()
+        let (proposal, _) = try proposal(f, transportKey: transport.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        f.environment.time.value = try XCTUnwrap(retained(f, attempt)).deadline
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        let root = try RecoveryRoot(f)
+        defer { root.registry.close() }
+        let link = try root.open(onClose: {})
+        try await link.start()
+        let exporter = Data(repeating: 81, count: 32)
+        let challenge = try await link.beginPairingLookup(query, exporter: exporter,
+            deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000)
+        let input = try query.signingInput(exporter: exporter, challenge: challenge)
+        let proof = try transport.signature(for: input).rawRepresentation
+        try sql(f, "DROP TABLE main.pairing_recovery_stages_v1")
+        do {
+            _ = try await link.finishPairingLookup(proof)
+            XCTFail("Unverified storage returned a result")
+        } catch {}
+        await link.close()
+    }
+
+    func testRecoveryDropsTheSignedResultWhenItsReleaseLeaseBecomesInvalid() async throws {
+        let f = try Fixture(configureTransport: true), transport = P256.Signing.PrivateKey()
+        let (proposal, _) = try proposal(f, transportKey: transport.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        f.environment.time.value = try XCTUnwrap(retained(f, attempt)).deadline
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        let activity = try ReleaseActivityFixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let lockPath = activity.directory.appendingPathComponent(ReleaseActivityBarrier.fileName).path
+        let root = try RecoveryRoot(f, signing: { input in
+            let signature = try f.authority.signature(for: input).rawRepresentation
+            guard chmod(lockPath, 0o644) == 0 else { throw Fault.injected }
+            return signature
+        })
+        defer { root.registry.close() }
+        let link = try root.open(onClose: {})
+        try await link.start()
+        let exporter = Data(repeating: 81, count: 32)
+        let challenge = try await link.beginPairingLookup(query, exporter: exporter,
+            deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000)
+        let input = try query.signingInput(exporter: exporter, challenge: challenge)
+        let proof = try transport.signature(for: input).rawRepresentation
+        do {
+            _ = try await link.finishPairingLookup(proof)
+            XCTFail("Proof returned after lease loss")
+        } catch {}
+        XCTAssertNotEqual(try FileManager.default.attributesOfItem(atPath: lockPath)[.posixPermissions] as? Int, 0o600)
+        await link.close()
+    }
+
+    func testRecoveryWithholdsProofAfterTheTransportCallerIsRetired() throws {
+        let f = try Fixture(), transport = P256.Signing.PrivateKey()
+        let (proposal, _) = try proposal(f, transportKey: transport.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        f.environment.time.value = try XCTUnwrap(retained(f, attempt)).deadline
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        let exporter = Data(repeating: 81, count: 32)
+        let endpoint = try lookupEndpoint(f)
+        let request = try PairingRecoveryIPC.encodeBegin(query, exporter: exporter,
+            deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000)
+        guard case let .challenge(nonce) = try PairingRecoveryFrame.decode(lookupBytes(endpoint, request)) else {
+            return XCTFail("Expected a challenge")
+        }
+        let input = try query.signingInput(exporter: exporter, challenge: nonce)
+        let proof = try PairingRecoveryFrame.proof(transport.signature(for: input).rawRepresentation).encode()
+        f.environment.peerDenied.value = true
+        endpoint.pairingLookup(proof) { XCTAssertNil($0) }
+    }
+
+    private func identity(_ key: P256.Signing.PrivateKey) throws -> SecIdentity {
+        let attributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits as String: 256]
+        let native = try XCTUnwrap(SecKeyCreateWithData(key.x963Representation as CFData, attributes as CFDictionary, nil))
+        let now = Date()
+        let leaf = try TransportTLSCertificate.issue(key: native, notValidBefore: now.addingTimeInterval(-60),
+            notValidAfter: now.addingTimeInterval(600))
+        let certificate = try XCTUnwrap(SecCertificateCreateWithData(nil, leaf as CFData))
+        return try XCTUnwrap(SecIdentityCreate(nil, certificate, native))
+    }
+
+    private func waitForPort(_ value: Box<UInt16?>) async throws -> UInt16 {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while value.value == nil {
+            guard ContinuousClock.now < deadline else { throw Fault.injected }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return try XCTUnwrap(value.value)
+    }
+
+    private func connectLookup(port: UInt16, purpose: String, serverKey: Data, identity: SecIdentity)
+        throws -> (NetworkByteChannel, NWConnection) {
+        let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
+        sec_protocol_options_set_local_identity(options, try XCTUnwrap(sec_identity_create(identity)))
+        sec_protocol_options_set_min_tls_protocol_version(options, .TLSv13)
+        sec_protocol_options_set_max_tls_protocol_version(options, .TLSv13)
+        sec_protocol_options_set_tls_resumption_enabled(options, false)
+        sec_protocol_options_add_tls_application_protocol(options, purpose)
+        sec_protocol_options_set_verify_block(options, { metadata, _, complete in
+            complete(PairingSetupListener.candidatePoint(metadata: metadata) == serverKey)
+        }, DispatchQueue(label: "dev.remozio.tests.recovery-tls"))
+        let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        let connection = NWConnection(host: .ipv4(.loopback), port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)), using: params)
+        return (NetworkByteChannel(connection: connection) { _ in true }, connection)
+    }
+
+    private func sendNativeFrame(_ bytes: Data, to channel: NetworkByteChannel) async throws {
+        let size = UInt32(bytes.count).bigEndian
+        try await channel.send(withUnsafeBytes(of: size) { Data($0) } + bytes)
+    }
+
+    private func sendRecovery(_ frame: PairingRecoveryFrame, to channel: NetworkByteChannel) async throws {
+        try await sendNativeFrame(frame.encode(), to: channel)
+    }
+
+    private func readNativeFrame(from channel: NetworkByteChannel, maximum: Int) async throws -> Data {
+        var bytes = Data()
+        while bytes.count < 4 {
+            guard let chunk = try await channel.receive() else { throw Fault.injected }
+            bytes.append(chunk)
+        }
+        let size = bytes.prefix(4).reduce(0) { ($0 << 8) | Int($1) }
+        guard (1...maximum).contains(size) else { throw Fault.injected }
+        while bytes.count < size + 4 {
+            guard let chunk = try await channel.receive() else { throw Fault.injected }
+            bytes.append(chunk)
+        }
+        guard bytes.count == size + 4 else { throw Fault.injected }
+        return Data(bytes.dropFirst(4))
+    }
+
+    private func readRecovery(from channel: NetworkByteChannel) async throws -> PairingRecoveryFrame {
+        try await PairingRecoveryFrame.decode(readNativeFrame(from: channel, maximum: PairingRecoveryFrame.maximumBytes))
+    }
+
+    private func approvalOffer(scope: ChannelScope) throws -> ChannelOffer {
+        try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 88, count: 32), envelopeVersions: [1],
+            requests: [.init(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [])
+    }
+
+    private func lookupNative(port: UInt16, fixture: Fixture, transcript: PairingTranscript,
+                                     phone: P256.Signing.PrivateKey, phoneIdentity: SecIdentity) async throws -> PairingRecoveryFrame {
+        let (channel, connection) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+            serverKey: fixture.transport.publicKey.x963Representation, identity: phoneIdentity)
+        defer { channel.abort() }
+        try await channel.start(timeoutMilliseconds: 5_000)
+        let metadata = try XCTUnwrap(PairingRecoveryTLS.metadata(connection))
+        let exporter = try PairingRecoveryTLS.exporter(metadata)
+        let query = try lookupQuery(transcript)
+        try await sendRecovery(.lookup(query), to: channel)
+        guard case let .challenge(challenge) = try await readRecovery(from: channel) else {
+            throw Fault.injected
+        }
+        let proof = try phone.signature(for: query.signingInput(exporter: exporter, challenge: challenge)).rawRepresentation
+        try await sendRecovery(.proof(proof), to: channel)
+        let response = try await readRecovery(from: channel)
+        let tail = try? await channel.receive()
+        XCTAssertNil(tail)
+        await channel.close()
+        return response
+    }
+
+    private func checkNativeRecovery(port: UInt16, fixture: Fixture, transcript: PairingTranscript,
+                                     phone: P256.Signing.PrivateKey, phoneIdentity: SecIdentity) async throws {
+        let response = try await lookupNative(port: port, fixture: fixture, transcript: transcript,
+            phone: phone, phoneIdentity: phoneIdentity)
+        guard case let .expired(receipt) = response else { return XCTFail("Expected signed expiry") }
+        XCTAssertEqual(receipt.reason, .deadlineElapsed)
+        XCTAssertTrue(try receipt.verify(transcript: transcript))
+    }
+
+    /// The test client bridges raw TLS bytes into the production localhost WebSocket carrier.
+    private final class ClientRelay: @unchecked Sendable {
+        let webSocketConnections = Mutex(0)
+        let port = Box<UInt16?>(nil)
+        private let listener: NWListener
+        private let operations = OwnedTaskHandoffRegistry()
+        private let state = NSLock()
+        private var closed = false
+        private let target: NWEndpoint
+
+        init(target: UInt16) throws {
+            let url = try XCTUnwrap(URL(string: "ws://127.0.0.1:\(target)/approval"))
+            self.target = .url(url)
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+            listener = try NWListener(using: parameters)
+            listener.stateUpdateHandler = { [weak self] event in
+                if case .ready = event { self?.port.value = self?.listener.port?.rawValue }
+            }
+            listener.newConnectionHandler = { [weak self] tcp in
+                guard let self else { tcp.cancel(); return }
+                self.accept(tcp)
+            }
+            listener.start(queue: DispatchQueue(label: "dev.remozio.tests.recovery-client-relay"))
+        }
+
+        private func accept(_ tcp: NWConnection) {
+            state.withLock {
+                guard !closed else { tcp.cancel(); return }
+                let socketOptions = NWProtocolWebSocket.Options()
+                socketOptions.skipHandshake = false
+                socketOptions.setSubprotocols([ApprovalWebSocketRelay.subprotocol])
+                let parameters = NWParameters.tcp
+                parameters.defaultProtocolStack.applicationProtocols.insert(socketOptions, at: 0)
+                let socket = NWConnection(to: target, using: parameters)
+                let local = NetworkByteChannel(connection: tcp) { _ in true }
+                let relay = NetworkByteChannel(driver: WebSocketByteConnection(socket))
+                let work = operations.reserve()
+                work.install(Task { [self] in
+                    do {
+                        try await local.start(timeoutMilliseconds: 5_000)
+                        try await relay.start(timeoutMilliseconds: 5_000)
+                        webSocketConnections.withLock { $0 += 1 }
+                        try await ApprovalWebSocketRelay.forward(local, relay)
+                    } catch { }
+                    await local.close()
+                    await relay.close()
+                })
+            }
+        }
+
+        func close() {
+            state.withLock { closed = true }
+            listener.cancel()
+            operations.cancelAll()
+        }
+
+        func closeAndWait() async {
+            close()
+            await operations.waitAll()
+        }
+    }
+
+    /// Uses the production endpoint, peer-policy lease, provider, and connection registry.
+    /// The fixture driver carries Swift calls in-process so the suite can run as an ordinary user.
+    private final class RecoveryRoot: Sendable {
+        private final class Driver: AuthorityXPCDriver, OwnedAuthorityConnection, Sendable {
+            let endpoint: AuthorityXPCEndpoint
+            private let invalidation = Mutex<(@Sendable () -> Void)?>(nil)
+            private let preserveReservation = Mutex(false)
+            private let observeRouting: @Sendable (Driver) -> Void
+
+            init(endpoint: AuthorityXPCEndpoint, observeRouting: @escaping @Sendable (Driver) -> Void) {
+                self.endpoint = endpoint
+                self.observeRouting = observeRouting
+            }
+            func activate() {}
+            func start(invalidated: @escaping @Sendable () -> Void) {
+                invalidation.withLock { $0 = invalidated }
+            }
+            func interruptKeepingReservation() {
+                preserveReservation.withLock { $0 = true }
+                let callback = invalidation.withLock { current in
+                    let callback = current
+                    current = nil
+                    return callback
+                }
+                callback?()
+            }
+            func routingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+                endpoint.phoneRoutingVersion { version in reply(.routingVersion(version)) }
+                observeRouting(self)
+            }
+            func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+                endpoint.hello { reply(.hello($0)) }
+            }
+            func releasePreservedReservation() {
+                preserveReservation.withLock { $0 = false }
+                close()
+            }
+            func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+                endpoint.pairingLookupVersion { reply(.pairingLookupVersion($0, $1)) }
+            }
+            func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+                endpoint.pairingLookup(request) { reply($0.map(AuthorityXPCReply.pairingLookup) ?? .failed) }
+            }
+            func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+                endpoint.trustSnapshot { reply($0.map(AuthorityXPCReply.snapshot) ?? .failed) }
+            }
+            func validate(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+                endpoint.validatePeer(binding) { reply(.validation($0)) }
+            }
+            func close() { if !preserveReservation.withLock({ $0 }) { endpoint.close() } }
+        }
+
+        let registry: AuthorityConnectionRegistry
+        let connections = Mutex(0)
+        let access: AuthorityTransportAccess
+        private let journal: AuthorityJournal
+        private let fixture: Fixture
+        private let budget: AuthorityXPCWorkBudget
+        private let handler: AuthorityPairingLookupHandler?
+        private let pairingLookupBudget: AuthorityXPCWorkBudget?
+        private let validity: @Sendable () throws -> Void
+        private let routingSupported: Bool
+        private let routing = Mutex<Driver?>(nil)
+
+        init(_ f: Fixture, supported: Bool = true, routingSupported: Bool = false, maximumConnections: Int = 8,
+             validity: @escaping @Sendable () throws -> Void = {},
+             signing: (@Sendable (Data) throws -> Data)? = nil) throws {
+            fixture = f; journal = f.journal; self.validity = validity; self.routingSupported = routingSupported
+            registry = try .init(maximum: maximumConnections, timeoutMilliseconds: 5_000)
+            budget = try .init(maximum: 8)
+            let entry = try Fixture.transportEntry()
+            let configuration = try AuthorityServiceConfiguration(macID: f.mac, accountID: f.account,
+                journalDirectory: f.root.appendingPathComponent("store").path,
+                serviceName: "dev.remozio.authority.test", teamID: entry.teamID,
+                transportIdentifier: entry.identifier, transportHashes: [entry.codeDirectoryHash],
+                transportUID: getuid(), maximumPayloadBytes: 16_384, maximumConnections: maximumConnections)
+            access = try AuthorityTransportAccess(journal: journal, peerPolicy: configuration.transportPolicy,
+                macID: f.mac, accountID: f.account, maximumPayloadBytes: configuration.maximumPayloadBytes,
+                minimumEnvelopeVersion: 1, auditVersions: [])
+            let sign: @Sendable (Data) throws -> Data = signing ?? { try f.authority.signature(for: $0).rawRepresentation }
+            let providers = try AuthorityRequestProviders(configuration: configuration,
+                publicKey: f.authority.publicKey.x963Representation, signing: sign,
+                routing: { throw Fault.injected }, receiptValidation: { _ in try validity() })
+            let quota = AuthorityTransportConnectionCapacity.recoveryQuota(maximumConnections)
+            if supported, quota > 0 {
+                pairingLookupBudget = try .init(maximum: quota)
+                handler = access.pairingLookupHandler(providers.pairingLookupProvider(clock: f.environment.now))
+            } else {
+                pairingLookupBudget = nil
+                handler = nil
+            }
+            try registry.start()
+        }
+
+        func open(onClose: @escaping @Sendable () -> Void) throws -> AuthorityXPCChannel {
+            connections.withLock { $0 += 1 }
+            let registry = registry, access = access, validity = validity
+            guard let id = registry.reserve() else { throw AuthorityXPCEndpointError.unavailable }
+            let route: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)?
+            if routingSupported { route = { _, _ in throw Fault.injected } } else { route = nil }
+            let endpoint = AuthorityXPCEndpoint(macID: fixture.mac, accountID: fixture.account, budget: budget,
+                activityJournal: journal, verify: { try validity() }, verifyHandshakePolicy: { try access.verifyCurrent() },
+                invalidate: { [weak registry] in registry?.remove(id) },
+                onHandshake: { [weak registry] in registry?.handshake(id) },
+                snapshot: { try access.snapshot() }, validate: { try access.validate($0) }, pairingLookup: handler, pairingLookupBudget: pairingLookupBudget, phoneRouting: route)
+            let driver = Driver(endpoint: endpoint) { [weak self] observed in
+                self?.routing.withLock { $0 = observed }
+            }
+            guard registry.install(driver, id: id) else { throw AuthorityXPCEndpointError.unavailable }
+            return AuthorityXPCChannel(driver: driver, timeoutMilliseconds: 2_000, onClose: onClose)
+        }
+
+        func retireRoutingLinkKeepingReservation() throws -> @Sendable () -> Void {
+            let retired = routing.withLock { current in
+                let old = current
+                current = nil
+                return old
+            }
+            let driver = try XCTUnwrap(retired)
+            driver.interruptKeepingReservation()
+            return { driver.releasePreservedReservation() }
+        }
+    }
+
+    private func recoveryService(_ f: Fixture, root: RecoveryRoot, timeout: UInt64 = 5_000, feed existing: AuthorityTrustFeed? = nil)
+        throws -> DirectApprovalTransportService {
+        let feed = existing ?? AuthorityTrustFeed(macID: f.mac, accountID: f.account, factory: { try root.open(onClose: $0) })
+        let host = try DirectApprovalTransportHost(macID: f.mac, accountID: f.account, identity: identity(f.transport),
+            binding: .loopback, timeoutMilliseconds: timeout, validatePeer: { try await feed.validatePeer($0, revision: $1) },
+            handler: { _, _ in XCTFail("Unenrolled candidate entered the approval handler") })
+        return DirectApprovalTransportService(feed: feed, host: host, useDefaultDelivery: true)
+    }
+
+    private func waitForService(_ service: DirectApprovalTransportService) async throws -> UInt16 {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            if case let .ready(port) = await service.state { return port }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw Fault.injected
+    }
+
+    func testNativeRecoveryUsesTheSameListenerDirectlyAndThroughTheWebSocketRelay() async throws {
+        let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+        let (proposal, _) = try proposal(f, transportKey: phone.publicKey)
+        let setup = try endpoint(f)
+        let transcript = try PairingTranscript.decode(XCTUnwrap(stageBytes(setup, proposal.encode())))
+        setup.close()
+        let stage = try XCTUnwrap(f.journal.read { try $0.recoveryStage(setupID: transcript.setupID) })
+        f.environment.time.value = stage.deadline
+        try f.journal.withRequests { owner in _ = try owner.expirePending(now: f.environment.now(), receiptTimeMs: nil) }
+        let before = try files(f)
+        let root = try RecoveryRoot(f)
+        defer { root.registry.close() }
+        XCTAssertTrue(try root.access.snapshot().peers.isEmpty)
+        let service = try recoveryService(f, root: root)
+        try await service.start()
+        let direct = try await waitForService(service)
+        let phoneIdentity = try identity(phone)
+        try await checkNativeRecovery(port: direct, fixture: f, transcript: transcript, phone: phone, phoneIdentity: phoneIdentity)
+        let (approval, _) = try connectLookup(port: direct, purpose: EnrolledChannelPurpose.approvals.applicationProtocol,
+            serverKey: f.transport.publicKey.x963Representation, identity: phoneIdentity)
+        defer { approval.abort() }
+        let approvalData: Data?
+        do {
+            try await approval.start(timeoutMilliseconds: 2_000)
+            approvalData = try await approval.receive()
+        } catch { approvalData = nil }
+        XCTAssertNil(approvalData)
+        await approval.close()
+
+        let relayPort = Box<UInt16?>(nil)
+        let relay = try ApprovalWebSocketRelay(listenPort: 0, targetPort: direct, event: { event in
+            if case let .ready(port) = event { relayPort.value = port }
+        })
+        try relay.start()
+        defer { relay.close() }
+        let carrierPort = try await waitForPort(relayPort)
+        let client = try ClientRelay(target: carrierPort)
+        defer { client.close() }
+        let tunnel = try await waitForPort(client.port)
+        let rootConnectionsBeforeRelay = root.connections.withLock { $0 }
+        try await checkNativeRecovery(port: tunnel, fixture: f, transcript: transcript, phone: phone, phoneIdentity: phoneIdentity)
+        XCTAssertEqual(client.webSocketConnections.withLock { $0 }, 1)
+        XCTAssertEqual(root.connections.withLock { $0 }, rootConnectionsBeforeRelay + 1)
+        await client.closeAndWait()
+        await relay.closeAndWait()
+        await service.closeAndWait()
+        XCTAssertEqual(try files(f), before)
+    }
+
+    private func availableRootSlots(_ root: RecoveryRoot) -> Int {
+        var available: [UUID] = []
+        while let id = root.registry.reserve() { available.append(id) }
+        for id in available { root.registry.remove(id) }
+        return available.count
+    }
+
+    private func waitForRootSlots(_ count: Int, in root: RecoveryRoot) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while availableRootSlots(root) != count {
+            guard ContinuousClock.now < deadline else { throw Fault.injected }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func testNativeRecoveryRejectsMalformedAndSecondLookupWithoutAnotherRootLink() async throws {
+        let f = try Fixture(configureTransport: true), client = P256.Signing.PrivateKey()
+        let fRoot = try RecoveryRoot(f)
+        defer { fRoot.registry.close() }
+        let service = try recoveryService(f, root: fRoot)
+        try await service.start()
+        let port = try await waitForService(service), phoneIdentity = try identity(client)
+        let before = fRoot.connections.withLock { $0 }
+        let scope = try ChannelScope(macID: f.mac, accountID: f.account,
+            phoneID: Data(repeating: 11, count: 16), enrollmentEpoch: Data(repeating: 12, count: 16))
+        let query = try PairingRecoveryQuery(setupID: Data(repeating: 13, count: 16),
+            transcriptDigest: Data(repeating: 14, count: 32), scope: scope)
+        for malformed in [true, false] {
+            let (channel, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+                serverKey: f.transport.publicKey.x963Representation, identity: phoneIdentity)
+            defer { channel.abort() }
+            try await channel.start(timeoutMilliseconds: 5_000)
+            if malformed {
+                try await channel.send(Data([0, 0, 0, 1, 255]))
+            } else {
+                try await sendRecovery(.lookup(query), to: channel)
+                guard case .challenge = try await readRecovery(from: channel) else { throw Fault.injected }
+                try await sendRecovery(.lookup(query), to: channel)
+            }
+            let data = try? await channel.receive()
+            XCTAssertNil(data)
+            XCTAssertEqual(fRoot.connections.withLock { $0 }, before + (malformed ? 0 : 1))
+            await channel.close()
+        }
+        await service.closeAndWait()
+    }
+
+    func testNativeRecoveryIdleDeadlineAndCancellationReleaseBothBudgets() async throws {
+        let f = try Fixture(configureTransport: true), client = P256.Signing.PrivateKey()
+        let root = try RecoveryRoot(f, maximumConnections: 9)
+        defer { root.registry.close() }
+        let service = try recoveryService(f, root: root, timeout: 1_500)
+        try await service.start()
+        let port = try await waitForService(service), phoneIdentity = try identity(client)
+        let before = root.connections.withLock { $0 }
+        let capacity = availableRootSlots(root)
+        let scope = try ChannelScope(macID: f.mac, accountID: f.account,
+            phoneID: Data(repeating: 21, count: 16), enrollmentEpoch: Data(repeating: 22, count: 16))
+        let query = try PairingRecoveryQuery(setupID: Data(repeating: 23, count: 16),
+            transcriptDigest: Data(repeating: 24, count: 32), scope: scope)
+        func connect() throws -> NetworkByteChannel {
+            try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+                serverKey: f.transport.publicKey.x963Representation, identity: phoneIdentity).0
+        }
+        let idle = try connect()
+        defer { idle.abort() }
+        try await idle.start(timeoutMilliseconds: 2_000)
+        let eof = try? await idle.receive()
+        XCTAssertNil(eof)
+        XCTAssertEqual(root.connections.withLock { $0 }, before)
+
+        let cancelled = try connect()
+        defer { cancelled.abort() }
+        try await cancelled.start(timeoutMilliseconds: 2_000)
+        try await sendRecovery(.lookup(query), to: cancelled)
+        guard case .challenge = try await readRecovery(from: cancelled) else { throw Fault.injected }
+        cancelled.abort()
+        await cancelled.close()
+        try await waitForRootSlots(capacity, in: root)
+        XCTAssertEqual(root.connections.withLock { $0 }, before + 1)
+        let first = try connect(), second = try connect()
+        for fresh in [first, second] {
+            try await fresh.start(timeoutMilliseconds: 2_000)
+            try await sendRecovery(.lookup(query), to: fresh)
+            guard case .challenge = try await readRecovery(from: fresh) else { throw Fault.injected }
+        }
+        await first.close()
+        await second.close()
+        try await waitForRootSlots(capacity, in: root)
+        await service.closeAndWait()
+    }
+
+    func testNativeRecoverySharesRootCapacityWithoutEvictingPersistentLinks() async throws {
+        let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+        let root = try RecoveryRoot(f)
+        defer { root.registry.close() }
+        let service = try recoveryService(f, root: root)
+        try await service.start()
+        let port = try await waitForService(service), phoneIdentity = try identity(phone)
+        var persistent: [AuthorityXPCChannel] = []
+        while availableRootSlots(root) > 0 {
+            let link = try root.open(onClose: {})
+            try await link.start()
+            persistent.append(link)
+        }
+        XCTAssertFalse(persistent.isEmpty)
+        let scope = try ChannelScope(macID: f.mac, accountID: f.account,
+            phoneID: Data(repeating: 31, count: 16), enrollmentEpoch: Data(repeating: 32, count: 16))
+        let query = try PairingRecoveryQuery(setupID: Data(repeating: 33, count: 16),
+            transcriptDigest: Data(repeating: 34, count: 32), scope: scope)
+        for hasFreeSlot in [false, true] {
+            if hasFreeSlot {
+                let released = persistent.removeLast()
+                await released.close()
+            }
+            let (network, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+                serverKey: f.transport.publicKey.x963Representation, identity: phoneIdentity)
+            defer { network.abort() }
+            try await network.start(timeoutMilliseconds: 5_000)
+            try await sendRecovery(.lookup(query), to: network)
+            if hasFreeSlot {
+                guard case .challenge = try await readRecovery(from: network) else { throw Fault.injected }
+                try await sendRecovery(.proof(Data(repeating: 1, count: 64)), to: network)
+                guard case .refused = try await readRecovery(from: network) else { throw Fault.injected }
+            } else {
+                let reply = try? await network.receive()
+                XCTAssertNil(reply)
+            }
+            await network.close()
+            for link in persistent {
+                let trust = try await link.fetchTrust(expectedMacID: f.mac, expectedAccountID: f.account)
+                XCTAssertTrue(trust.peers.isEmpty)
+            }
+        }
+        for link in persistent { await link.close() }
+        await service.closeAndWait()
+    }
+
+    func testNativeRecoveryHasItsOwnAdmissionLimitInsideTheListener() async throws {
+        let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+        let root = try RecoveryRoot(f, maximumConnections: 9)
+        defer { root.registry.close() }
+        let service = try recoveryService(f, root: root)
+        try await service.start()
+        let port = try await waitForService(service), phoneIdentity = try identity(phone)
+        let scope = try ChannelScope(macID: f.mac, accountID: f.account,
+            phoneID: Data(repeating: 41, count: 16), enrollmentEpoch: Data(repeating: 42, count: 16))
+        let query = try PairingRecoveryQuery(setupID: Data(repeating: 43, count: 16),
+            transcriptDigest: Data(repeating: 44, count: 32), scope: scope)
+        var open: [NetworkByteChannel] = []
+        for index in 0..<3 {
+            let (network, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+                serverKey: f.transport.publicKey.x963Representation, identity: phoneIdentity)
+            open.append(network)
+            if index < 2 {
+                try await network.start(timeoutMilliseconds: 3_000)
+                try await sendRecovery(.lookup(query), to: network)
+                guard case .challenge = try await readRecovery(from: network) else { throw Fault.injected }
+            } else {
+                let response: PairingRecoveryFrame?
+                do {
+                    try await network.start(timeoutMilliseconds: 3_000)
+                    try await sendRecovery(.lookup(query), to: network)
+                    response = try await readRecovery(from: network)
+                } catch { response = nil }
+                XCTAssertNil(response)
+            }
+        }
+        for channel in open { await channel.close() }
+        await service.closeAndWait()
+    }
+
+    func testNativeRecoveryAcceptsAnEnrolledCandidateOnlyThroughItsDedicatedPurpose() async throws {
+        let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+        let (proposal, biometric) = try proposal(f, transportKey: phone.publicKey)
+        let attempt = try stage(f, proposal)
+        _ = try commit(f, attempt, key: biometric)
+        let root = try RecoveryRoot(f)
+        defer { root.registry.close() }
+        XCTAssertEqual(try root.access.snapshot().peers.count, 1)
+        let service = try recoveryService(f, root: root)
+        try await service.start()
+        let port = try await waitForService(service)
+        let response = try await lookupNative(port: port, fixture: f, transcript: attempt.transcript,
+            phone: phone, phoneIdentity: identity(phone))
+        guard case let .committed(signature) = response else { throw Fault.injected }
+        XCTAssertTrue(try attempt.transcript.verify(signature: signature, publicKey: f.authority.publicKey.x963Representation,
+            purpose: .macCommit))
+        let before = root.connections.withLock { $0 }
+        let (wrong, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+            serverKey: f.transport.publicKey.x963Representation, identity: identity(phone))
+        defer { wrong.abort() }
+        try await wrong.start(timeoutMilliseconds: 3_000)
+        let negotiation = try ChannelNegotiation(local: approvalOffer(scope: attempt.transcript.phone.scope), trustedMinimum: 1)
+        defer { negotiation.close() }
+        try await sendNativeFrame(negotiation.offer(), to: wrong)
+        let reply = try? await wrong.receive()
+        XCTAssertNil(reply)
+        XCTAssertEqual(root.connections.withLock { $0 }, before)
+        await service.closeAndWait()
+    }
+
+    func testNativeRecoveryUnavailableOnLegacyTransportOrRoot() async throws {
+        let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+        for (supported, limit) in [(false, 8), (true, 7)] {
+            let root = try RecoveryRoot(f, supported: supported, maximumConnections: limit)
+            defer { root.registry.close() }
+            let service = try recoveryService(f, root: root)
+            try await service.start()
+            let state = await service.state
+            XCTAssertEqual(state, .noEligiblePhones)
+            let ordinary = try root.open(onClose: {})
+            try await ordinary.start()
+            let trust = try await ordinary.fetchTrust(expectedMacID: f.mac, expectedAccountID: f.account)
+            XCTAssertTrue(trust.peers.isEmpty)
+            await ordinary.close()
+            await service.closeAndWait()
+        }
+
+        let enrolled = try DirectApprovalPeer(scope: .init(macID: f.mac, accountID: f.account,
+            phoneID: Data(repeating: 53, count: 16), enrollmentEpoch: Data(repeating: 54, count: 16)),
+            transportPublicKey: phone.publicKey.derRepresentation, requests: [], auditVersions: [], maximumPayloadBytes: 4096)
+        let bound = Box<UInt16?>(nil)
+        let legacy = try DirectApprovalListener(identity: identity(f.transport), peers: [enrolled], binding: .loopback,
+            timeoutMilliseconds: 1_000, event: { event in if case let .ready(port) = event { bound.value = port } },
+            handler: { _, _ in XCTFail("Recovery advanced onto the legacy approval handler") })
+        try legacy.start()
+        defer { legacy.close() }
+        let port = try await waitForPort(bound)
+        let (network, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+            serverKey: f.transport.publicKey.x963Representation, identity: identity(phone))
+        defer { network.abort() }
+        let received: Data?
+        do { try await network.start(timeoutMilliseconds: 2_000); received = try await network.receive() }
+        catch { received = nil }
+        XCTAssertNil(received)
+        await legacy.closeAndWait()
+    }
+
+    func testRecoveryQuotaKeepsTheReplacementMarginAtEveryRootCapacity() {
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(6), 0)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(7), 0)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(8), 1)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(9), 2)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(10), 3)
+    }
+
+    func testFullDefaultRecoveryQuotaAllowsImmediateAuxiliaryReplacementAndApproval() async throws {
+        try await checkFullQuotaAllowsReplacementAndApproval(maximumConnections: 8)
+    }
+
+    func testFullTwoSlotRecoveryQuotaAllowsImmediateAuxiliaryReplacementAndApproval() async throws {
+        try await checkFullQuotaAllowsReplacementAndApproval(maximumConnections: 9)
+    }
+
+    private func checkFullQuotaAllowsReplacementAndApproval(maximumConnections: Int) async throws {
+        let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+        let (proposal, biometric) = try proposal(f, transportKey: phone.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        _ = try commit(f, attempt, key: biometric)
+        let root = try RecoveryRoot(f, routingSupported: true, maximumConnections: maximumConnections)
+        defer { root.registry.close() }
+        let feed = AuthorityTrustFeed(macID: f.mac, accountID: f.account, factory: { try root.open(onClose: $0) })
+        let service = try recoveryService(f, root: root, feed: feed)
+        try await service.start()
+        let port = try await waitForService(service)
+        let phoneIdentity = try identity(phone)
+        var persistent: [AuthorityXPCChannel] = []
+        let quota = AuthorityTransportConnectionCapacity.recoveryQuota(maximumConnections)
+        while availableRootSlots(root) > quota + 1 {
+            let link = try root.open(onClose: {})
+            try await link.start()
+            persistent.append(link)
+        }
+        let serverKey = f.transport.publicKey.x963Representation
+        var recoveryChannels: [NetworkByteChannel] = []
+        defer { for channel in recoveryChannels { channel.abort() } }
+        for _ in 0..<quota {
+            let (channel, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+                serverKey: serverKey, identity: phoneIdentity)
+            recoveryChannels.append(channel)
+            try await channel.start(timeoutMilliseconds: 3_000)
+            try await sendRecovery(.lookup(query), to: channel)
+            guard case .challenge = try await readRecovery(from: channel) else { throw Fault.injected }
+        }
+        XCTAssertEqual(availableRootSlots(root), 1)
+        let opened = root.connections.withLock { $0 }
+        let releaseOld = try root.retireRoutingLinkKeepingReservation()
+        defer { releaseOld() }
+        try await feed.requirePhoneRoutingSupport()
+        XCTAssertEqual(root.connections.withLock { $0 }, opened + 1)
+        // The replacement overlaps the retired reservation while recovery consumes its full quota.
+        XCTAssertEqual(availableRootSlots(root), 0)
+        releaseOld()
+
+        let (approved, _) = try connectLookup(port: port, purpose: EnrolledChannelPurpose.approvals.applicationProtocol,
+            serverKey: serverKey, identity: phoneIdentity)
+        defer { approved.abort() }
+        try await approved.start(timeoutMilliseconds: 3_000)
+        let session = try ChannelNegotiation(local: approvalOffer(scope: attempt.transcript.phone.scope), trustedMinimum: 1)
+        defer { session.close() }
+        try await sendNativeFrame(session.offer(), to: approved)
+        let offer = try await readNativeFrame(from: approved, maximum: 65_536)
+        try session.receiveOffer(offer)
+        try await sendNativeFrame(session.confirmation(), to: approved)
+        let confirmation = try await readNativeFrame(from: approved, maximum: 128)
+        try session.receiveConfirmation(confirmation)
+        let peer = try session.confirmed()
+        XCTAssertEqual(peer.peer.scope, attempt.transcript.phone.scope)
+        XCTAssertEqual(peer.peer.role, .mac)
+
+        for channel in recoveryChannels { await channel.close() }
+        await approved.close()
+        for link in persistent { await link.close() }
+        await service.closeAndWait()
+    }
+
+    func testNativeRecoveryExporterMatchesAcrossTLSAndChangesPerConnection() async throws {
+        let f = try Fixture(), phone = P256.Signing.PrivateKey(), port = Box<UInt16?>(nil)
+        let serverExporters = Mutex<[Data]>([])
+        // Capture the server output in process. No exporter bytes are sent as application data.
+        let listener = try DirectApprovalListener(identity: identity(f.transport), peers: [], binding: .loopback,
+            event: { event in if case let .ready(value) = event { port.value = value } },
+            handler: { _, _ in XCTFail("Recovery entered the approval handler") },
+            sharedWorkBudget: .init(maximum: 8), recoveryMacID: f.mac, sharedRecoveryBudget: .init(maximum: 2),
+            recovery: { channel, exporter, _, _ in
+                serverExporters.withLock { $0.append(exporter) }
+                _ = try await channel.receive()
+            })
+        try listener.start()
+        defer { listener.close() }
+        let address = try await waitForPort(port), phoneIdentity = try identity(phone)
+        var samples: [Data] = []
+        for index in 0..<2 {
+            let (channel, connection) = try connectLookup(port: address, purpose: PairingRecoveryFrame.applicationProtocol,
+                serverKey: f.transport.publicKey.x963Representation, identity: phoneIdentity)
+            defer { channel.abort() }
+            try await channel.start(timeoutMilliseconds: 3_000)
+            let exporter = try PairingRecoveryTLS.exporter(XCTUnwrap(PairingRecoveryTLS.metadata(connection)))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while serverExporters.withLock({ $0.count }) <= index {
+                guard ContinuousClock.now < deadline else { throw Fault.injected }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(exporter.count, 32)
+            let remote = serverExporters.withLock { $0[index] }
+            XCTAssertEqual(remote.count, 32)
+            XCTAssertTrue(exporter == remote)
+            samples.append(exporter)
+            try await channel.send(Data([1]))
+            await channel.close()
+        }
+        XCTAssertTrue(samples[0] != samples[1])
+        await listener.closeAndWait()
+    }
+
+    func testRecoveryClosesWithoutProofAfterSignerFailureOrTransportPolicyChange() async throws {
+        for changePolicy in [false, true] {
+            let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+            let (proposal, _) = try proposal(f, transportKey: phone.publicKey)
+            let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+            f.environment.time.value = try XCTUnwrap(retained(f, attempt)).deadline
+            XCTAssertTrue(try f.access.isExpired(attempt))
+            let invoked = Mutex(false)
+            let root = try RecoveryRoot(f, signing: { _ in
+                invoked.withLock { $0 = true }
+                throw Fault.injected
+            })
+            defer { root.registry.close() }
+            let link = try root.open(onClose: {})
+            try await link.start()
+            let exporter = Data(repeating: 81, count: 32)
+            let challenge = try await link.beginPairingLookup(query, exporter: exporter,
+                deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000)
+            let input = try query.signingInput(exporter: exporter, challenge: challenge)
+            let proof = try phone.signature(for: input).rawRepresentation
+            if changePolicy {
+                let current = try XCTUnwrap(f.journal.read { try $0.codePolicy() })
+                let policy = try AuthorityCodePolicy(entries: [Fixture.appEntry(), Fixture.transportEntry(active: false)])
+                _ = try f.journal.write { try $0.installCodePolicy(policy, expectedRevision: current.revision) }
+            }
+            do {
+                _ = try await link.finishPairingLookup(proof)
+                XCTFail("Recovery produced a result after invalidation")
+            } catch {}
+            XCTAssertEqual(invoked.withLock { $0 }, !changePolicy)
+            await link.close()
+        }
+    }
+
+    func testRecoveryWithholdsProofWhileTheCommitCheckpointIsUncertain() async throws {
+        let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
+        let (proposal, biometric) = try proposal(f, transportKey: phone.publicKey)
+        let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
+        let root = try RecoveryRoot(f)
+        defer { root.registry.close() }
+        let link = try root.open(onClose: {})
+        try await link.start()
+        let exporter = Data(repeating: 81, count: 32)
+        let challenge = try await link.beginPairingLookup(query, exporter: exporter,
+            deadline: DispatchTime.now().uptimeNanoseconds + 5_000_000_000)
+        let input = try query.signingInput(exporter: exporter, challenge: challenge)
+        let proof = try phone.signature(for: input).rawRepresentation
+        try sql(f, "CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT, 'fixture'); END", continuity: true)
+        XCTAssertThrowsError(try commit(f, attempt, key: biometric))
+        XCTAssertNotNil(try f.continuity.read().pending)
+        do {
+            _ = try await link.finishPairingLookup(proof)
+            XCTFail("Recovery produced proof before restart reconciled the checkpoint")
+        } catch {}
+        await link.close()
     }
 
     func testOrdinaryPairingAndStartupKeepTheExistingFormat() throws {
@@ -1705,7 +2762,8 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         for expiryWins in [false, true] {
             let contenderBlocked = DispatchSemaphore(value: 0)
             let f = try Fixture(observePairingContention: { contenderBlocked.signal() })
-            let (proposal, key) = try proposal(f), attempt = try stage(f, proposal)
+            let transport = P256.Signing.PrivateKey()
+            let (proposal, key) = try proposal(f, transportKey: transport.publicKey), attempt = try stage(f, proposal)
             let deadline = try XCTUnwrap(retained(f, attempt)).deadline
             let entered = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
             let completed = DispatchGroup()
@@ -1752,6 +2810,14 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
                 XCTAssertTrue(try XCTUnwrap(expiryResult.value).get())
                 XCTAssertThrowsError(try XCTUnwrap(commitResult.value).get())
                 XCTAssertEqual(try retained(f, attempt)?.state, .deadlineElapsed)
+                f.environment.time.value = deadline
+                let query = try lookupQuery(attempt.transcript)
+                let response = try recover(f, query: query, key: transport)
+                guard case let .expired(receipt) = try PairingRecoveryFrame.decode(response) else {
+                    return XCTFail("Expiry won but recovery returned no expiry proof")
+                }
+                XCTAssertTrue(try receipt.verify(transcript: attempt.transcript))
+                XCTAssertEqual(receipt.reason, .deadlineElapsed)
             } else {
                 XCTAssertThrowsError(try XCTUnwrap(expiryResult.value).get()) {
                     XCTAssertEqual($0 as? PairingRecoveryStageError, .noPendingStage)
