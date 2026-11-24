@@ -258,18 +258,15 @@ public actor DirectApprovalTransportService {
                                   deadline: ContinuousClock.Instant) async throws {
         guard started, !closed else { throw DirectHostError.stopped }
         let feed = feed
-        try await feed.withPairingLookup { link in
-            var exchange = PairingRecoveryNetworkExchange(channel: channel)
-            try await exchange.run(deadline: deadline, begin: { query in
+        let exchange = PairingRecoveryNetworkExchange(channel: channel, deadline: deadline)
+        try await exchange.run(lookup: { query, exchange in
+            try await feed.withPairingLookup { link in
                 let challenge = try await link.beginPairingLookup(query, exporter: exporter, deadline: uptimeDeadline)
                 try await feed.requirePairingLookupAuthority()
-                return challenge
-            }, finish: { proof in
-                let response = try await link.finishPairingLookup(proof)
-                try await feed.requirePairingLookupAuthority()
-                return response
-            })
-        }
+                let proof = try await exchange.receiveProof(challenge: challenge)
+                return try await link.finishPairingLookup(proof)
+            }
+        }, verifyReply: { try await feed.requirePairingLookupAuthority() })
     }
 
     /// Returns only the existing commit proof for this admitted phone and retained setup ID.

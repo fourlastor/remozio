@@ -33,7 +33,10 @@ public actor DirectApprovalTransportHost {
     private var handler: @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void
     private var handlerSealed = false
     private final class FeatureSupport: Sendable { let value = Mutex(false) }
-    private let pairingRecovery = Mutex<DirectApprovalListener.RecoveryHandler?>(nil)
+    private final class RecoverySupport: Sendable {
+        let handler = Mutex<DirectApprovalListener.RecoveryHandler?>(nil)
+    }
+    private let pairingRecovery = RecoverySupport()
     private let phoneRoutingSupport = FeatureSupport()
     private let phoneAuditSupport = FeatureSupport()
     private let phoneUpdateSchedulingSupport = FeatureSupport()
@@ -60,7 +63,7 @@ public actor DirectApprovalTransportHost {
         let updateSupport = phoneUpdateSchedulingSupport
         let pairingRecovery = pairingRecovery
         factory = { _, peers, event, handler in
-            let recovery = pairingRecovery.withLock { $0 }
+            let recovery = pairingRecovery.handler.withLock { $0 }
             return try DirectApprovalListener(identity: identity, peers: peers, binding: binding,
                 maximumConnections: maximumConnections, timeoutMilliseconds: timeoutMilliseconds,
                 enablePhoneRouting: routingSupport.value.withLock { $0 }, enablePhoneAudit: auditSupport.value.withLock { $0 },
@@ -83,7 +86,7 @@ public actor DirectApprovalTransportHost {
 
     func configurePairingRecovery(_ handler: @escaping DirectApprovalListener.RecoveryHandler) throws {
         guard !handlerSealed, !closed else { throw DirectHostError.stopped }
-        pairingRecovery.withLock { $0 = handler }
+        pairingRecovery.handler.withLock { $0 = handler }
     }
 
     /// Configure before listener admission. Support stays fixed for this authority incarnation.
@@ -177,7 +180,7 @@ public actor DirectApprovalTransportHost {
     }
     private func open() throws {
         guard authority?.isActive != false, let trust else { state = .authorityUnavailable; throw DirectHostError.authorityUnavailable }
-        guard !trust.peers.isEmpty || pairingRecovery.withLock({ $0 != nil }) else { state = .noEligiblePhones; return }
+        guard !trust.peers.isEmpty || pairingRecovery.handler.withLock({ $0 != nil }) else { state = .noEligiblePhones; return }
         do {
             let generation = UUID(), handler = handler
             let value = try factory(generation, trust.peers, { [weak self] event in

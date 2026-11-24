@@ -101,7 +101,7 @@ Verify all claims against the retained re-pair transcript. Verify the signature 
 
 The Mac offers the separate ALPN `remozio-pairing-recovery/1` on the existing Transport listener.
 Both direct and relay connections use TLS 1.3 with resumption, tickets, and early data disabled.
-The phone pins the Mac transport key from its retained transcript. Transport checks the candidate certificate and confines the connection to recovery.
+The phone pins the Mac transport key from its retained transcript. Transport checks the candidate certificate format and confines the connection to recovery. Root authenticates the retained candidate key through the exporter-bound proof.
 Recovery has its own admission limit within the existing listener limit.
 An older Transport or Root can leave the route unavailable. Enrolled receipt lookup keeps its version 1 binding and selectors.
 
@@ -120,7 +120,7 @@ The total message length after the prefix is at most 1,025 bytes.
 The scope order is Mac ID, account ID, phone ID, and candidate epoch.
 The proof signs the UTF-8 string `dev.remozio.pairing.recovery-lookup/1`, one zero byte, a 32-byte TLS exporter, the challenge, and the lookup body.
 Use the exporter label `EXPORTER-dev.remozio.pairing.recovery-lookup/1` with empty context.
-Root issues one challenge for each well-formed lookup. It consumes that challenge once and binds it to the handshake deadline.
+Transport opens a Root connection only after it reads a well-formed lookup. The connection counts toward Root's existing connection limit. Root issues one challenge for each well-formed lookup. It consumes that challenge once and binds it to the handshake deadline.
 Root verifies the Transport caller and its current code policy before reading the verified journal.
 It matches the exact transcript and verifies the proof under its retained candidate transport key.
 Root rechecks the record, the caller policy, and the active lease before returning a signed result.
@@ -130,3 +130,5 @@ It returns expiry proof only after maintenance or startup publishes a durable te
 A pending stage stays inconclusive after its deadline. Absence and failed proof use the same refusal.
 The listener closes after one response. The lookup changes neither journal records nor the enrollment.
 The phone keeps its preparation and keys on refusal and verifies any proof against the retained transcript.
+
+If a global failure or a failure after valid proof prevents a signed result, the connection can close without a frame. Treat that closure as inconclusive.

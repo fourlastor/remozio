@@ -2,55 +2,68 @@ import Foundation
 import RemozioProtocol
 
 /// Owns the bounded application exchange after the listener admits recovery TLS.
-struct PairingRecoveryNetworkExchange {
-    let channel: NetworkByteChannel
+actor PairingRecoveryNetworkExchange {
+    private enum State { case new, readingLookup, sendingChallenge, readingProof, replying, closed }
+    private let channel: NetworkByteChannel
+    private let deadline: ContinuousClock.Instant
     private var buffered = Data()
+    private var state = State.new
 
-    init(channel: NetworkByteChannel) {
+    init(channel: NetworkByteChannel, deadline: ContinuousClock.Instant) {
         self.channel = channel
+        self.deadline = deadline
     }
 
-    mutating func run(deadline: ContinuousClock.Instant,
-                      begin: (PairingRecoveryQuery) async throws -> Data,
-                      finish: (Data) async throws -> PairingRecoveryFrame) async throws {
-        let channel = channel
-        let timer = Task {
-            do { try await ContinuousClock().sleep(until: deadline) }
-            catch { return }
-            channel.abort()
+    func run(lookup: @escaping @Sendable (PairingRecoveryQuery, PairingRecoveryNetworkExchange) async throws -> PairingRecoveryFrame,
+             verifyReply: @escaping @Sendable () async throws -> Void = {}) async throws {
+        guard state == .new else { throw NetworkChannelError.invalidState }
+        state = .readingLookup
+        defer { state = .closed }
+        let deadline = deadline, channel = channel
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await self.exchange(lookup: lookup, verifyReply: verifyReply) }
+            group.addTask {
+                try await ContinuousClock().sleep(until: deadline)
+                channel.abort()
+                throw NetworkChannelError.timedOut
+            }
+            defer { group.cancelAll() }
+            _ = try await group.next()
         }
-        do {
-            try await exchange(deadline: deadline, begin: begin, finish: finish)
-        } catch {
-            timer.cancel()
-            await timer.value
-            throw error
-        }
-        timer.cancel()
-        await timer.value
     }
 
-    private mutating func exchange(deadline: ContinuousClock.Instant,
-                                   begin: (PairingRecoveryQuery) async throws -> Data,
-                                   finish: (Data) async throws -> PairingRecoveryFrame) async throws {
-        guard ContinuousClock.now < deadline, case let .lookup(query) = try await receive() else {
+    /// Come here only after reading a valid first frame. Idle TLS peers do not get a Root connection.
+    private func exchange(
+        lookup: @Sendable (PairingRecoveryQuery, PairingRecoveryNetworkExchange) async throws -> PairingRecoveryFrame,
+        verifyReply: @Sendable () async throws -> Void
+    ) async throws {
+        guard ContinuousClock.now < deadline, case let .lookup(query) = try await receive(), buffered.isEmpty else {
             throw PairingRecoveryFrameError.invalidFrame
         }
-        let challenge = try await begin(query)
-        try await send(.challenge(challenge), deadline: deadline)
-        guard case let .proof(proof) = try await receive(), buffered.isEmpty else {
-            throw PairingRecoveryFrameError.invalidFrame
-        }
-        let response = try await finish(proof)
+        state = .sendingChallenge
+        let response = try await lookup(query, self)
+        guard state == .replying else { throw PairingRecoveryFrameError.invalidFrame }
         switch response {
         case .committed, .expired, .refused:
-            try await send(response, deadline: deadline)
+            try await verifyReply()
+            try await send(response)
         default:
             throw PairingRecoveryFrameError.invalidFrame
         }
     }
 
-    private mutating func receive() async throws -> PairingRecoveryFrame {
+    func receiveProof(challenge: Data) async throws -> Data {
+        guard state == .sendingChallenge else { throw NetworkChannelError.invalidState }
+        state = .readingProof
+        try await send(.challenge(challenge))
+        guard case let .proof(proof) = try await receive(), buffered.isEmpty else {
+            throw PairingRecoveryFrameError.invalidFrame
+        }
+        state = .replying
+        return proof
+    }
+
+    private func receive() async throws -> PairingRecoveryFrame {
         try await fill(to: 4)
         let count = buffered.prefix(4).reduce(0) { ($0 << 8) | Int($1) }
         guard (1...PairingRecoveryFrame.maximumBytes).contains(count) else {
@@ -62,14 +75,14 @@ struct PairingRecoveryNetworkExchange {
         return try PairingRecoveryFrame.decode(body)
     }
 
-    private mutating func fill(to count: Int) async throws {
+    private func fill(to count: Int) async throws {
         while buffered.count < count {
             guard let bytes = try await channel.receive() else { throw NetworkChannelError.closed }
             buffered.append(bytes)
         }
     }
 
-    private func send(_ frame: PairingRecoveryFrame, deadline: ContinuousClock.Instant) async throws {
+    private func send(_ frame: PairingRecoveryFrame) async throws {
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else { throw NetworkChannelError.timedOut }
         let payload = try frame.encode()

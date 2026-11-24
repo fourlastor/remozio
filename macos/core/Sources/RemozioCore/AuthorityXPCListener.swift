@@ -184,12 +184,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         if let pairingReceipt {
             receiptHandler = { binding, setupID in try access.pairingReceipt(binding: binding, setupID: setupID, handler: pairingReceipt) }
         } else { receiptHandler = nil }
-        let pairingLookupHandler: AuthorityPairingLookupHandler?
-        if let pairingLookup {
-            pairingLookupHandler = { query, input, proof in
-                try access.pairingLookup(query, signingInput: input, proof: proof, handler: pairingLookup)
-            }
-        } else { pairingLookupHandler = nil }
+        let pairingLookupHandler = pairingLookup.map { access.pairingLookupHandler($0) }
         let registrationHandler: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)?
         if let phonePushRegistration {
             registrationHandler = { binding, frame in try access.phonePushRegistration(binding: binding, frame: frame, handler: phonePushRegistration) }
