@@ -5,6 +5,17 @@ import RemozioProtocol
 import XCTest
 @testable import RemozioCore
 
+extension CommandFilesystemCapture {
+    /// Fixture captures use the ordinary test process credentials.
+    convenience init(executablePath: Data, directoryPath: Data,
+                     deadline: ContinuousClock.Instant = ContinuousClock.now + CommandFilesystemCapture.phaseTimeout,
+                     checkProbe: () throws -> Void = {}, checkCancellation: () throws -> Void = {}) throws {
+        try self.init(executablePath: executablePath, directoryPath: directoryPath, deadline: deadline,
+            caller: CommandFilesystemCaller(userID: geteuid(), groupID: getegid()),
+            checkProbe: checkProbe, checkCancellation: checkCancellation)
+    }
+}
+
 final class CommandFilesystemCaptureTests: XCTestCase {
     private enum Cancelled: Error { case test }
     private final class Fixture {
@@ -90,6 +101,25 @@ final class CommandFilesystemCaptureTests: XCTestCase {
                 if checks == beforeOpen { XCTAssertEqual(rename(replacement, executable), 0) }
             })) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
         XCTAssertEqual(checks, beforeOpen)
+        try CommandFilesystemCaller.requireProcessIdentity()
+    }
+
+    func testCredentialResetSentinelsMatchDarwin() {
+        XCTAssertEqual(CommandFilesystemCaller.kauthUIDNone, 0xffff_ff9b)
+        XCTAssertEqual(CommandFilesystemCaller.kauthGIDNone, 0xffff_ff9b)
+    }
+
+    func testOrdinaryWorkerRejectsAnotherUIDAndKeepsProcessIdentity() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Normal-user credential check") }
+        let uid = geteuid(), gid = getegid()
+        let other = CommandFilesystemCaller(userID: uid == 1 ? 2 : 1, groupID: gid)
+        var entered = false
+        XCTAssertThrowsError(try other.withIdentity { entered = true }) {
+            XCTAssertEqual($0 as? CommandFilesystemCaptureError, .credentialUnavailable)
+        }
+        XCTAssertFalse(entered)
+        XCTAssertEqual(geteuid(), uid)
+        XCTAssertEqual(getegid(), gid)
         try CommandFilesystemCaller.requireProcessIdentity()
     }
 

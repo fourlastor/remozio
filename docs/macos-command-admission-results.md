@@ -89,7 +89,11 @@ The journal serializes the complete attempt. It checks the actual Root identity,
 
 The host resolver supplies current target credentials, environment, and capture limits. Incoming claims cannot choose an elevation policy. Throwing from the resolver, draft, or cancellation callback always remains uncertain. A callback cannot mimic a filesystem error to authorize a retry.
 
-Capture failure closes the original caller, input, and filesystem. The detached reply remains available to the journal owner. Only request-related path or file-kind failures permit a permanent refusal after a fresh absence proof. Resource, I/O, permission, unknown system errors, and changed captures remain uncertain. Storage or identity validation failure remains uncertain.
+The worker resolves the paths with the effective user and group IDs from the authenticated caller. The kernel resolves supplementary groups. This check covers UNIX filesystem permissions. The worker retains the Authority process's sandbox and TCC context.
+
+The Authority opens the file for hashing from the directory descriptor already held by the caller's lookup. It checks that the file still has the same identity and metadata. The journal owner repeats the metadata comparisons with Authority credentials before admission and dispatch.
+
+Capture failure closes the original caller, input, and filesystem. The detached reply stays available to the journal owner. Missing, inaccessible, unsuitable, and changed paths receive the same permanent refusal after a fresh absence proof. Resource, I/O, unknown system, storage, and credential failures remain uncertain.
 
 Successful capture transfers the reply to the existing request coordinator. Successful admission preserves its input even if acknowledgment delivery fails. Every refused attempt closes its original objects and private reply.
 

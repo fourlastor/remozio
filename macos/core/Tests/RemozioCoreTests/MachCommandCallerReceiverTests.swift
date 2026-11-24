@@ -827,7 +827,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertNotNil(try fixture.reservation(original.binding.id))
     }
 
-    func testAdmissionReturnsTheSameRefusalForMissingAndUnsearchablePaths() throws {
+    func testAdmissionReturnsTheSameRefusalForUnusablePaths() throws {
         guard geteuid() != 0 else { throw XCTSkip("Normal-user search permissions") }
         let fixture = try CommandRequestFixture(checkpointed: true, owned: true)
         let denied = fixture.root.appendingPathComponent("unsearchable", isDirectory: true)
@@ -838,12 +838,25 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         defer { _ = chmod(denied.path, 0o700) }
         let initial = try fixture.auditRecordCount
         let missing = fixture.root.appendingPathComponent("missing").path
+        let loop = fixture.root.appendingPathComponent("loop")
+        XCTAssertEqual(symlink(loop.lastPathComponent, loop.path), 0)
+        let regularFile = fixture.root.appendingPathComponent("regular")
+        try Data([1]).write(to: regularFile)
+        let notDirectory = regularFile.appendingPathComponent("child").path
         let temporary = FileManager.default.temporaryDirectory.path
-        for (executable, directory) in [(missing, temporary), (denied.appendingPathComponent("tool").path, temporary),
-                                       ("/usr/bin/true", missing), ("/usr/bin/true", denied.path)] {
+        for (executable, directory, expected) in [
+            (missing, temporary, ENOENT),
+            (denied.appendingPathComponent("tool").path, temporary, EACCES),
+            ("/usr/bin/true", missing, ENOENT),
+            ("/usr/bin/true", denied.path, EACCES),
+            (loop.path, temporary, ELOOP),
+            ("/usr/bin/true", notDirectory, ENOTDIR),
+        ] {
             let reply = try Endpoint()
             let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: executable, directory: directory)
-            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture))
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture)) {
+                XCTAssertEqual($0 as? CommandFilesystemCaptureError, .system(expected))
+            }
             XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
             XCTAssertNil(try fixture.reservation(submission.binding.id))
             XCTAssertEqual(try fixture.auditRecordCount, initial)
