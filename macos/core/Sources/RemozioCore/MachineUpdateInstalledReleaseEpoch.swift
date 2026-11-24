@@ -142,7 +142,8 @@ enum MachineUpdateInstalledReleaseEpoch {
         // Each immutable archive owns its decoded values. Candidate validation and current database checks remain separate.
         private let decoded = Decoded()
         // A store-decoded archive shares the store's epoch caches. A proposal captured from completion facts does not.
-        private let caches: PreparationEpochDecodeCaches
+        /// Internal so that tests can observe the shared entries. Production code reads it only through the methods below.
+        let caches: PreparationEpochDecodeCaches
         var description: String { "MachineUpdateInstalledReleaseEpoch.Archive(redacted)" }
         var debugDescription: String { description }
 
@@ -202,9 +203,17 @@ enum MachineUpdateInstalledReleaseEpoch {
                 try result.validate(epoch: configuration()); return result
             }
         }
+        /// A pure function of the kind 4 row and the kind 300 rows in their order; a success is shared through the store's cache.
         func completionIntent() throws -> MachineUpdateCompletionIntentArchive {
-            let header = try MachineUpdateCompletionIntentRecord.decode(artifact(4))
-            let policies = try artifacts.filter { $0.kind == 300 }.map { artifact in
+            let headerBytes = try artifact(4)
+            let policyRows = artifacts.filter { $0.kind == 300 }
+            let key = PreparationImmutableValidationCache.key(domain: "remozio.installed-release-epoch.completion-intent.v1",
+                [headerBytes] + policyRows.flatMap { [$0.accountID, $0.bytes] })
+            return try caches.installedCompletionIntents.value(key: key) { try Self.decodeCompletionIntent(headerBytes, policyRows) }
+        }
+        private static func decodeCompletionIntent(_ headerBytes: Data, _ policyRows: [Artifact]) throws -> MachineUpdateCompletionIntentArchive {
+            let header = try MachineUpdateCompletionIntentRecord.decode(headerBytes)
+            let policies = try policyRows.map { artifact in
                 let policy = try MachineUpdatePolicyIntentRecord.decode(artifact.bytes)
                 guard policy.binding.accountID == artifact.accountID else { throw PreparationStoreError.corruptRecord }
                 return policy
@@ -220,8 +229,29 @@ enum MachineUpdateInstalledReleaseEpoch {
         func plan(candidate: SignedReleaseEvidence) throws -> MachineUpdateCompletionPublicationPlan {
             try .init(retainedConfiguration: configuration(), retainedBackend: backend(), intent: completionIntent(), candidate: candidate)
         }
+        /// A pure function of the record, the artifacts and the candidate. Only a success is remembered, under a key that holds
+        /// all three exactly, so a different byte or a different candidate runs every check again in the original order.
         func validate(candidate: SignedReleaseEvidence) throws {
-            _ = try record.encoded
+            let recordBytes = try record.encoded
+            // The candidate key cannot fail today; if it ever does, the checks run uncached rather than reorder an error.
+            guard let key = validationKey(recordBytes: recordBytes, candidate: candidate) else {
+                return try validateUncached(candidate: candidate)
+            }
+            if caches.installedValidations.contains(key) { return }
+            try validateUncached(candidate: candidate)
+            caches.installedValidations.insert(key)
+        }
+        /// Every input of `validateUncached`: the record's canonical bytes, the candidate's exact key, and each artifact's
+        /// kind, account and bytes in order. Each part is length-prefixed, so distinct inputs give distinct keys.
+        func validationKey(recordBytes: Data, candidate: SignedReleaseEvidence) -> Data? {
+            guard let candidateKey = try? PreparationEpochDecodeCaches.candidateKey(candidate) else { return nil }
+            return PreparationImmutableValidationCache.key(domain: "remozio.installed-release-epoch.validation.v1",
+                [recordBytes, candidateKey] + artifacts.flatMap { artifact -> [Data] in
+                    var kind = artifact.kind.bigEndian
+                    return [withUnsafeBytes(of: &kind) { Data($0) }, artifact.accountID, artifact.bytes]
+                })
+        }
+        private func validateUncached(candidate: SignedReleaseEvidence) throws {
             if record.formatVersion == 2 { try MachineUpdateInstalledReleaseRecord.requireProvenanceFormats(candidate) }
             guard artifacts.count == record.operands.count else { throw PreparationStoreError.corruptRecord }
             for (artifact, operand) in zip(artifacts, record.operands) {

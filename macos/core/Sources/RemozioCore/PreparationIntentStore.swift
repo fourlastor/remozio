@@ -5629,7 +5629,7 @@ public final class PreparationIntentStore {
                 while try step(row) == SQLITE_ROW {
                     guard records.count < 64 else { throw PreparationStoreError.corruptRecord }
                     let record = try MachineUpdateRetainedSetupPromotionIntentRecord.decode(blob(row, column: 3,
-                        maximum: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes))
+                        maximum: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes), caches: epochCaches)
                     let archive = try record.publication().configuration.archive
                     let binding = archive.binding.startupBinding
                     guard try blob(row, column: 0, maximum: 16) == binding.accountID,
