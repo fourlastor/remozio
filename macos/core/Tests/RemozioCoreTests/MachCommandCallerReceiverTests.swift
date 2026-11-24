@@ -8808,6 +8808,8 @@ extension MachCommandCallerReceiverTests {
         guard case .admitted = try typedOutcome(first, submission: allowed, profile: profile) else {
             await worker.close(); return XCTFail("The original authenticated attempt must reach current policy admission")
         }
+        // The fourth grant read follows the final filesystem probe.
+        XCTAssertEqual(box.state.withLock { $0.reads }, 4)
         let before = try fixture.auditRecordCount
         box.state.withLock { $0.targets = [] }
         let denied = try workerElevationSubmission(destination, reply: second, profile: profile,
@@ -8815,7 +8817,9 @@ extension MachCommandCallerReceiverTests {
         try await waitForOutcome(2, phase: "revoked grant")
         XCTAssertEqual(try typedOutcome(second, submission: denied, profile: profile), .notAdmitted(.policyRejected, .never))
         XCTAssertNil(try fixture.reservation(denied.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
-        XCTAssertEqual(box.state.withLock { $0.reads }, 4); XCTAssertEqual(bindings.withLock { $0 }, 1)
+        // The denied attempt reads the revoked grant once and creates no stream binding.
+        XCTAssertEqual(box.state.withLock { $0.reads }, 5)
+        XCTAssertEqual(bindings.withLock { $0 }, 1)
         XCTAssertFalse(worker.isRetired); XCTAssertEqual(worker.status, .running)
         XCTAssertGreaterThanOrEqual(fcntl(descriptor, F_GETFD), 0)
         await worker.close()
