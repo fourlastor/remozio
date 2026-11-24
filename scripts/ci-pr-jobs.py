@@ -7,6 +7,8 @@ claims runs every job: scripts/, .github/, gradle/, third-party/, protocol/ outs
 under protocol/ are documentation, like docs/, and run no job. The Python checks job is not listed: it runs on every
 pull request. The macos/core test weights file (WEIGHTS) runs no job by itself: it changes only how the shards split
 the tests and which classes run at method level, never which tests exist, and the Python checks validate its names.
+Nor does the slow-test exceptions file (SLOW_TESTS), which scripts/core-test-time-guard.py reads after the shards: the
+Python checks validate its names, and the next run that executes a listed test applies it.
 
 macos/core tests. The Mac core tests job runs in one of two modes.
 - full: every class except the app-dependent ones, in six shards on two runners. A pull request gets this mode when it
@@ -81,6 +83,7 @@ CORE_TEST_INPUTS = ('macos/app/CommandMonitor/', 'experiments/command-frontend/'
 PREFIXES = (
     ('docs/', frozenset()),
     ('.github/macos-core-test-weights.json', frozenset()),
+    ('.github/macos-core-slow-tests.json', frozenset()),
     ('protocol/kotlin/', KOTLIN),
     ('phone/', KOTLIN),
     ('tools/', KOTLIN),
@@ -108,6 +111,7 @@ GRADLE_BUILD = ('gradle/', 'gradlew', 'gradlew.bat', 'gradle.properties', 'build
 TWO_RUNNER_SECONDS = 600.0
 CORE_SOURCES = ('macos/core/', 'protocol/swift/', 'host/')
 WEIGHTS = '.github/macos-core-test-weights.json'
+SLOW_TESTS = '.github/macos-core-slow-tests.json'
 METHOD_LEVEL_SECONDS = 60.0
 # Fast classes from different areas of macos/core: journals, the gateway database, approval delivery, pairing setup,
 # command streams and the authority service. Together they took about 25 s in CI (the weights file).
