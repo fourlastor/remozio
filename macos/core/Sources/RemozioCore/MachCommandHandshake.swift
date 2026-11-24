@@ -263,23 +263,24 @@ public final class RetainedCommandHandshake {
     func prepareAdmission(received: sending ReceivedMachCommandInputSubmission, expression: String, userID: uid_t,
                           auditSessionID: au_asid_t?, submissionLimits: CBORLimits) throws -> sending RetainedCommandAdmissionAttempt {
         do {
-            try requireAdmissionPeer(received.caller, carrierVersion: received.carrierVersion, expression: expression,
+            let expected = try admissionPeerBinding(carrierVersion: received.carrierVersion, expression: expression,
                 userID: userID, auditSessionID: auditSessionID)
+            try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+            guard received.caller.retainedAuditBinding == expected else { throw MachCommandHandshakeError.wrongBinding }
         } catch { received.closeIfUnclaimed(); throw error }
         return try RetainedCommandAdmissionAttempt(received: received, profile: profile, userID: userID,
             auditSessionID: auditSessionID, submissionLimits: submissionLimits)
     }
 
-    func requireAdmissionPeer(_ actualCaller: RetainedCommandCaller, carrierVersion: UInt32, expression: String,
-                              userID: uid_t, auditSessionID: au_asid_t?) throws {
+    func admissionPeerBinding(carrierVersion: UInt32, expression: String,
+                              userID: uid_t, auditSessionID: au_asid_t?) throws -> Data {
         guard !closed else { throw MachCommandHandshakeError.retired }
         guard profile.supportsAdmissionResults, UInt64(carrierVersion) == profile.inputCarrierVersion else {
             throw MachCommandHandshakeError.incompatible
         }
         try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
-        try actualCaller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
-        guard let expected = caller.retainedAuditBinding, let actual = actualCaller.retainedAuditBinding,
-              expected == actual else { throw MachCommandHandshakeError.wrongBinding }
+        guard let expected = caller.retainedAuditBinding else { throw MachCommandHandshakeError.wrongBinding }
+        return expected
     }
 
     /// The registry uses current protected policy and retires a failed retained identity.

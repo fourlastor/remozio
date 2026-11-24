@@ -137,8 +137,10 @@ public final class CommandSessionRegistry {
         try begin(); defer { end() }
         _ = synchronize(context)
         let (submission, session) = try admissionSession(payload: rejected.payload, limits: submissionLimits)
-        try session.requireAdmissionPeer(rejected.caller, carrierVersion: rejected.carrierVersion, expression: context.expression,
+        let expected = try session.admissionPeerBinding(carrierVersion: rejected.carrierVersion, expression: context.expression,
             userID: userID, auditSessionID: auditSessionID)
+        try rejected.caller.recheck(expression: context.expression, userID: userID, auditSessionID: auditSessionID)
+        guard rejected.caller.retainedAuditBinding == expected else { throw MachCommandHandshakeError.wrongBinding }
         guard submission.schemaVersion == session.profile.submissionSchemaVersion else { throw CommandCaptureError.version }
         try reply.recheck()
         try checkCancellation()
