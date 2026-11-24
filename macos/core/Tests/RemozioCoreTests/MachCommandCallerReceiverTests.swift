@@ -767,7 +767,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             } catch { XCTFail("Could not change the fixture frontend policy: \(error)") }
         })
         let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandFilesystem: pool)
-        owner.withLock { $0 = fixture.authority }
+        let authority = try XCTUnwrap(fixture.authority)
+        owner.withLock { $0 = authority }
         defer { owner.withLock { $0 = nil } }
         let reply = try Endpoint()
         let (attempt, submission, profile) = try admissionAttempt(reply: reply)
