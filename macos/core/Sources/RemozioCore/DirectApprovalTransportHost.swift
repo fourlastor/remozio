@@ -58,7 +58,7 @@ public actor DirectApprovalTransportHost {
         self.macID = macID; self.accountID = accountID
         self.validatePeer = validatePeer; self.handler = handler
         let connectionBudget = try AuthorityXPCWorkBudget(maximum: maximumConnections)
-        let recoveryBudget = try AuthorityXPCWorkBudget(maximum: min(2, maximumConnections))
+        let recoveryBudget = try AuthorityXPCWorkBudget(maximum: AuthorityTransportConnectionCapacity.pairingRecovery)
         let routingSupport = phoneRoutingSupport, auditSupport = phoneAuditSupport
         let updateSupport = phoneUpdateSchedulingSupport
         let pairingRecovery = pairingRecovery

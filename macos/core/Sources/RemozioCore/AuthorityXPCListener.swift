@@ -2,6 +2,18 @@ import Darwin
 import Foundation
 import RemozioProtocol
 
+enum AuthorityTransportConnectionCapacity {
+    // One trust link and one each for push registration, push recovery, audit, routing, and scheduling.
+    static let persistent = 6
+    static let pairingRecovery = 2
+
+    static func validate(_ maximum: Int, recoveryEnabled: Bool) throws {
+        guard !recoveryEnabled || maximum >= persistent + pairingRecovery else {
+            throw AuthorityXPCEndpointError.invalidConfiguration
+        }
+    }
+}
+
 protocol OwnedAuthorityConnection: Sendable { func activate(); func close() }
 
 /// Reservations cover setup and handshake, not just fully configured connections.
@@ -131,6 +143,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
+        try AuthorityTransportConnectionCapacity.validate(maximumConnections, recoveryEnabled: pairingLookup != nil)
         registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
         listener = NSXPCListener(machServiceName: serviceName)

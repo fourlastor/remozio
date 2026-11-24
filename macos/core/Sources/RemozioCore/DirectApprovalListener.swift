@@ -159,9 +159,12 @@ public final class DirectApprovalListener: @unchecked Sendable {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(timeoutMilliseconds) else {
             throw DirectListenerError.invalidConfiguration
         }
+        guard recovery == nil || maximumConnections > AuthorityTransportConnectionCapacity.pairingRecovery else {
+            throw DirectListenerError.invalidConfiguration
+        }
         self.recovery = recovery
         recoveryBudget = try recovery.map { _ in
-            try sharedRecoveryBudget ?? AuthorityXPCWorkBudget(maximum: min(2, maximumConnections))
+            try sharedRecoveryBudget ?? AuthorityXPCWorkBudget(maximum: AuthorityTransportConnectionCapacity.pairingRecovery)
         }
         let snapshot = try DirectPeerSnapshot(peers, recoveryMacID: recoveryMacID)
         self.peers = snapshot; self.maximumConnections = maximumConnections
