@@ -192,8 +192,8 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let endpoint = try XCTUnwrap(offered.1)
         let first = proofConnection(to: endpoint, requirement: fixture.requirement)
         defer { first.invalidate() }
-        let accepted = try await waitFor { fixture.events.acceptedProofLinks.withLock { $0 } == 1 }
-        XCTAssertTrue(accepted)
+        let firstVersion = await hello(on: first)
+        XCTAssertEqual(firstVersion, 1)
 
         let second = proofConnection(to: endpoint, requirement: fixture.requirement)
         defer { second.invalidate() }
@@ -202,8 +202,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let another = await offer(on: general[1])
         XCTAssertEqual(another.0, 1)
         XCTAssertNil(another.1)
-        let firstVersion = await hello(on: first)
-        XCTAssertEqual(firstVersion, 1)
+        XCTAssertEqual(fixture.events.acceptedProofLinks.withLock { $0 }, 1)
     }
 
     func testNativeInvalidationLetsAnotherBootstrapLinkObtainTheSlot() async throws {
@@ -260,37 +259,33 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let parent = try await bootstrap(fixture)
         defer { parent.invalidate() }
         let first = await offer(on: parent)
-        let expired = try XCTUnwrap(first.1)
+        XCTAssertNotNil(first.1)
         let initiallyBusy = await offer(on: parent)
         XCTAssertNil(initiallyBusy.1)
 
         let next = try await waitForOffer(on: parent)
         XCTAssertEqual(fixture.events.acceptedProofLinks.withLock { $0 }, 0)
-        let stale = proofConnection(to: expired, requirement: fixture.requirement)
-        defer { stale.invalidate() }
-        let staleVersion = await hello(on: stale)
-        XCTAssertEqual(staleVersion, 0)
         let client = proofConnection(to: next, requirement: fixture.requirement)
         defer { client.invalidate() }
         let freshVersion = await hello(on: client)
         XCTAssertEqual(freshVersion, 1)
     }
 
-    func testAcceptedConnectionWithoutHelloExpires() async throws {
+    func testFirstHelloAfterOfferExpiryIsRejectedWithoutTakingTheSlot() async throws {
         let fixture = try Fixture(timeout: .seconds(2))
         let parent = try await bootstrap(fixture)
         defer { parent.invalidate() }
         let offered = await offer(on: parent)
         let client = proofConnection(to: try XCTUnwrap(offered.1), requirement: fixture.requirement)
         defer { client.invalidate() }
-        let accepted = try await waitFor { fixture.events.acceptedProofLinks.withLock { $0 } == 1 }
-        XCTAssertTrue(accepted)
+        // Activating the client sends no hello. The first invocation arrives after the offer expires.
         let initiallyBusy = await offer(on: parent)
         XCTAssertNil(initiallyBusy.1)
 
         let next = try await waitForOffer(on: parent)
         let staleVersion = await hello(on: client)
         XCTAssertEqual(staleVersion, 0)
+        XCTAssertEqual(fixture.events.acceptedProofLinks.withLock { $0 }, 0)
         let replacement = proofConnection(to: next, requirement: fixture.requirement)
         defer { replacement.invalidate() }
         let freshVersion = await hello(on: replacement)
@@ -305,14 +300,21 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let offered = await offer(on: parent)
         let client = proofConnection(to: try XCTUnwrap(offered.1), requirement: fixture.requirement)
         defer { client.invalidate() }
-        let invalidated = expectation(description: "Proof link invalidated by closing bootstrap")
-        client.invalidationHandler = { invalidated.fulfill() }
         let version = await hello(on: client)
         XCTAssertEqual(version, 1)
 
         parent.invalidate()
-        await fulfillment(of: [invalidated], timeout: 3)
+        let serverClosed = try await waitFor { fixture.events.closedBootstrapLinks.withLock { $0 } == 1 }
+        XCTAssertTrue(serverClosed)
         let next = try await waitForOffer(on: another)
+        let staleReplied: Bool = await exchange(fallback: true) { reply in
+            guard let proxy = client.remoteObjectProxyWithErrorHandler({ _ in reply(false) }) as? any AuthorityPairingProofXPCProtocol else {
+                reply(false)
+                return
+            }
+            proxy.hello { _ in reply(true) }
+        }
+        XCTAssertFalse(staleReplied)
         let replacement = proofConnection(to: next, requirement: fixture.requirement)
         defer { replacement.invalidate() }
         let replacementVersion = await hello(on: replacement)
