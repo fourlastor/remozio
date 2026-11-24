@@ -1,0 +1,40 @@
+name: Profile core fixtures
+on:
+  push:
+    branches: ['profile/**']
+jobs:
+  profile:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build tests
+        run: swift build --package-path macos/core --build-tests --triple arm64-apple-macosx26.0 -Xswiftc -O
+      - name: Time each target without tracing
+        run: |
+          bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
+          mkdir -p prof; i=0
+          while read -r t; do i=$((i+1))
+            start=$(date +%s); "$(xcrun -f xctest)" -XCTest "$t" "$bundle" > "prof/plain$i.log" 2>&1 || echo "FAILED $t"
+            echo "$t: $(( $(date +%s) - start )) s wall"
+            grep -E "passed \(|failed \(" "prof/plain$i.log" | sed -E 's/.*\[[^ ]+ ([^]]+)\].* \(([0-9.]+) seconds\)/  \2 s \1/' | sort -rn | head -12
+          done < scripts/profile/targets.txt
+      - name: Trace each target
+        run: |
+          bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
+          xctest=$(xcrun -f xctest); i=0
+          while read -r t; do i=$((i+1))
+            timeout 1500 xcrun xctrace record --template 'Time Profiler' --output "prof/t$i.trace" --no-prompt \
+              --target-stdout "prof/out$i.log" --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/trace$i.log" 2>&1 || echo "trace $i exit $?"
+            xcrun xctrace export --input "prof/t$i.trace" \
+              --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > "prof/t$i.xml" 2>/dev/null || true
+            echo "===== $t" > "prof/summary$i.txt"
+            python3 scripts/profile/summarize.py "prof/t$i.xml" "prof/out$i.log" >> "prof/summary$i.txt" || true
+            head -60 "prof/summary$i.txt"; rm -rf "prof/t$i.trace" "prof/t$i.xml"
+          done < scripts/profile/targets.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: core-profile
+          path: prof/*
+          retention-days: 7
