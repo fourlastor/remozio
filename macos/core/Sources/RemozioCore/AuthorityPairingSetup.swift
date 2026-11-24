@@ -51,6 +51,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     }
 
     private let pairingVersions = Mutex<[UUID: PairingVersion]>([:])
+    private let pairingWindowOwner = UUID()
     private let journal: AuthorityJournal
     let maintenanceAdmission: AuthorityMaintenancePairingAdmission
     private let macID: Data
@@ -157,7 +158,23 @@ final class AuthorityPairingSetupAccess: Sendable {
         let started = try now()
         let v2 = try PairingInvitationV2(invitation: invitation, windowID: random(16), secret: random(32),
             replacement: predecessor?.predecessor, lifetimeMilliseconds: configuration.lifetimeMilliseconds)
-        return try AuthorityPairingV2Window(invitation: v2, predecessor: predecessor, started: started)
+        return try AuthorityPairingV2Window(invitation: v2, predecessor: predecessor, started: started,
+                                            authorityOwner: pairingWindowOwner)
+    }
+
+    /// Bind the proof connection only to a window created by this Authority owner.
+    func proofReservations(for window: AuthorityPairingV2Window,
+                           link: AuthorityPairingProofLink) throws -> AuthorityPairingProofReservations {
+        try .init(window: window, authorityOwner: pairingWindowOwner, link: link, now: now,
+                  makeChallenge: { [random] in try random(32) },
+                         verifyWindow: { [self] in try verifyV2Window(window) })
+    }
+
+    private func verifyV2Window(_ window: AuthorityPairingV2Window) throws {
+        try verifyCurrent()
+        if let predecessor = window.predecessor, try !canRePair(predecessor) {
+            throw AuthorityPairingSetupError.unsupportedReplacement
+        }
     }
 
     func expireV2WindowIfDue(_ window: AuthorityPairingV2Window) throws {
@@ -169,10 +186,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     }
 
     func reserveV2(_ window: AuthorityPairingV2Window, proof: PairingSetupV2Proof) throws {
-        try verifyCurrent()
-        if let predecessor = window.predecessor, try !canRePair(predecessor) {
-            throw AuthorityPairingSetupError.unsupportedReplacement
-        }
+        try verifyV2Window(window)
         try window.reserve(proof, at: now())
     }
 
@@ -205,6 +219,7 @@ final class AuthorityPairingSetupAccess: Sendable {
         let prepare: @Sendable (JournalTransaction, AuthorityMoment, PairingRecoveryStage?) throws -> PairingEnrollmentAttempt = { tx, started, retained in
             try self.requireCurrent(tx)
             let trust = try tx.approvalTrustSnapshot()
+            try window?.validateTransport(tx)
             try window?.requireStaging(self.now())
             if let predecessor = window?.predecessor, trust.revision != predecessor.revision {
                 throw AuthorityPairingSetupError.unsupportedReplacement
@@ -284,6 +299,7 @@ final class AuthorityPairingSetupAccess: Sendable {
             try window?.requireStaging(self.now())
         }, { tx in
             try self.requireCurrent(tx)
+            try window?.validateTransport(tx)
             try window?.requireStaging(self.now())
         })
     }

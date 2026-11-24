@@ -84,7 +84,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         self.access = access; self.budget = budget; self.verify = verify; self.authorize = authorize
         self.invalidate = invalidate; self.onHandshake = onHandshake
     }
-    deinit { expiryTimer?.cancel(); attemptActivity?.close() }
+    deinit { expiryTimer?.cancel(); v2Window?.close(); attemptActivity?.close() }
     /// Samples actual ownership without waiting for the operation lock or mutating the pairing lifetime.
     func maintenancePairingWork() throws -> AuthorityMaintenancePairingWork {
         try state.withLock {
@@ -207,6 +207,23 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             startExpiryTimer()
             return bytes
         }
+    }
+
+    /// Bind an authenticated proof link to this app endpoint's live v2 window.
+    func proofReservations(windowID: Data, link: AuthorityPairingProofLink) throws -> AuthorityPairingProofReservations {
+        let window = try lock.withLock {
+            guard !closed, ready, let v2Window, v2Window.id == windowID, v2Admission != nil else {
+                throw AuthorityPairingSetupError.unavailable
+            }
+            return v2Window
+        }
+        let reservations = try access.proofReservations(for: window, link: link)
+        let current = lock.withLock { !closed && ready && v2Window === window && v2Admission != nil }
+        guard current else {
+            reservations.retire()
+            throw AuthorityPairingSetupError.unavailable
+        }
+        return reservations
     }
 
     func reservePairingV2(_ proof: PairingSetupV2Proof) throws {

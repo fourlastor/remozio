@@ -1440,6 +1440,218 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             challenge: challenge, exporter: valid ? exporter : Data(repeating: 93, count: 32), proposal: proposal, tag: tag)
     }
 
+    func testAppWindowClosureClearsPendingProofsWithoutTransportCallingAgain() throws {
+        for cancel in [false, true] {
+            let fixture = try Fixture()
+            let owner = try fixture.endpoint()
+            let invitation = try openV2(owner)
+            let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+            let reservations = try owner.proofReservations(windowID: invitation.windowID, link: link)
+            let proposal = try fixture.proposal()
+            _ = try reservations.register(connection: UUID(), acceptedAt: 100,
+                peerPoint: proposal.transportKey.publicKey, exporter: Data(repeating: 84, count: 32))
+            XCTAssertEqual(reservations.pendingCount, 1)
+
+            if cancel {
+                let cancelled = Box(false)
+                owner.cancelPairing { cancelled.value = $0 }
+                XCTAssertTrue(cancelled.value)
+            } else {
+                owner.close()
+            }
+            XCTAssertEqual(reservations.pendingCount, 0)
+        }
+    }
+
+    func testProofReservationsRejectUnavailableAppWindows() throws {
+        let fixture = try Fixture()
+        let owner = try fixture.endpoint()
+        let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+        XCTAssertThrowsError(try owner.proofReservations(windowID: Data(count: 16), link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+
+        let invitation = try openV2(owner)
+        var wrongID = invitation.windowID
+        wrongID[0] ^= 1
+        XCTAssertThrowsError(try owner.proofReservations(windowID: wrongID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+
+        let cancelled = Box(false)
+        owner.cancelPairing { cancelled.value = $0 }
+        XCTAssertTrue(cancelled.value)
+        XCTAssertThrowsError(try owner.proofReservations(windowID: invitation.windowID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+
+        let secondOwner = try fixture.endpoint()
+        let secondInvitation = try openV2(secondOwner)
+        secondOwner.close()
+        XCTAssertThrowsError(try secondOwner.proofReservations(windowID: secondInvitation.windowID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+    }
+
+    func testProofReservationPolicyCanCloseAppEndpointOnAnotherThread() throws {
+        let fixture = try Fixture()
+        let owner = try fixture.endpoint()
+        let invitation = try openV2(owner)
+        let closeFinished = DispatchSemaphore(value: 0)
+        let closedDuringPolicy = Box(false)
+        let link = AuthorityPairingProofLink(verifyPolicy: {
+            DispatchQueue.global().async {
+                owner.close()
+                closeFinished.signal()
+            }
+            closedDuringPolicy.value = closeFinished.wait(timeout: .now() + .seconds(3)) == .success
+            guard closedDuringPolicy.value else { throw Failure.denied }
+        }, validatePolicy: { _ in })
+        XCTAssertThrowsError(try owner.proofReservations(windowID: invitation.windowID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+        XCTAssertTrue(closedDuringPolicy.value)
+    }
+
+    private enum ProofWindowClosure { case lateConfirmation, retiredCandidate, lostConfirmation }
+
+    private func assertProofClosureReleasesAdmission(_ closure: ProofWindowClosure) throws {
+        let fixture = try Fixture(pairingLifetime: 10_000)
+        let owner = try fixture.endpoint()
+        let invitation = try openV2(owner)
+        let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+        let reservations = try owner.proofReservations(windowID: invitation.windowID, link: link)
+        let draft = try fixture.proposal()
+        let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+            decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+        let exporter = Data(repeating: 82, count: 32)
+        let candidate = try reservations.register(connection: UUID(), acceptedAt: 100,
+            peerPoint: proposal.transportKey.publicKey, exporter: exporter)
+        let tag = try invitation.proof(proposal: proposal, challenge: candidate.challenge, exporter: exporter)
+        try reservations.verify(candidate: candidate.id, proposalBytes: proposal.encode(), tag: tag)
+
+        switch closure {
+        case .lateConfirmation:
+            fixture.environment.time.value = 3_100
+            XCTAssertThrowsError(try reservations.confirm(candidate: candidate.id)) {
+                XCTAssertEqual($0 as? PairingEnrollmentError, .expired)
+            }
+        case .retiredCandidate:
+            reservations.retire(candidate: candidate.id)
+        case .lostConfirmation:
+            fixture.environment.time.value = 3_099
+            owner.expireStagedIfNeeded()
+            let contender = try fixture.endpoint()
+            try hello(contender)
+            let refused = Box<Data?>(Data())
+            contender.stagePairing(try draft.encode(), authorization: authorization) { refused.value = $0 }
+            XCTAssertNil(refused.value)
+            fixture.environment.time.value = 3_100
+        }
+
+        owner.expireStagedIfNeeded()
+        let legacy = try fixture.endpoint()
+        try hello(legacy)
+        _ = try staged(legacy, proposal: draft)
+        legacy.close()
+        _ = try openV2(fixture.endpoint())
+        XCTAssertEqual(try fixture.records(), 0)
+    }
+
+    func testLateProofConfirmationReleasesAuthorityVersionAdmission() throws {
+        try assertProofClosureReleasesAdmission(.lateConfirmation)
+    }
+
+    func testRetiredProofCandidateReleasesAuthorityVersionAdmission() throws {
+        try assertProofClosureReleasesAdmission(.retiredCandidate)
+    }
+
+    func testLostProofConfirmationExpiresAtTheProofDeadline() throws {
+        try assertProofClosureReleasesAdmission(.lostConfirmation)
+    }
+
+    func testRetiredProofLinkBlocksStageAndCommit() throws {
+        for stageBeforeRetirement in [false, true] {
+            let fixture = try Fixture()
+            let window = try fixture.access.openV2Window(label: "Fixture", predecessor: nil)
+            let invitation = try PairingInvitationV2.decode(fixture.access.exportV2Window(window))
+            let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+            let reservations = try fixture.access.proofReservations(for: window, link: link)
+            let draft = try fixture.proposal()
+            let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+                decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+            let bytes = try proposal.encode(), exporter = Data(repeating: 83, count: 32)
+            let candidate = try reservations.register(connection: UUID(), acceptedAt: 100,
+                peerPoint: proposal.transportKey.publicKey, exporter: exporter)
+            let tag = try invitation.proof(proposal: proposal, challenge: candidate.challenge, exporter: exporter)
+            try reservations.verify(candidate: candidate.id, proposalBytes: bytes, tag: tag)
+            try reservations.confirm(candidate: candidate.id)
+
+            if stageBeforeRetirement {
+                let attempt = try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {})
+                let transcript = attempt.transcript
+                let signature = try fixture.biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+                link.retire()
+                XCTAssertThrowsError(try fixture.access.commit(attempt, setupID: transcript.setupID,
+                    confirmedDigest: transcript.digest(), proof: signature, window: window, authorize: {})) {
+                    XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+                }
+            } else {
+                link.retire()
+                XCTAssertThrowsError(try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {})) {
+                    XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+                }
+            }
+            XCTAssertEqual(try fixture.records(), 0)
+            XCTAssertEqual(fixture.environment.signed.value, 0)
+        }
+    }
+
+    func testAuthenticatedProofChecksAuthorityOwnerAndTransportPolicyAtStageAndCommit() throws {
+        for retireBeforeCommit in [false, true] {
+            let fixture = try Fixture(), foreign = try Fixture(accountByte: 4)
+            let window = try fixture.access.openV2Window(label: "Fixture", predecessor: nil)
+            let invitation = try PairingInvitationV2.decode(fixture.access.exportV2Window(window))
+            let policyActive = Box(true)
+            let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in
+                guard policyActive.value else { throw Failure.denied }
+            })
+            XCTAssertThrowsError(try foreign.access.proofReservations(for: window, link: link)) {
+                XCTAssertEqual($0 as? AuthorityPairingSetupError, .wrongScope)
+            }
+            let reservations = try fixture.access.proofReservations(for: window, link: link)
+            let draft = try fixture.proposal()
+            let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+                decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+            let bytes = try proposal.encode(), exporter = Data(repeating: 81, count: 32)
+            let candidate = try reservations.register(connection: UUID(), acceptedAt: 100,
+                peerPoint: proposal.transportKey.publicKey, exporter: exporter)
+            let tag = try invitation.proof(proposal: proposal, challenge: candidate.challenge, exporter: exporter)
+            try reservations.verify(candidate: candidate.id, proposalBytes: bytes, tag: tag)
+            XCTAssertThrowsError(try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {}))
+            try reservations.confirm(candidate: candidate.id)
+
+            if retireBeforeCommit {
+                let attempt = try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {})
+                let transcript = attempt.transcript
+                let signature = try fixture.biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+                policyActive.value = false
+                XCTAssertThrowsError(try fixture.access.commit(attempt, setupID: transcript.setupID,
+                    confirmedDigest: transcript.digest(), proof: signature, window: window, authorize: {})) {
+                    guard case Failure.denied = $0 else { return XCTFail("Expected Transport policy refusal") }
+                }
+            } else {
+                policyActive.value = false
+                XCTAssertThrowsError(try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {})) {
+                    guard case Failure.denied = $0 else { return XCTFail("Expected Transport policy refusal") }
+                }
+            }
+            XCTAssertEqual(try fixture.records(), 0)
+            XCTAssertEqual(fixture.environment.signed.value, 0)
+            try fixture.assertCheckpoint()
+        }
+    }
+
     func testV2ProofReservesOnlyTheExactProposalAndUsesExistingCommit() throws {
         let f = try Fixture(), endpoint = try f.endpoint()
         let invitation = try openV2(endpoint)
