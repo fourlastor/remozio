@@ -244,7 +244,7 @@ public final class CommandReceiveHost {
         let message: ReceivedMachCommandMessage
         do {
             message = try receiver.receiveNext(timeoutMilliseconds: receiveWaitMilliseconds, beforeImport: beforeDescriptorImport,
-                rejectDescriptor: { rejected in
+                rejectDescriptor: { [self] rejected in
                     let context = try currentContext()
                     if let submissionLimits {
                         // A bad reply right or unbound request must not retire the listener or gain retry authority.
