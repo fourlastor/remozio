@@ -46,7 +46,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     private let policy: XPCPeerPolicy
     private let presence: AuthorityPresenceRuntime
     private let access: AuthorityPresenceAccess
-    private let pairingAccess: AuthorityPairingSetupAccess?
+    let pairingAccess: AuthorityPairingSetupAccess?
     private let maintenancePairingOwners: AuthorityMaintenancePairingOwners?
     private let clock: AuthorityClock
     private var maintenance: AuthorityMaintenanceConnections?, setupPolicy: XPCPeerPolicy?

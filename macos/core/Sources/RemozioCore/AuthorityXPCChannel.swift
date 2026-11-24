@@ -4,6 +4,8 @@ import RemozioProtocol
 @objc public protocol TransportAuthorityXPCProtocol {
     /// Harmless first call. Contains no scope, key, request, or credential material.
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
+    /// Optional bootstrap for a proof-only link. The reply carries no proof or credential.
+    @objc optional func openPairingProof(reply: @escaping @Sendable (UInt64, NSXPCListenerEndpoint?) -> Void)
     /// Optional request-delivery extension. Zero means unavailable; version one uses requestFrame.
     func requestDeliveryVersion(reply: @escaping @Sendable (UInt64) -> Void)
     /// Optional discovery extension, negotiated separately from version-one frame retrieval.
@@ -41,10 +43,11 @@ import RemozioProtocol
 }
 
 public enum AuthorityXPCError: Error { case unsupportedPairingLookup, unsupportedPhoneUpdateScheduling, unsupportedPhoneRouting, unsupportedPhoneAudit, unsupportedPhonePushRecovery, unsupportedPhonePushRegistration, unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
-enum AuthorityXPCReply: Sendable { case pairingLookupVersion(UInt64, UInt64), pairingLookup(Data), updateSchedulingVersion(UInt64), updateScheduling(Data), routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
+enum AuthorityXPCReply: Sendable { case pairingProofOffer(UInt64, NSXPCListenerEndpoint?), pairingLookupVersion(UInt64, UInt64), pairingLookup(Data), updateSchedulingVersion(UInt64), updateScheduling(Data), routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
 protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func openPairingProof(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func discoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -71,6 +74,7 @@ protocol AuthorityXPCDriver: Sendable {
 }
 
 extension AuthorityXPCDriver {
+    func openPairingProof(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.pairingProofOffer(0, nil)) }
     func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.pairingLookupVersion(0, 0)) }
     func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.updateSchedulingVersion(0)) }
@@ -117,6 +121,13 @@ private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable 
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.hello { [self] version in checked(.hello(version), reply) }
+    }
+    func openPairingProof(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        guard let open = proxy.openPairingProof else { reply(.pairingProofOffer(0, nil)); return }
+        open { [self] version, endpoint in
+            checked(.pairingProofOffer(version, endpoint), reply)
+        }
     }
     func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
@@ -227,7 +238,7 @@ public actor AuthorityXPCChannel {
     public static let maximumSnapshotBytes = 1_048_576
     public static let maximumBindingBytes = 4096
     private enum State { case new, opening, open, closed }
-    private enum Operation { case pairingLookupVersion, pairingLookup, updateSchedulingVersion, updateScheduling, routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private enum Operation { case pairingProofOffer, pairingLookupVersion, pairingLookup, updateSchedulingVersion, updateScheduling, routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
     private var updateSchedulingVersion: UInt64?
     private var routingVersion: UInt64?
     private var auditVersion: UInt64?
@@ -343,6 +354,14 @@ public actor AuthorityXPCChannel {
         do { try AuthorityRequestExchange.validateResponse(bytes, binding: binding, requestID: requestID) }
         catch { finish(.invalidMessage); throw error }
         return bytes
+    }
+
+    func openPairingProof() async throws -> NSXPCListenerEndpoint? {
+        guard case let .pairingProofOffer(version, endpoint) = try await perform(.pairingProofOffer) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        guard version == 1 else { return nil }
+        return endpoint
     }
 
     /// Missing receipts do not establish that enrollment was never committed.
@@ -569,6 +588,7 @@ public actor AuthorityXPCChannel {
                     case .recovery: driver.recovery(binding!, frame: query!, reply)
                     case .registrationVersion: driver.registrationVersion(reply)
                     case .registration: driver.registration(binding!, frame: query!, reply)
+                    case .pairingProofOffer: driver.openPairingProof(reply)
                     case .pairingLookupVersion: driver.pairingLookupVersion(reply)
                     case .pairingLookup: driver.pairingLookup(query!, reply)
                     case .receiptVersion: driver.receiptVersion(reply)
@@ -609,6 +629,7 @@ public actor AuthorityXPCChannel {
         case (.recovery, .recovery(let bytes)) where !bytes.isEmpty && bytes.count <= PhonePushRecoveryFrame.maximumBytes: break
         case (.registrationVersion, .registrationVersion): break
         case (.registration, .registration(let bytes)) where !bytes.isEmpty && bytes.count <= PhonePushRegistrationFrame.maximumBytes: break
+        case (.pairingProofOffer, .pairingProofOffer): break
         case (.pairingLookupVersion, .pairingLookupVersion): break
         case (.pairingLookup, .pairingLookup(let bytes)) where (1...PairingRecoveryFrame.maximumBytes).contains(bytes.count): break
         case (.receiptVersion, .receiptVersion): break

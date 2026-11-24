@@ -250,6 +250,9 @@ public actor AuthorityWakeService {
                     minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: auditVersions,
                     gatewayRevocations: gatewayRevocations)
             } else { presenceListener = nil }
+            if let pairingAccess = presenceListener?.pairingAccess {
+                try service.preparePairingProofs(access: pairingAccess)
+            }
             let commandReceiver = try commandReceiverFactory?(journal, clock)
             let result = try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,
                 startRequests: { try service.start(); try presenceListener?.start() },

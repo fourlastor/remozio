@@ -122,6 +122,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private let wakeHints: (@Sendable () throws -> AuthorityWakeHints)?
     private var running = false
     private var closed = false
+    private var pairingProofs: AuthorityPairingProofLinks?
+    private let handshakeTimeout: Duration
 
     public init(serviceName: String, peerPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
                 maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000,
@@ -149,6 +151,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
         listener = NSXPCListener(machServiceName: serviceName)
+        handshakeTimeout = .milliseconds(handshakeTimeoutMilliseconds)
         self.activityJournal = activityJournal
         policy = peerPolicy; self.macID = macID; self.accountID = accountID
         self.verifyHandshakePolicy = verifyHandshakePolicy; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
@@ -232,7 +235,18 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler,
             pairingReceipt: receiptHandler, pairingLookup: pairingLookupHandler, phonePushRegistration: registrationHandler, phonePushRecovery: recoveryHandler, phoneAudit: auditHandler, phoneRouting: routingHandler, phoneUpdateScheduling: updateSchedulingHandler, wakeHints: wakeHints)
     }
-    deinit { listener.invalidate(); registry.close() }
+    deinit { listener.invalidate(); registry.close(); pairingProofs?.close() }
+    func preparePairingProofs(access: AuthorityPairingSetupAccess) throws {
+        try lock.withLock {
+            guard getuid() == 0, geteuid() == 0, !running, !closed, pairingProofs == nil else {
+                throw AuthorityXPCEndpointError.unavailable
+            }
+            pairingProofs = .init(policy: policy, timeout: handshakeTimeout) { [verifyHandshakePolicy] in
+                try verifyHandshakePolicy()
+                try access.verifyCurrent()
+            }
+        }
+    }
     public func start() throws {
         try lock.withLock {
             guard geteuid() == 0, !running, !closed else { throw AuthorityXPCEndpointError.unavailable }
@@ -240,7 +254,11 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         }
     }
     public func close() {
-        lock.withLock { closed = true; running = false; listener.invalidate(); listener.delegate = nil }
+        let proofs = lock.withLock {
+            closed = true; running = false; listener.invalidate(); listener.delegate = nil
+            return pairingProofs
+        }
+        proofs?.close()
         registry.close()
     }
     public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
@@ -251,6 +269,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                     budget: budget, activityJournal: activityJournal, verifyHandshakePolicy: verifyHandshakePolicy, onHandshake: { [weak registry] in registry?.handshake(id) },
                     onClose: { [weak registry] in registry?.remove(id) }, snapshot: snapshot, validate: validate, requestFrame: frame,
                     pendingRequestIDs: pendingRequests, exchangeRequest: exchange, pairingReceipt: receipt, pairingLookup: pairingLookupHandler, pairingLookupBudget: pairingLookupBudget, phonePushRegistration: pushRegistration, phonePushRecovery: pushRecovery, phoneAudit: auditExchange, phoneRouting: routingExchange, phoneUpdateScheduling: updateSchedulingExchange, wakeHints: wakeHints)
+                endpoint.preparePairingProofs(pairingProofs)
                 let owner = NativeAuthorityConnection(connection: connection, endpoint: endpoint)
                 guard registry.install(owner, id: id) else { return false }
                 return true

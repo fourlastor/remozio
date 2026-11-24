@@ -24,6 +24,10 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let verifyHandshakePolicy: @Sendable () throws -> Void
     private let invalidate: () -> Void
     private let onHandshake: @Sendable () -> Void
+    private var pairingProofs: AuthorityPairingProofLinks?
+    private let pairingProofBootstrap = UUID()
+    private let proofBootstrapLifetime = ChannelCancellation()
+    private let verifyProofPeer: (() throws -> XPCPeerCredentials)?
     private let snapshot: @Sendable () throws -> DirectApprovalTrust
     private let validate: @Sendable (AuthorityPeerBinding) throws -> Bool
     private let activityJournal: AuthorityJournal?
@@ -82,7 +86,8 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
         _ = try peerPolicy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: peerPolicy)
         self.init(macID: macID, accountID: accountID, budget: budget, activityJournal: activityJournal,
-            verify: { _ = try invocation.verifyInvocation() }, verifyHandshakePolicy: verifyHandshakePolicy, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
+            verify: { _ = try invocation.verifyInvocation() },
+            verifyProofPeer: { try invocation.verifyInvocation() }, verifyHandshakePolicy: verifyHandshakePolicy, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
             snapshot: snapshot, validate: validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs,
             exchangeRequest: exchangeRequest, pairingReceipt: pairingReceipt, pairingLookup: pairingLookup, pairingLookupBudget: pairingLookupBudget, phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: phoneAudit, phoneRouting: phoneRouting, phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: wakeHints)
         peerPolicy.configure(connection)
@@ -92,7 +97,9 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
         connection.invalidationHandler = { [weak self] in self?.close() }
     }
     init(macID: Data, accountID: Data, budget: AuthorityXPCWorkBudget, activityJournal: AuthorityJournal? = nil,
-         verify: @escaping () throws -> Void, verifyHandshakePolicy: @escaping @Sendable () throws -> Void = {}, invalidate: @escaping () -> Void,
+         verify: @escaping () throws -> Void, pairingProofs: AuthorityPairingProofLinks? = nil,
+         verifyProofPeer: (() throws -> XPCPeerCredentials)? = nil,
+         verifyHandshakePolicy: @escaping @Sendable () throws -> Void = {}, invalidate: @escaping () -> Void,
          onHandshake: @escaping @Sendable () -> Void = {},
          snapshot: @escaping @Sendable () throws -> DirectApprovalTrust,
          validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
@@ -109,25 +116,60 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          phoneUpdateScheduling: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) {
         self.activityJournal = activityJournal
+        self.pairingProofs = pairingProofs
+        self.verifyProofPeer = verifyProofPeer
         self.pairingLookupHandler = pairingLookup
         self.pairingLookupBudget = pairingLookupBudget
         self.macID = macID; self.accountID = accountID; self.budget = budget
         self.verify = verify; self.verifyHandshakePolicy = verifyHandshakePolicy; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
         self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting; self.updateSchedulingExchange = phoneUpdateScheduling
     }
+    deinit {
+        proofBootstrapLifetime.cancel()
+        pairingProofs?.retire(bootstrap: pairingProofBootstrap)
+    }
+
+    // The native listener supplies this before activating the accepted connection.
+    func preparePairingProofs(_ proofs: AuthorityPairingProofLinks?) {
+        lock.withLock {
+            guard !closed, !ready, pairingProofs == nil else { return }
+            pairingProofs = proofs
+        }
+    }
+
     public func close() {
         let notify = lock.withLock {
             guard !closed else { return false }
             closed = true
             ready = false
+            proofBootstrapLifetime.cancel()
             if pairingLookupAdmitted {
                 pairingLookupAdmitted = false
                 pairingLookupBudget?.release()
             }
             return true
         }
-        if notify { invalidate() }
+        if notify {
+            pairingProofs?.retire(bootstrap: pairingProofBootstrap)
+            invalidate()
+        }
     }
+
+    public func openPairingProof(reply: @escaping @Sendable (UInt64, NSXPCListenerEndpoint?) -> Void) {
+        do {
+            let completed = try work {
+                guard let pairingProofs, let verifyProofPeer else { return (UInt64(0), nil as NSXPCListenerEndpoint?) }
+                let peer = try verifyProofPeer()
+                let endpoint = try? pairingProofs.offer(bootstrap: pairingProofBootstrap, peer: peer) { [proofBootstrapLifetime] in
+                    proofBootstrapLifetime.ifActive({})
+                }
+                return (UInt64(1), endpoint)
+            }
+            defer { completed.activity?.close() }
+            send { reply(completed.value.0, completed.value.1) }
+        } catch { close(); reply(0, nil) }
+    }
+
     public func hello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
             let completed = try work(handshake: true) {
