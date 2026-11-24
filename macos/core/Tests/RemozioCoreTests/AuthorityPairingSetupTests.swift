@@ -1517,13 +1517,20 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         return pending
     }
 
-    private func advanceV2TrustRevision(_ f: Fixture) throws {
-        let other = try f.endpoint(), biometric = P256.Signing.PrivateKey()
-        defer { other.close() }
-        try hello(other)
-        let transcript = try staged(other, proposal: f.proposal(phone: 10, epoch: 11, keyBase: 70, biometric: biometric))
+    private func commitCompetingV2(_ fixture: Fixture, proposal: PairingPhoneProposal,
+                                   biometric: P256.Signing.PrivateKey, predecessor: PairedPhoneSelection? = nil) throws {
+        let endpoint = try fixture.endpoint()
+        defer { endpoint.close() }
+        let invitation = try openV2(endpoint, predecessor: predecessor)
+        let binding = try bindingV2(invitation, proposal: proposal)
+        try endpoint.reservePairingV2(binding)
+        let result = Box<Data?>(nil)
+        endpoint.stagePairingV2(try proposal.encode(), connection: binding.connection, authorization: authorization) {
+            result.value = $0
+        }
+        let transcript = try PairingTranscript.decode(XCTUnwrap(result.value))
         let proof = try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
-        XCTAssertNotNil(try commit(other, transcript: transcript, fixture: f, proof: proof))
+        XCTAssertNotNil(try commit(endpoint, transcript: transcript, fixture: fixture, proof: proof))
     }
 
     func testV2RePairStagesAndCommitsTheProvedReplacement() async throws {
@@ -1561,15 +1568,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let pending = try await revokeSelectionForV2(f)
         let endpoint = try f.endpoint(), invitation = try openV2(endpoint, predecessor: pending)
         let proposal = try rePairProposal(f, predecessor: pending.predecessor, biometric: .init())
-        let other = try f.endpoint(), biometric = P256.Signing.PrivateKey()
-        defer { other.close() }
-        try hello(other)
+        let biometric = P256.Signing.PrivateKey()
         let replacement = try rePairProposal(f, predecessor: pending.predecessor, biometric: biometric, epoch: 51, keyBase: 73)
-        let result = Box<Data?>(nil)
-        other.stagePairing(try replacement.encode(), authorization: authorization) { result.value = $0 }
-        let transcript = try PairingTranscript.decode(XCTUnwrap(result.value))
-        let proof = try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
-        XCTAssertNotNil(try commit(other, transcript: transcript, fixture: f, proof: proof))
+        try commitCompetingV2(f, proposal: replacement, biometric: biometric, predecessor: pending)
         XCTAssertNil(try f.access.pairedPhones(includeRePair: true).rePairSelection(for: pending.phone))
         let binding = try bindingV2(invitation, proposal: proposal)
         XCTAssertThrowsError(try endpoint.reservePairingV2(binding)) {
@@ -1585,7 +1586,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let proposal = try rePairProposal(f, predecessor: pending.predecessor, biometric: .init())
         let binding = try bindingV2(invitation, proposal: proposal)
         try endpoint.reservePairingV2(binding)
-        try advanceV2TrustRevision(f)
+        let biometric = P256.Signing.PrivateKey()
+        let draft = try f.proposal(phone: 10, epoch: 11, keyBase: 70, biometric: biometric)
+        let enrollment = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+            decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+        try commitCompetingV2(f, proposal: enrollment, biometric: biometric)
         XCTAssertFalse(try f.access.canRePair(pending))
         let records = try f.records(), result = Box<Data?>(Data())
         endpoint.stagePairingV2(try proposal.encode(), connection: binding.connection, authorization: authorization) {
