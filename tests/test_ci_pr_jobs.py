@@ -111,14 +111,21 @@ class JobSelectionTests(unittest.TestCase):
         for path in ('scripts/check.sh', '.github/workflows/checks.yml', '.github/other.json',
                      'gradle/libs.versions.toml', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties',
                      'gradlew', '.gitignore', 'third-party/cloudflared/pin.json', 'protocol/vectors/a.json',
-                     'protocol/session-envelope.md', 'unknown/file.txt'):
+                     'protocol/vectors/a.md', 'protocol/other/a.md', 'unknown/file.txt'):
             with self.subTest(path=path):
                 self.assertEqual(JOBS.jobs_for(path), JOBS.EVERY_JOB)
 
     def test_documentation_and_test_weights_run_only_the_python_checks(self):
-        for path in ('docs/design-decisions.md', 'README.md', 'AGENTS.md', 'LICENSE', JOBS.WEIGHTS):
+        for path in ('docs/design-decisions.md', 'README.md', 'AGENTS.md', 'LICENSE', JOBS.WEIGHTS,
+                     'protocol/session-envelope.md', 'protocol/README.md'):
             with self.subTest(path=path):
                 self.assertEqual(JOBS.jobs_for(path), frozenset())
+
+    def test_protocol_documentation_runs_no_job_unless_a_vector_changes_with_it(self):
+        self.assertEqual(JOBS.select(['protocol/pairing-invitation-v2.md']), set())
+        self.assertEqual(JOBS.select(['protocol/pairing-invitation-v2.md', 'protocol/vectors/pairing-invitation-v2.json']),
+                         set(JOBS.EVERY_JOB))
+        self.assertEqual(JOBS.select(['protocol/vectors/pairing-invitation-v2.json']), set(JOBS.EVERY_JOB))
 
     def test_each_area_runs_the_jobs_that_build_it(self):
         cases = {
