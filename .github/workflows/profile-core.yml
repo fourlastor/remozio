@@ -30,7 +30,7 @@ jobs:
               --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > "prof/t$i.xml" 2>/dev/null || true
             echo "===== $t" > "prof/summary$i.txt"
             python3 scripts/profile/summarize.py "prof/t$i.xml" "prof/out$i.log" >> "prof/summary$i.txt" || true
-            head -60 "prof/summary$i.txt"; rm -rf "prof/t$i.trace" "prof/t$i.xml"
+            head -60 "prof/summary$i.txt"; gzip -9 "prof/t$i.xml"; rm -rf "prof/t$i.trace"
           done < scripts/profile/targets.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

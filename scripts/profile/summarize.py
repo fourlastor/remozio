@@ -24,11 +24,11 @@ for row in root.iter("row"):
     total += w
     thread = deref(row.find("thread"))
     thread_ns[thread.attrib.get("fmt", "?") if thread is not None else "?"] += w
-    bt = deref(row.find("backtrace"))
+    bt = next((deref(c) for c in row if c.tag.endswith("backtrace")), None)
     if bt is None:
         continue
     names = []
-    for fr in bt.findall("frame"):
+    for fr in bt.iter("frame"):
         fr = deref(fr)
         names.append(fr.attrib.get("name", "?"))
     if names:
