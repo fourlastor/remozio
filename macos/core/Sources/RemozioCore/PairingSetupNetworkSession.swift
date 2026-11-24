@@ -12,11 +12,30 @@ private struct PairingNetworkStream: ApprovalByteStream {
 }
 
 struct PairingSetupV2Connection: Sendable {
-    let windowID: Data
     let connection: UUID
     let challenge: Data
-    let exporter: Data
-    let reserve: @Sendable (PairingSetupV2Proof) throws -> Void
+    let publicationDeadline: ContinuousClock.Instant?
+    let verify: @Sendable (PairingPhoneProposal, Data, Data) async throws -> Void
+    let confirm: @Sendable () async throws -> Void
+    let invalidateLink: @Sendable () -> Void
+    let retire: @Sendable (Bool) async -> Void
+
+    init(connection: UUID, challenge: Data, publicationDeadline: ContinuousClock.Instant?,
+         verify: @escaping @Sendable (PairingPhoneProposal, Data, Data) async throws -> Void,
+         confirm: @escaping @Sendable () async throws -> Void, invalidateLink: @escaping @Sendable () -> Void,
+         retire: @escaping @Sendable (Bool) async -> Void) {
+        self.connection = connection; self.challenge = challenge; self.publicationDeadline = publicationDeadline
+        self.verify = verify; self.confirm = confirm; self.invalidateLink = invalidateLink; self.retire = retire
+    }
+
+    init(windowID: Data, connection: UUID, challenge: Data, exporter: Data,
+         reserve: @escaping @Sendable (PairingSetupV2Proof) throws -> Void) {
+        self.init(connection: connection, challenge: challenge, publicationDeadline: nil, verify: { proposal, peerPoint, tag in
+            guard exporter.count == 32 else { throw PairingSetupChannelError.rejected }
+            try reserve(.init(windowID: windowID, connection: connection, peerPoint: peerPoint,
+                challenge: challenge, exporter: exporter, proposal: proposal, tag: tag))
+        }, confirm: {}, invalidateLink: {}, retire: { _ in })
+    }
 }
 
 /// One unpaired TLS candidate. The signed app must independently confirm and authorize Root staging and commit.
@@ -27,7 +46,9 @@ public actor PairingSetupNetworkSession {
     private let invitation: PairingInvitation
     private let peerPoint: Data
     private(set) var provedConnection: UUID?
+    private(set) var proofPublicationDeadline: ContinuousClock.Instant?
     private let abortIO: @Sendable () -> Void
+    private let invalidateProofLink: @Sendable () -> Void
     private let underlyingClosed: @Sendable () async -> Bool
     private let cancellation = ChannelCancellation()
     private var state = State.opening
@@ -40,9 +61,11 @@ public actor PairingSetupNetworkSession {
     private var reader: Task<Void, Never>?
     private var inputWaiter: CheckedContinuation<Void, any Error>?
     private init(stream: any ApprovalByteStream, invitation: PairingInvitation, peerPoint: Data,
-                 abortIO: @escaping @Sendable () -> Void, underlyingClosed: @escaping @Sendable () async -> Bool) {
+                 abortIO: @escaping @Sendable () -> Void, underlyingClosed: @escaping @Sendable () async -> Bool,
+                 invalidateProofLink: @escaping @Sendable () -> Void) {
         self.stream = stream; self.invitation = invitation; self.peerPoint = peerPoint
         self.abortIO = abortIO; self.underlyingClosed = underlyingClosed
+        self.invalidateProofLink = invalidateProofLink
     }
     deinit { timer?.cancel(); reader?.cancel() }
     static func acceptStarted(channel: NetworkByteChannel, invitation: PairingInvitation, peerPoint: Data,
@@ -55,8 +78,11 @@ public actor PairingSetupNetworkSession {
                        timeoutMilliseconds: UInt64 = 300_000, v2: PairingSetupV2Connection? = nil,
                        abortIO: @escaping @Sendable () -> Void = {},
                        underlyingClosed: @escaping @Sendable () async -> Bool = { false }) async throws -> Self {
+        let invalidateProofLink: @Sendable () -> Void
+        if let v2 { invalidateProofLink = v2.invalidateLink }
+        else { invalidateProofLink = {} }
         let owner = Self(stream: stream, invitation: invitation, peerPoint: peerPoint,
-                         abortIO: abortIO, underlyingClosed: underlyingClosed)
+                         abortIO: abortIO, underlyingClosed: underlyingClosed, invalidateProofLink: invalidateProofLink)
         do { try await owner.open(timeoutMilliseconds: timeoutMilliseconds, v2: v2); return owner }
         catch { await owner.closeAndWait(); throw error }
     }
@@ -70,19 +96,24 @@ public actor PairingSetupNetworkSession {
         startReader()
         let proposal: PairingPhoneProposal
         if let v2 {
-            guard v2.exporter.count == 32 else {
-                throw PairingSetupChannelError.rejected
-            }
             try await writeBytes(PairingSetupPreludeV2.challenge(v2.challenge).encode())
             let bytes = try await readBytes(maximum: PairingSetupPreludeV2.maximumBytes)
             guard case .proposal(let value, let tag) = try PairingSetupPreludeV2.decode(bytes) else {
                 throw PairingSetupChannelError.rejected
             }
             try requirePeer(value)
-            try v2.reserve(.init(windowID: v2.windowID, connection: v2.connection, peerPoint: peerPoint,
-                challenge: v2.challenge, exporter: v2.exporter, proposal: value, tag: tag))
-            try active()
+            try await v2.verify(value, peerPoint, tag)
+            do {
+                try active()
+                try await v2.confirm()
+                try active()
+                try Self.requirePublicationDeadline(v2.publicationDeadline)
+            } catch {
+                retireVerifiedProof()
+                throw error
+            }
             provedConnection = v2.connection
+            proofPublicationDeadline = v2.publicationDeadline
             proposal = value
         } else {
             try await write(.hello)
@@ -92,6 +123,12 @@ public actor PairingSetupNetworkSession {
         }
         proposalValue = proposal; state = .proposed
     }
+    nonisolated func retireVerifiedProof() { invalidateProofLink() }
+
+    static func requirePublicationDeadline(_ deadline: ContinuousClock.Instant?, at now: ContinuousClock.Instant = ContinuousClock.now) throws {
+        if let deadline, now >= deadline { throw PairingSetupChannelError.rejected }
+    }
+
     private func requirePeer(_ proposal: PairingPhoneProposal) throws {
         guard proposal.transportKey.publicKey == peerPoint, proposal.phone.scope.macID == invitation.macID,
               proposal.phone.scope.accountID == invitation.accountID else { throw PairingSetupChannelError.rejected }

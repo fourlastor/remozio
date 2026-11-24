@@ -1,5 +1,7 @@
+import CryptoKit
 import Darwin
 import Foundation
+import RemozioProtocol
 import Security
 import Synchronization
 import XCTest
@@ -30,7 +32,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         private let enableProofs: Bool
 
         init(timeout: Duration = .seconds(5), peerPIDOffset: pid_t = 0, enableProofs: Bool = true,
-             rejectProofSignature: Bool = false) throws {
+             rejectProofSignature: Bool = false, bindReservations: AuthorityPairingProofLinks.BindReservations? = nil) throws {
             self.peerPIDOffset = peerPIDOffset
             self.enableProofs = enableProofs
             var code: SecCode?, staticCode: SecStaticCode?, info: CFDictionary?
@@ -56,7 +58,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                configureConnection: {
                    $0.setCodeSigningRequirement(proofRequirement)
                    events.acceptedProofLinks.withLock { $0 += 1 }
-               })
+               }, bindReservations: bindReservations)
             super.init()
             try registry.start()
             listener.setConnectionCodeSigningRequirement(requirement)
@@ -179,6 +181,241 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
             else { reply(0); return }
             proxy.hello(reply: reply)
         }
+    }
+
+    func testProofBudgetRejectsAnXPCVerificationBeforeItConsumesTheCandidate() async throws {
+        let instant = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+        let owner = UUID()
+        let scope = try ChannelScope(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
+        let invitation = try PairingInvitation(macID: scope.macID, accountID: scope.accountID, label: "Proof fixture",
+            authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            transportPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation, minimumEnvelopeVersion: 1)
+        let full = try PairingInvitationV2(invitation: invitation, windowID: Data(repeating: 5, count: 16),
+            secret: Data(repeating: 6, count: 32), lifetimeMilliseconds: 5_000)
+        let window = try AuthorityPairingV2Window(invitation: full, predecessor: nil, started: instant, authorityOwner: owner)
+        let fixture = try Fixture(bindReservations: { id, link in
+            guard id == full.windowID else { throw FixtureError.retiredRole }
+            return try .init(window: window, authorityOwner: owner, link: link, now: { instant },
+                makeChallenge: { Data(repeating: 7, count: 32) }, verifyWindow: {})
+        })
+        let primary = try await bootstrap(fixture)
+        defer { primary.invalidate() }
+        let offered = await offer(on: primary)
+        let endpoint = try XCTUnwrap(offered.1)
+        let connection = proofConnection(to: endpoint, requirement: fixture.requirement)
+        defer { connection.invalidate() }
+        let version = await hello(on: connection)
+        XCTAssertEqual(version, 2)
+
+        let bound: Bool = await proofExchange(on: connection, fallback: false) {
+            $0.bindWindow(full.windowID, reply: $1)
+        }
+        XCTAssertTrue(bound)
+
+        func key(_ id: UInt8) throws -> PairingKey {
+            try PairingKey(keyID: Data(repeating: id, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+        }
+        let phone = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 8, count: 32),
+            envelopeVersions: [1], requests: [], auditVersions: [])
+        let proposal = try PairingPhoneProposal(phone: phone, transportKey: key(10), decisionKey: key(11), biometricKey: key(12))
+        let bytes = try proposal.encode(), exporter = Data(repeating: 9, count: 32)
+        let registration: (Data?, Data?) = await proofExchange(on: connection, fallback: (nil, nil)) { proxy, reply in
+            proxy.registerCandidate(AuthorityPairingProofWire.bytes(UUID()), acceptedAt: instant.milliseconds,
+                peerPoint: proposal.transportKey.publicKey, exporter: exporter) { reply(($0, $1)) }
+        }
+        let candidate = try XCTUnwrap(registration.0)
+        let challenge = try XCTUnwrap(registration.1)
+        let tag = try full.proof(proposal: proposal, challenge: challenge, exporter: exporter)
+        let acquired = window.proofXPCBudget.acquire()
+        XCTAssertTrue(acquired)
+        guard acquired else { return }
+        let refused: Bool = await proofExchange(on: connection, fallback: true) {
+            $0.verifyCandidate(candidate, proposal: Data([0xff]), tag: tag, reply: $1)
+        }
+        window.proofXPCBudget.release()
+        XCTAssertFalse(refused)
+
+        let verified: Bool = await proofExchange(on: connection, fallback: false) {
+            $0.verifyCandidate(candidate, proposal: bytes, tag: tag, reply: $1)
+        }
+        XCTAssertTrue(verified)
+        let id = try AuthorityPairingProofWire.identifier(candidate)
+        XCTAssertThrowsError(try window.takeProposal(connection: id, matching: bytes, at: instant))
+        let confirmed: Bool = await proofExchange(on: connection, fallback: false) {
+            $0.confirmCandidate(candidate, reply: $1)
+        }
+        XCTAssertTrue(confirmed)
+        XCTAssertEqual(try window.takeProposal(connection: id, matching: bytes, at: instant).encode(), bytes)
+    }
+
+    private func proofExchange<Value: Sendable>(on connection: NSXPCConnection, fallback: Value,
+        send: (any AuthorityPairingProofXPCProtocol, @escaping @Sendable (Value) -> Void) -> Void) async -> Value {
+        await exchange(fallback: fallback) { reply in
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in reply(fallback) })
+                    as? any AuthorityPairingProofXPCProtocol else { reply(fallback); return }
+            send(proxy, reply)
+        }
+    }
+
+    func testTransportOwnerOpensAndBindsNativeLinkAndClosesOnInterruption() async throws {
+        try await exerciseTransportOwner(rejectPublication: false)
+    }
+
+    func testTransportOwnerRetiresTheLinkWhenPublicationIsTooLate() async throws {
+        try await exerciseTransportOwner(rejectPublication: true)
+    }
+
+    private func exerciseTransportOwner(rejectPublication: Bool) async throws {
+        let authority = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey()
+        let macID = Data(repeating: 1, count: 16), accountID = Data(repeating: 2, count: 16)
+        let invitation = try PairingInvitation(macID: macID, accountID: accountID, label: "Proof fixture",
+            authorityPublicKey: authority.publicKey.x963Representation,
+            transportPublicKey: transport.publicKey.x963Representation, minimumEnvelopeVersion: 1)
+        let full = try PairingInvitationV2(invitation: invitation, windowID: Data(repeating: 5, count: 16),
+            secret: Data(repeating: 6, count: 32), lifetimeMilliseconds: 15_000)
+        let clock = try AuthorityClock(), id = UUID()
+        let window = try AuthorityPairingV2Window(invitation: full, predecessor: nil, started: clock.now(), authorityOwner: id)
+        let bound = Mutex<AuthorityPairingProofReservations?>(nil)
+        let fixture = try Fixture(bindReservations: { windowID, link in
+            guard windowID == full.windowID else { throw FixtureError.retiredRole }
+            let reservations = try AuthorityPairingProofReservations(window: window, authorityOwner: id, link: link,
+                now: clock.now, makeChallenge: { Data(repeating: 7, count: 32) }, verifyWindow: {})
+            bound.withLock { $0 = reservations }
+            return reservations
+        })
+
+        let approval = try ApprovalTransportConfiguration(macID: macID, accountID: accountID, ownerUID: 501, serviceUID: 502,
+            authorityServiceName: "dev.remozio.tests.proof", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.remozio.authority",
+            authorityHashes: [Data(repeating: 3, count: 20)], identityReference: Data([1]),
+            identityPublicKeyInfo: transport.publicKey.derRepresentation)
+        let pairing = try TransportPairingControlConfiguration(macID: macID, accountID: accountID,
+            ownerUID: 501, transportUID: 502, serviceName: "dev.remozio.tests.pairing",
+            teamID: "ABCDEFGHIJ", appIdentifier: "dev.remozio.app", appHashes: [Data(repeating: 4, count: 20)],
+            transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 5, count: 20)])
+        let bootstrapConnection = NSXPCConnection(listenerEndpoint: fixture.listener.endpoint)
+        let driver = NativeAuthorityXPC(connection: bootstrapConnection, policy: fixture.policy,
+                                       configure: { $0.setCodeSigningRequirement(fixture.requirement) })
+        let attemptedPublication = Mutex(false)
+        let owner = TransportPairingSetupOwner(configuration: pairing, factory: { _, _, _ in throw FixtureError.retiredRole },
+            openProofClient: { configuration, windowID, onClose in
+                try await AuthorityPairingProofClient.open(configuration: configuration, windowID: windowID, onClose: onClose) { supplied, ended in
+                    XCTAssertEqual(supplied.canonicalBytes, approval.canonicalBytes)
+                    let bootstrap = AuthorityXPCChannel(driver: driver, onClose: ended)
+                    return .init(channel: bootstrap, policy: fixture.policy, configure: { $0.setCodeSigningRequirement(fixture.requirement) })
+                }
+            }, publicationTime: {
+                attemptedPublication.withLock { $0 = true }
+                return ContinuousClock.now.advanced(by: .seconds(rejectPublication ? 4 : 0))
+            })
+        defer { owner.abort() }
+        let port = try await owner.beginV2(.init(id: full.windowID, invitation: invitation, replacement: nil,
+            lifetimeMilliseconds: full.lifetimeMilliseconds), identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport),
+            authorityConfiguration: approval)
+        let reservations = try XCTUnwrap(bound.withLock { $0 })
+        let acceptedAt = try clock.now().milliseconds
+        let nextPeer = P256.Signing.PrivateKey().publicKey.x963Representation
+        _ = try reservations.register(connection: UUID(), acceptedAt: acceptedAt, peerPoint: nextPeer, exporter: Data(repeating: 9, count: 32))
+        XCTAssertEqual(reservations.pendingCount, 1)
+
+        let phone: Task<Void, Error>?
+        if rejectPublication {
+            phone = Task { try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full) }
+        } else {
+            phone = nil
+            fixture.links.close()
+        }
+        defer { phone?.cancel() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var closed = false
+        while ContinuousClock.now < deadline {
+            do {
+                let snapshot = try await owner.snapshot()
+                if rejectPublication, !snapshot.candidates.isEmpty {
+                    XCTFail("The Transport owner published a candidate after its deadline")
+                    break
+                }
+            } catch TransportPairingControlError.closed { closed = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(closed)
+        if rejectPublication { XCTAssertTrue(attemptedPublication.withLock { $0 }) }
+        await owner.closeAndWait()
+        if let phone, case .success = await phone.result {
+            XCTFail("The candidate received a pairing receipt after its deadline")
+        }
+        let cleared = try await waitFor { reservations.pendingCount == 0 }
+        XCTAssertTrue(cleared)
+        XCTAssertThrowsError(try window.export(at: clock.now()))
+    }
+
+    func testTLSLoopbackProofAndReceiptUseTheDedicatedXPCLink() async throws {
+        try await pairUsingDedicatedLink(rePair: false)
+    }
+
+    func testTLSLoopbackReplacementUsesTheDedicatedXPCLink() async throws {
+        try await pairUsingDedicatedLink(rePair: true)
+    }
+
+    private func pairUsingDedicatedLink(rePair: Bool) async throws {
+        let authority = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey()
+        let macID = Data(repeating: 1, count: 16), accountID = Data(repeating: 2, count: 16)
+        let invitation = try PairingInvitation(macID: macID, accountID: accountID, label: "Proof fixture",
+            authorityPublicKey: authority.publicKey.x963Representation,
+            transportPublicKey: transport.publicKey.x963Representation, minimumEnvelopeVersion: 1)
+        let predecessor: PairedPhoneSelection? = rePair ? .init(macID: macID, accountID: accountID, revision: UUID(),
+            phone: DeliveryRecipient(phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 8, count: 16))) : nil
+        let full = try PairingInvitationV2(invitation: invitation, windowID: Data(repeating: 5, count: 16),
+            secret: Data(repeating: 6, count: 32), replacement: predecessor?.predecessor, lifetimeMilliseconds: 15_000)
+        let clock = try AuthorityClock(), owner = UUID()
+        let window = try AuthorityPairingV2Window(invitation: full, predecessor: predecessor, started: clock.now(), authorityOwner: owner)
+        let fixture = try Fixture(bindReservations: { id, link in
+            guard id == full.windowID else { throw FixtureError.retiredRole }
+            return try .init(window: window, authorityOwner: owner, link: link, now: clock.now,
+                makeChallenge: { try AuthorityPairingSetupAccess.secureRandom(32) }, verifyWindow: {})
+        })
+        let primary = try await bootstrap(fixture)
+        defer { primary.invalidate() }
+        let offered = await offer(on: primary)
+        let endpoint = try XCTUnwrap(offered.1)
+        let client = AuthorityPairingProofClient(endpoint: endpoint, peerPolicy: fixture.policy, onClose: {},
+            configure: { $0.setCodeSigningRequirement(fixture.requirement) })
+        defer { client.close() }
+        try await client.start(windowID: full.windowID)
+
+        let ingress = try PairingSetupV2Ingress(windowID: full.windowID, lifetimeMilliseconds: full.lifetimeMilliseconds, authority: client)
+        let ready = AsyncStream<UInt16>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let served = Mutex(false)
+        let listener = try PairingSetupListener(identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport),
+            invitation: invitation, binding: .loopback, maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
+            setupTimeoutMilliseconds: full.lifetimeMilliseconds, v2: ingress, event: { event in
+                if case .ready(let port) = event { ready.continuation.yield(port) }
+                ready.continuation.finish()
+            }, handler: { session in
+                let proposal = try await session.proposal()
+                let candidate = await session.provedConnection
+                let id = try XCTUnwrap(candidate)
+                // This step can succeed only after the proof link confirms the candidate.
+                let selected = try window.takeProposal(connection: id, matching: proposal.encode(), at: clock.now())
+                let transcript = try AndroidPairingMacLoopbackTests.transcript(for: selected, invitation: invitation)
+                try await session.stage(transcript)
+                _ = try await session.receiveProof()
+                let receipt = try authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation
+                try await session.sendReceipt(receipt)
+                served.withLock { $0 = true }
+            })
+        do {
+            try listener.start()
+            var ports = ready.stream.makeAsyncIterator()
+            let port = await ports.next()
+            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: XCTUnwrap(port), invitation: full)
+        } catch {
+            await listener.closeAndWait()
+            throw error
+        }
+        await listener.closeAndWait()
+        XCTAssertTrue(served.withLock { $0 })
+        XCTAssertThrowsError(try window.requireStaging(clock.now()))
     }
 
     func testProofSlotIsAvailableAtGeneralCapacityAndRejectsASecondLink() async throws {

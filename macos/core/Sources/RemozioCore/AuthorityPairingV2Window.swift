@@ -30,6 +30,7 @@ final class AuthorityPairingV2Window: Sendable {
     let id: Data
     let predecessor: PairedPhoneSelection?
     let authorityOwner: UUID?
+    let proofXPCBudget: AuthorityXPCWorkBudget
 
     init(invitation: PairingInvitationV2, predecessor: PairedPhoneSelection?, started: AuthorityMoment,
          authorityOwner: UUID? = nil) throws {
@@ -43,6 +44,7 @@ final class AuthorityPairingV2Window: Sendable {
         id = invitation.windowID
         self.predecessor = predecessor
         self.authorityOwner = authorityOwner
+        proofXPCBudget = try AuthorityXPCWorkBudget(maximum: 1)
         state = Mutex(.init(phase: .open(invitation)))
     }
 

@@ -12,6 +12,15 @@ final class AuthorityMaintenancePairingOwners: Sendable {
             $0 = $0.filter { $0.value.retainedMaintenancePairingWork() != nil }; $0[id] = endpoint
         }
     }
+    func proofReservations(windowID: Data, link: AuthorityPairingProofLink) throws -> AuthorityPairingProofReservations {
+        guard windowID.count == 16 else { throw AuthorityPairingSetupError.wrongScope }
+        let candidates = endpoints.withLock { Array($0.values) }.filter { $0.ownsProofWindow(windowID) }
+        guard candidates.count == 1, let endpoint = candidates.first else {
+            throw AuthorityPairingSetupError.unavailable
+        }
+        return try endpoint.proofReservations(windowID: windowID, link: link)
+    }
+
     func capture() throws -> AuthorityMaintenancePairingWork {
         let values = endpoints.withLock { state in
             var values: [AuthorityMaintenancePairingWork] = []

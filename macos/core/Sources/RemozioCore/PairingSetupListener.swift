@@ -8,8 +8,43 @@ import RemozioProtocol
 struct PairingSetupV2Ingress: Sendable {
     let windowID: Data
     let lifetimeMilliseconds: UInt64
-    let reserve: @Sendable (PairingSetupV2Proof) throws -> Void
-    let disconnect: @Sendable (UUID) -> Void
+    private let localReserve: (@Sendable (PairingSetupV2Proof) throws -> Void)?
+    private let localDisconnect: (@Sendable (UUID) -> Void)?
+    private let authority: AuthorityPairingProofClient?
+    private let clock: AuthorityClock?
+
+    init(windowID: Data, lifetimeMilliseconds: UInt64, reserve: @escaping @Sendable (PairingSetupV2Proof) throws -> Void,
+         disconnect: @escaping @Sendable (UUID) -> Void) {
+        self.windowID = windowID; self.lifetimeMilliseconds = lifetimeMilliseconds
+        localReserve = reserve; localDisconnect = disconnect; authority = nil; clock = nil
+    }
+
+    init(windowID: Data, lifetimeMilliseconds: UInt64, authority: AuthorityPairingProofClient) throws {
+        self.windowID = windowID; self.lifetimeMilliseconds = lifetimeMilliseconds
+        localReserve = nil; localDisconnect = nil; self.authority = authority; clock = try AuthorityClock()
+    }
+
+    func acceptTime() throws -> UInt64? { try clock?.now().milliseconds }
+
+    func register(connection: UUID, acceptedAt: UInt64?, peerPoint: Data, exporter: Data,
+                  deadline: ContinuousClock.Instant) async throws -> PairingSetupV2Connection {
+        if let authority, let acceptedAt {
+            let candidate = try await authority.register(connectionID: connection, acceptedAt: acceptedAt,
+                peerPoint: peerPoint, exporter: exporter, deadline: deadline)
+            return .init(connection: candidate.id, challenge: candidate.challenge, publicationDeadline: deadline,
+                verify: { proposal, _, tag in
+                    try await authority.verify(candidate: candidate.id, proposal: proposal.encode(), tag: tag, deadline: deadline)
+                }, confirm: { try await authority.confirm(candidate: candidate.id, deadline: deadline) },
+                invalidateLink: authority.close, retire: { await authority.retire(candidate: candidate.id, requiresAcknowledgement: $0) })
+        }
+        guard let localReserve, let localDisconnect, exporter.count == 32 else { throw PairingSetupChannelError.rejected }
+        let challenge = try AuthorityPairingSetupAccess.secureRandom(32)
+        return .init(connection: connection, challenge: challenge, publicationDeadline: nil,
+            verify: { proposal, peerPoint, tag in
+                try localReserve(.init(windowID: windowID, connection: connection, peerPoint: peerPoint, challenge: challenge,
+                    exporter: exporter, proposal: proposal, tag: tag))
+            }, confirm: {}, invalidateLink: { localDisconnect(connection) }, retire: { _ in localDisconnect(connection) })
+    }
 }
 
 /// Bounded setup ingress for unpaired candidates. Construct in the transport role with its existing identity.
@@ -30,6 +65,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     private var v2Admissions = PairingSetupV2Admissions()
     private var sources: [String: (until: ContinuousClock.Instant, count: Int)] = [:]
     private var expiry: Task<Void, Never>?
+    private let proofTime: @Sendable () -> ContinuousClock.Instant
     private let maximumConnections: Int
     private let handshakeTimeoutMilliseconds: UInt64
     private let setupTimeoutMilliseconds: UInt64
@@ -52,7 +88,8 @@ public final class PairingSetupListener: @unchecked Sendable {
 
     init(identity: SecIdentity, invitation: PairingInvitation, binding: DirectApprovalListener.Binding,
          maximumConnections: Int, handshakeTimeoutMilliseconds: UInt64, setupTimeoutMilliseconds: UInt64,
-         v2: PairingSetupV2Ingress?, event: @escaping @Sendable (DirectListenerEvent) -> Void,
+         v2: PairingSetupV2Ingress?, proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+         event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
               (1...300_000).contains(setupTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
@@ -67,7 +104,7 @@ public final class PairingSetupListener: @unchecked Sendable {
               let local = sec_identity_create(identity) else { throw DirectListenerError.invalidIdentity }
         self.invitation = invitation; self.maximumConnections = maximumConnections
         self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.setupTimeoutMilliseconds = setupTimeoutMilliseconds
-        self.handler = handler; self.event = event; self.v2 = v2
+        self.handler = handler; self.event = event; self.v2 = v2; self.proofTime = proofTime
         let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
         self.applicationProtocol = applicationProtocol
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
@@ -138,6 +175,9 @@ public final class PairingSetupListener: @unchecked Sendable {
         let id = UUID()
         let accepted = ContinuousClock.now
         let deadline = accepted.advanced(by: PairingSetupV2Admissions.proofTimeout)
+        let acceptedAt: UInt64?
+        do { acceptedAt = try v2?.acceptTime() }
+        catch { connection.cancel(); return }
         let applicationProtocol = applicationProtocol
         var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
@@ -174,6 +214,8 @@ public final class PairingSetupListener: @unchecked Sendable {
                 }
             }
             slot.task = Task { [weak self] in
+                var registeredProof: PairingSetupV2Connection?
+                var confirmed = false
                 do {
                     try await channel.start(timeoutMilliseconds: handshakeTimeout)
                     try Task.checkCancellation()
@@ -182,21 +224,39 @@ public final class PairingSetupListener: @unchecked Sendable {
                     let proof: PairingSetupV2Connection?
                     if let windowV2 {
                         guard ContinuousClock.now < deadline else { throw PairingSetupChannelError.rejected }
-                        proof = try .init(windowID: windowV2.windowID, connection: id,
-                            challenge: AuthorityPairingSetupAccess.secureRandom(32), exporter: Self.exporter(metadata),
-                            reserve: { [weak self] proof in
+                        let candidate = try await windowV2.register(connection: id, acceptedAt: acceptedAt, peerPoint: point,
+                            exporter: Self.exporter(metadata), deadline: deadline)
+                        registeredProof = candidate
+                        proof = .init(connection: candidate.connection, challenge: candidate.challenge,
+                            publicationDeadline: candidate.publicationDeadline, verify: { [weak self] proposal, peer, tag in
                                 guard let self else { throw PairingSetupChannelError.closed }
-                                try self.reserveProof(proof, reserve: windowV2.reserve)
-                            })
+                                try self.beginVerification(id)
+                                try await candidate.verify(proposal, peer, tag)
+                            }, confirm: { [weak self] in
+                                guard let self else { throw PairingSetupChannelError.closed }
+                                try self.requireVerification(id)
+                                try await candidate.confirm()
+                                try self.completeVerification(id)
+                            }, invalidateLink: { [weak self] in
+                                candidate.invalidateLink()
+                                self?.close()
+                            }, retire: candidate.retire)
                     } else { proof = nil }
                     let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
                         peerPoint: point, timeoutMilliseconds: timeout, v2: proof)
-                    do { try Task.checkCancellation(); try await handler(session) }
+                    confirmed = proof != nil
+                    do { try Task.checkCancellation() }
+                    catch { session.retireVerifiedProof(); await session.closeAndWait(); throw error }
+                    do { try await handler(session) }
                     catch { await session.closeAndWait(); throw error }
                     await session.closeAndWait()
                 } catch {}
                 await channel.close()
-                windowV2?.disconnect(id)
+                await registeredProof?.retire(confirmed)
+                if confirmed {
+                    registeredProof?.invalidateLink()
+                    self?.close()
+                }
                 self?.release(id)
             }
             return true
@@ -218,28 +278,28 @@ public final class PairingSetupListener: @unchecked Sendable {
         return true
     }
 
-    private func reserveProof(_ proof: PairingSetupV2Proof,
-                              reserve: (PairingSetupV2Proof) throws -> Void) throws {
-        let id = proof.connection
-        let slot = try lock.withLock {
-            guard !closed, let slot = slots[id], v2Admissions.beginVerification(id, at: ContinuousClock.now) else {
+    private func beginVerification(_ id: UUID) throws {
+        try lock.withLock {
+            guard !closed, slots[id] != nil, v2Admissions.beginVerification(id, at: ContinuousClock.now) else {
                 throw PairingSetupChannelError.rejected
             }
-            return slot
         }
-        do {
-            try reserve(proof)
-            try lock.withLock {
-                guard !closed, slots[id] === slot, v2Admissions.completeVerification(id, at: ContinuousClock.now) else {
-                    throw PairingSetupChannelError.rejected
-                }
-                slot.proofTimer?.cancel(); slot.proofTimer = nil
+    }
+
+    private func requireVerification(_ id: UUID) throws {
+        try lock.withLock {
+            guard !closed, slots[id] != nil, v2Admissions.isVerifying(id, at: proofTime()) else {
+                throw PairingSetupChannelError.rejected
             }
-        } catch {
-            lock.withLock {
-                if v2Admissions.remove(id) { retireProof(id) }
+        }
+    }
+
+    private func completeVerification(_ id: UUID) throws {
+        try lock.withLock {
+            guard !closed, let slot = slots[id], v2Admissions.completeVerification(id, at: proofTime()) else {
+                throw PairingSetupChannelError.rejected
             }
-            throw error
+            slot.proofTimer?.cancel(); slot.proofTimer = nil
         }
     }
 

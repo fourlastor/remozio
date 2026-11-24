@@ -50,7 +50,9 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
         XCTAssertEqual(admission.admit(candidate, deadline: deadline, draining: 0), .admitted(evicting: nil))
         XCTAssertTrue(admission.beginVerification(candidate, at: deadline.advanced(by: .milliseconds(-1))))
 
+        XCTAssertTrue(admission.isVerifying(candidate, at: deadline.advanced(by: .milliseconds(-1))))
         XCTAssertFalse(admission.expire(candidate, at: deadline.advanced(by: .milliseconds(-1))))
+        XCTAssertFalse(admission.isVerifying(candidate, at: deadline))
         XCTAssertFalse(admission.completeVerification(candidate, at: deadline))
         XCTAssertTrue(admission.expire(candidate, at: deadline))
         XCTAssertFalse(admission.expire(candidate, at: deadline))
@@ -70,6 +72,7 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
         }
 
         XCTAssertTrue(admission.remove(rejected))
+        XCTAssertFalse(admission.isVerifying(rejected, at: accepted))
         XCTAssertFalse(admission.remove(rejected))
         XCTAssertFalse(admission.completeVerification(rejected, at: accepted))
         XCTAssertEqual(admission.admit(UUID(), deadline: deadline, draining: 1), .admitted(evicting: nil))

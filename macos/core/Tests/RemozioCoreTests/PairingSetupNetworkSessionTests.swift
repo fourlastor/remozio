@@ -154,6 +154,42 @@ final class PairingSetupNetworkSessionTests: XCTestCase {
         return (window, start, context, .proposal(proposal, tag: tag))
     }
 
+    func testRejectedConfirmationAfterVerificationRetiresTheLink() async throws {
+        let f = try Fixture(), calls = Mutex<[String]>([])
+        let challenge = Data(repeating: 16, count: 32)
+        let context = PairingSetupV2Connection(connection: UUID(), challenge: challenge,
+            publicationDeadline: ContinuousClock.now.advanced(by: .seconds(3)),
+            verify: { _, _, _ in calls.withLock { $0.append("verify") } },
+            confirm: {
+                calls.withLock { $0.append("confirm") }
+                throw PairingSetupChannelError.rejected
+            }, invalidateLink: { calls.withLock { $0.append("retire") } }, retire: { _ in })
+        let proposal = PairingSetupPreludeV2.proposal(f.proposal, tag: Data(repeating: 17, count: 32))
+        do {
+            _ = try await PairingSetupNetworkSession.accept(stream: Stream([wire(proposal.encode())]),
+                invitation: f.invitation, peerPoint: f.transport.publicKey.x963Representation, v2: context)
+            XCTFail("A rejected confirmation published a candidate")
+        } catch PairingSetupChannelError.rejected {}
+        XCTAssertEqual(calls.withLock { $0 }, ["verify", "confirm", "retire"])
+    }
+
+    func testConfirmedProofPastThePublicationDeadlineRetiresTheLink() async throws {
+        let f = try Fixture(), calls = Mutex<[String]>([])
+        let challenge = Data(repeating: 16, count: 32)
+        let context = PairingSetupV2Connection(connection: UUID(), challenge: challenge,
+            publicationDeadline: ContinuousClock.now.advanced(by: .milliseconds(-1)),
+            verify: { _, _, _ in calls.withLock { $0.append("verify") } },
+            confirm: { calls.withLock { $0.append("confirm") } },
+            invalidateLink: { calls.withLock { $0.append("retire") } }, retire: { _ in })
+        let proposal = PairingSetupPreludeV2.proposal(f.proposal, tag: Data(repeating: 17, count: 32))
+        do {
+            _ = try await PairingSetupNetworkSession.accept(stream: Stream([wire(proposal.encode())]),
+                invitation: f.invitation, peerPoint: f.transport.publicKey.x963Representation, v2: context)
+            XCTFail("An expired proof was published")
+        } catch PairingSetupChannelError.rejected {}
+        XCTAssertEqual(calls.withLock { $0 }, ["verify", "confirm", "retire"])
+    }
+
     func testV2ChallengeAndProvedProposalReplaceTheLegacyPrelude() async throws {
         let f = try Fixture()
         let (window, moment, context, proposal) = try setupV2(f)
