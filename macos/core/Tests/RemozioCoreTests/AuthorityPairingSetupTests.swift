@@ -2365,7 +2365,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
 
         let enrolled = try DirectApprovalPeer(scope: .init(macID: f.mac, accountID: f.account,
             phoneID: Data(repeating: 53, count: 16), enrollmentEpoch: Data(repeating: 54, count: 16)),
-            transportPublicKey: phone.publicKey.derRepresentation, requests: [], auditVersions: [])
+            transportPublicKey: phone.publicKey.derRepresentation, requests: [], auditVersions: [], maximumPayloadBytes: 4096)
         let bound = Box<UInt16?>(nil)
         let legacy = try DirectApprovalListener(identity: identity(f.transport), peers: [enrolled], binding: .loopback,
             timeoutMilliseconds: 1_000, event: { event in if case let .ready(port) = event { bound.value = port } },
