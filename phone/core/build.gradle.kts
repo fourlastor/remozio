@@ -48,7 +48,11 @@ tasks.withType<Test>().configureEach {
     systemProperty("remozio.test.commandCapture", capture.asFile.absolutePath)
 }
 
-tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class", "**/HPKEInteropTest.class", "**/TLSInteropTest.class", "**/PairingSetupInteropTest.class", "**/LinuxPairToolLoopbackTest.class") }
+tasks.test {
+    exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class", "**/HPKEInteropTest.class", "**/TLSInteropTest.class",
+        "**/PairingSetupInteropTest.class", "**/LinuxPairToolLoopbackTest.class")
+    systemProperty("remozio.test.phoneCoreClasses", sourceSets.main.get().output.classesDirs.asPath)
+}
 
 // Linux only: pairs the JVM phone client with the software-key remozio-linux-pair experiment over loopback.
 // scripts/check-linux-pairing-peer.sh builds the binary; REMOZIO_LINUX_PAIR_TOOL overrides its path.
