@@ -53,15 +53,51 @@ final class AuthorityPairingProofReservations: Sendable {
         var customMirror: Mirror { Mirror(self, children: [Mirror.Child]()) }
     }
 
-    private struct Pending {
+    fileprivate struct Pending {
         let deadline: AuthorityMoment
         let peerPoint: Data
         let exporter: Data
         let challenge: Data
     }
 
+    /// A window can clear raw proof inputs without taking the reservation owner's lock.
+    final class PendingCandidates: Sendable {
+        private struct State {
+            var closed = false
+            var entries: [UUID: Pending] = [:]
+        }
+
+        private let state = Mutex(State())
+
+        fileprivate var count: Int { state.withLock { $0.entries.count } }
+
+        fileprivate func insert(_ entry: Pending, for id: UUID) throws {
+            try state.withLock {
+                guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
+                $0.entries[id] = entry
+            }
+        }
+
+        @discardableResult
+        fileprivate func remove(_ id: UUID) -> Pending? {
+            state.withLock { $0.entries.removeValue(forKey: id) }
+        }
+
+        fileprivate func prune(at current: AuthorityMoment) {
+            state.withLock { $0.entries = $0.entries.filter { AuthorityPairingProofReservations.isBefore(current, $0.value.deadline) } }
+        }
+
+        fileprivate func removeAll() { state.withLock { $0.entries.removeAll() } }
+
+        func close() {
+            state.withLock {
+                $0.closed = true
+                $0.entries.removeAll()
+            }
+        }
+    }
+
     private struct State {
-        var pending: [UUID: Pending] = [:]
         var connectionIDs: Set<UUID> = []
         // Keep an exporter fingerprint for replay rejection after its raw bytes leave pending.
         var exporterDigests: Set<SHA256.Digest> = []
@@ -76,7 +112,10 @@ final class AuthorityPairingProofReservations: Sendable {
     private let now: @Sendable () throws -> AuthorityMoment
     private let makeChallenge: @Sendable () throws -> Data
     private let verifyWindow: @Sendable () throws -> Void
+    private let pending: PendingCandidates
     private let state = Mutex(State())
+
+    var pendingCount: Int { pending.count }
 
     init(window: AuthorityPairingV2Window, authorityOwner: UUID, link: AuthorityPairingProofLink,
          now: @escaping @Sendable () throws -> AuthorityMoment, makeChallenge: @escaping @Sendable () throws -> Data,
@@ -84,7 +123,9 @@ final class AuthorityPairingProofReservations: Sendable {
         guard window.authorityOwner == authorityOwner else { throw AuthorityPairingSetupError.wrongScope }
         try verifyWindow()
         try link.verifyCurrent()
-        try window.bindProofLink(link, at: now())
+        let pending = PendingCandidates()
+        try window.bindProofLink(link, pending: pending, at: now())
+        self.pending = pending
         self.window = window
         self.link = link
         self.now = now
@@ -98,7 +139,7 @@ final class AuthorityPairingProofReservations: Sendable {
         try checkCurrentAndPrune()
         return try state.withLock {
             let received = try now()
-            guard !$0.retired, $0.pending.count < Self.maximumPending,
+            guard !$0.retired, pendingCount < Self.maximumPending,
                   $0.connectionIDs.count < Self.maximumRegistrations, !$0.connectionIDs.contains(connection),
                   peerPoint.count == 65, peerPoint.first == 4, exporter.count == 32 else {
                 throw AuthorityPairingSetupError.unavailable
@@ -114,9 +155,9 @@ final class AuthorityPairingProofReservations: Sendable {
             }
             try link.requireActive()
             let id = UUID()
+            try pending.insert(.init(deadline: deadline, peerPoint: peerPoint, exporter: exporter, challenge: challenge), for: id)
             $0.connectionIDs.insert(connection)
             $0.exporterDigests.insert(exporterDigest)
-            $0.pending[id] = .init(deadline: deadline, peerPoint: peerPoint, exporter: exporter, challenge: challenge)
             return Candidate(id: id, challenge: challenge)
         }
     }
@@ -124,7 +165,7 @@ final class AuthorityPairingProofReservations: Sendable {
     func verify(candidate: UUID, proposalBytes: Data, tag: Data) throws {
         try checkCurrentAndPrune()
         try state.withLock {
-            guard !$0.retired, let pending = $0.pending.removeValue(forKey: candidate) else {
+            guard !$0.retired, let pending = pending.remove(candidate) else {
                 throw AuthorityPairingSetupError.unavailable
             }
             let received = try now()
@@ -136,7 +177,6 @@ final class AuthorityPairingProofReservations: Sendable {
             let proof = PairingSetupV2Proof(windowID: window.id, connection: candidate, peerPoint: pending.peerPoint,
                 challenge: pending.challenge, exporter: pending.exporter, proposal: proposal, tag: tag)
             try window.verifyProof(proof, link: link, deadline: pending.deadline, at: received)
-            $0.pending.removeAll()
             do {
                 let completed = try now()
                 guard completed.milliseconds >= received.milliseconds, Self.isBefore(completed, pending.deadline) else {
@@ -159,8 +199,8 @@ final class AuthorityPairingProofReservations: Sendable {
     }
 
     func retire(candidate: UUID) {
-        state.withLock {
-            $0.pending.removeValue(forKey: candidate)
+        state.withLock { _ in
+            pending.remove(candidate)
             window.disconnected(candidate)
         }
         prunePending()
@@ -170,7 +210,7 @@ final class AuthorityPairingProofReservations: Sendable {
         link.retire()
         state.withLock {
             $0.retired = true
-            $0.pending.removeAll()
+            pending.close()
             $0.connectionIDs.removeAll()
             $0.exporterDigests.removeAll()
             window.retireProofLink(link)
@@ -184,12 +224,12 @@ final class AuthorityPairingProofReservations: Sendable {
     }
 
     private func prunePending() {
-        state.withLock {
+        state.withLock { _ in
             guard let current = try? now(), window.acceptsProofRegistrations(for: link, at: current) else {
-                $0.pending.removeAll()
+                pending.removeAll()
                 return
             }
-            $0.pending = $0.pending.filter { Self.isBefore(current, $0.value.deadline) }
+            pending.prune(at: current)
         }
     }
 

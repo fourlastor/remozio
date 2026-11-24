@@ -1440,6 +1440,79 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             challenge: challenge, exporter: valid ? exporter : Data(repeating: 93, count: 32), proposal: proposal, tag: tag)
     }
 
+    func testAppWindowClosureClearsPendingProofsWithoutTransportCallingAgain() throws {
+        for cancel in [false, true] {
+            let fixture = try Fixture()
+            let owner = try fixture.endpoint()
+            let invitation = try openV2(owner)
+            let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+            let reservations = try owner.proofReservations(windowID: invitation.windowID, link: link)
+            let proposal = try fixture.proposal()
+            _ = try reservations.register(connection: UUID(), acceptedAt: 100,
+                peerPoint: proposal.transportKey.publicKey, exporter: Data(repeating: 84, count: 32))
+            XCTAssertEqual(reservations.pendingCount, 1)
+
+            if cancel {
+                let cancelled = Box(false)
+                owner.cancelPairing { cancelled.value = $0 }
+                XCTAssertTrue(cancelled.value)
+            } else {
+                owner.close()
+            }
+            XCTAssertEqual(reservations.pendingCount, 0)
+        }
+    }
+
+    func testProofReservationsRejectUnavailableAppWindows() throws {
+        let fixture = try Fixture()
+        let owner = try fixture.endpoint()
+        let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+        XCTAssertThrowsError(try owner.proofReservations(windowID: Data(count: 16), link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+
+        let invitation = try openV2(owner)
+        var wrongID = invitation.windowID
+        wrongID[0] ^= 1
+        XCTAssertThrowsError(try owner.proofReservations(windowID: wrongID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+
+        let cancelled = Box(false)
+        owner.cancelPairing { cancelled.value = $0 }
+        XCTAssertTrue(cancelled.value)
+        XCTAssertThrowsError(try owner.proofReservations(windowID: invitation.windowID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+
+        let secondOwner = try fixture.endpoint()
+        let secondInvitation = try openV2(secondOwner)
+        secondOwner.close()
+        XCTAssertThrowsError(try secondOwner.proofReservations(windowID: secondInvitation.windowID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+    }
+
+    func testProofReservationPolicyCanCloseAppEndpointOnAnotherThread() throws {
+        let fixture = try Fixture()
+        let owner = try fixture.endpoint()
+        let invitation = try openV2(owner)
+        let closeFinished = DispatchSemaphore(value: 0)
+        let closedDuringPolicy = Box(false)
+        let link = AuthorityPairingProofLink(verifyPolicy: {
+            DispatchQueue.global().async {
+                owner.close()
+                closeFinished.signal()
+            }
+            closedDuringPolicy.value = closeFinished.wait(timeout: .now() + .seconds(3)) == .success
+            guard closedDuringPolicy.value else { throw Failure.denied }
+        }, validatePolicy: { _ in })
+        XCTAssertThrowsError(try owner.proofReservations(windowID: invitation.windowID, link: link)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+        XCTAssertTrue(closedDuringPolicy.value)
+    }
+
     private enum ProofWindowClosure { case lateConfirmation, retiredCandidate, lostConfirmation }
 
     private func assertProofClosureReleasesAdmission(_ closure: ProofWindowClosure) throws {

@@ -15,6 +15,12 @@ final class AuthorityPairingV2Window: Sendable {
     private struct State {
         var phase: Phase
         var proofLink: AuthorityPairingProofLink?
+        weak var pendingProofs: AuthorityPairingProofReservations.PendingCandidates?
+
+        mutating func close() {
+            phase = .closed
+            pendingProofs?.close()
+        }
     }
 
     private let state: Mutex<State>
@@ -48,13 +54,15 @@ final class AuthorityPairingV2Window: Sendable {
         }
     }
 
-    func bindProofLink(_ link: AuthorityPairingProofLink, at now: AuthorityMoment) throws {
+    func bindProofLink(_ link: AuthorityPairingProofLink, pending: AuthorityPairingProofReservations.PendingCandidates,
+                       at now: AuthorityMoment) throws {
         try state.withLock {
             try requireCurrent(now)
             try link.requireActive()
             guard $0.proofLink == nil, case .open = $0.phase else { throw AuthorityPairingSetupError.unavailable }
             try link.claim()
             $0.proofLink = link
+            $0.pendingProofs = pending
         }
     }
 
@@ -104,6 +112,7 @@ final class AuthorityPairingV2Window: Sendable {
             }
             try requireConfirmationDeadline(deadline, at: now)
             $0.phase = .awaitingConfirmation(proof.connection, try verifiedProposal(proof, invitation: invitation), deadline)
+            $0.pendingProofs?.close()
         }
     }
 
@@ -116,7 +125,7 @@ final class AuthorityPairingV2Window: Sendable {
                 try link.requireActive()
                 try requireConfirmationDeadline(deadline, at: now)
             } catch {
-                $0.phase = .closed
+                $0.close()
                 throw error
             }
             $0.phase = .proved(id, proposal)
@@ -156,7 +165,7 @@ final class AuthorityPairingV2Window: Sendable {
             switch $0.phase {
             case .awaitingConfirmation(let owner, _, _) where owner == connection,
                  .proved(let owner, _) where owner == connection, .staging(let owner) where owner == connection:
-                $0.phase = .closed
+                $0.close()
                 return true
             default:
                 return false
@@ -165,7 +174,7 @@ final class AuthorityPairingV2Window: Sendable {
     }
 
     func retireProofLink(_ link: AuthorityPairingProofLink) {
-        state.withLock { if $0.proofLink === link { $0.phase = .closed } }
+        state.withLock { if $0.proofLink === link { $0.close() } }
     }
 
     func expireIfDue(_ now: AuthorityMoment) throws {
@@ -178,13 +187,13 @@ final class AuthorityPairingV2Window: Sendable {
                     try requireConfirmationDeadline(deadline, at: now)
                 }
             } catch {
-                $0.phase = .closed
+                $0.close()
                 throw error
             }
         }
     }
 
-    func close() { state.withLock { $0.phase = .closed } }
+    func close() { state.withLock { $0.close() } }
 
     private func requireCurrent(_ now: AuthorityMoment) throws {
         guard now.epoch == started.epoch, now.milliseconds >= started.milliseconds, now.milliseconds < deadline else {
