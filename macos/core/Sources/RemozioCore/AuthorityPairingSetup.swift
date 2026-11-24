@@ -165,8 +165,8 @@ final class AuthorityPairingSetupAccess: Sendable {
     /// Bind the proof connection only to a window created by this Authority owner.
     func proofReservations(for window: AuthorityPairingV2Window,
                            link: AuthorityPairingProofLink) throws -> AuthorityPairingProofReservations {
-        guard window.authorityOwner == pairingWindowOwner else { throw AuthorityPairingSetupError.wrongScope }
-        return try .init(window: window, link: link, now: now, makeChallenge: { [random] in try random(32) },
+        try .init(window: window, authorityOwner: pairingWindowOwner, link: link, now: now,
+                  makeChallenge: { [random] in try random(32) },
                          verifyWindow: { [self] in try verifyV2Window(window) })
     }
 

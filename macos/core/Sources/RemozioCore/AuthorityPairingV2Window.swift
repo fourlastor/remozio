@@ -6,7 +6,7 @@ import Synchronization
 final class AuthorityPairingV2Window: Sendable {
     private enum Phase {
         case open(PairingInvitationV2)
-        case awaitingConfirmation(UUID, Data)
+        case awaitingConfirmation(UUID, Data, AuthorityMoment)
         case proved(UUID, Data)
         case staging(UUID)
         case closed
@@ -58,6 +58,14 @@ final class AuthorityPairingV2Window: Sendable {
         }
     }
 
+    func acceptsProofRegistrations(for link: AuthorityPairingProofLink, at now: AuthorityMoment) -> Bool {
+        state.withLock {
+            guard $0.proofLink === link, case .open = $0.phase else { return false }
+            do { try requireCurrent(now); try link.requireActive(); return true }
+            catch { return false }
+        }
+    }
+
     func proofDeadline(for link: AuthorityPairingProofLink, acceptedAt: UInt64, at now: AuthorityMoment) throws -> AuthorityMoment {
         try state.withLock {
             try requireCurrent(now)
@@ -86,23 +94,30 @@ final class AuthorityPairingV2Window: Sendable {
     }
 
     /// A verified proof spends the one-use invitation. Staging waits for Transport to confirm the candidate.
-    func verifyProof(_ proof: PairingSetupV2Proof, link: AuthorityPairingProofLink, at now: AuthorityMoment) throws {
+    func verifyProof(_ proof: PairingSetupV2Proof, link: AuthorityPairingProofLink,
+                     deadline: AuthorityMoment, at now: AuthorityMoment) throws {
         try state.withLock {
             try requireCurrent(now)
             try link.requireActive()
             guard $0.proofLink === link, case .open(let invitation) = $0.phase else {
                 throw AuthorityPairingSetupError.invalidConfirmation
             }
-            $0.phase = .awaitingConfirmation(proof.connection, try verifiedProposal(proof, invitation: invitation))
+            try requireConfirmationDeadline(deadline, at: now)
+            $0.phase = .awaitingConfirmation(proof.connection, try verifiedProposal(proof, invitation: invitation), deadline)
         }
     }
 
     func confirmProof(candidate: UUID, link: AuthorityPairingProofLink, at now: AuthorityMoment) throws {
         try state.withLock {
-            try requireCurrent(now)
-            try link.requireActive()
-            guard $0.proofLink === link, case .awaitingConfirmation(let id, let proposal) = $0.phase, id == candidate else {
-                throw AuthorityPairingSetupError.invalidConfirmation
+            guard $0.proofLink === link, case .awaitingConfirmation(let id, let proposal, let deadline) = $0.phase,
+                  id == candidate else { throw AuthorityPairingSetupError.invalidConfirmation }
+            do {
+                try requireCurrent(now)
+                try link.requireActive()
+                try requireConfirmationDeadline(deadline, at: now)
+            } catch {
+                $0.phase = .closed
+                throw error
             }
             $0.phase = .proved(id, proposal)
         }
@@ -139,7 +154,7 @@ final class AuthorityPairingV2Window: Sendable {
     func disconnected(_ connection: UUID) -> Bool {
         state.withLock {
             switch $0.phase {
-            case .awaitingConfirmation(let owner, _) where owner == connection,
+            case .awaitingConfirmation(let owner, _, _) where owner == connection,
                  .proved(let owner, _) where owner == connection, .staging(let owner) where owner == connection:
                 $0.phase = .closed
                 return true
@@ -155,8 +170,17 @@ final class AuthorityPairingV2Window: Sendable {
 
     func expireIfDue(_ now: AuthorityMoment) throws {
         try state.withLock {
-            do { try requireCurrent(now); try $0.proofLink?.requireActive() }
-            catch { $0.phase = .closed; throw error }
+            do {
+                if case .closed = $0.phase { throw AuthorityPairingSetupError.unavailable }
+                try requireCurrent(now)
+                try $0.proofLink?.requireActive()
+                if case .awaitingConfirmation(_, _, let deadline) = $0.phase {
+                    try requireConfirmationDeadline(deadline, at: now)
+                }
+            } catch {
+                $0.phase = .closed
+                throw error
+            }
         }
     }
 
@@ -166,6 +190,11 @@ final class AuthorityPairingV2Window: Sendable {
         guard now.epoch == started.epoch, now.milliseconds >= started.milliseconds, now.milliseconds < deadline else {
             throw PairingEnrollmentError.expired
         }
+    }
+
+    private func requireConfirmationDeadline(_ proofDeadline: AuthorityMoment, at now: AuthorityMoment) throws {
+        guard proofDeadline.epoch == started.epoch, proofDeadline.milliseconds <= deadline,
+              now.milliseconds < proofDeadline.milliseconds else { throw PairingEnrollmentError.expired }
     }
 
     private func verifiedProposal(_ proof: PairingSetupV2Proof, invitation: PairingInvitationV2) throws -> Data {

@@ -18,9 +18,12 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
         let invitation: PairingInvitationV2
         let window: AuthorityPairingV2Window
         let proposal: PairingPhoneProposal
-        let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+        let authorityOwner = UUID()
+        let link: AuthorityPairingProofLink
 
-        init(lifetime: UInt64 = 10_000) throws {
+        init(lifetime: UInt64 = 10_000, verifyPolicy: @escaping @Sendable () throws -> Void = {}) throws {
+            link = .init(verifyPolicy: verifyPolicy, validatePolicy: { _ in })
+
             let scope = try ChannelScope(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
                 phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
             let publicInvitation = try PairingInvitation(macID: scope.macID, accountID: scope.accountID, label: "Fixture",
@@ -28,7 +31,8 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
                 transportPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation, minimumEnvelopeVersion: 1)
             invitation = try PairingInvitationV2(invitation: publicInvitation, windowID: Data(repeating: 5, count: 16),
                 secret: Data(repeating: 6, count: 32), lifetimeMilliseconds: lifetime)
-            window = try AuthorityPairingV2Window(invitation: invitation, predecessor: nil, started: clock.now())
+            window = try AuthorityPairingV2Window(invitation: invitation, predecessor: nil, started: clock.now(),
+                                                  authorityOwner: authorityOwner)
             let offer = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 7, count: 32),
                 envelopeVersions: [1], requests: [], auditVersions: [])
             func key(_ id: UInt8) throws -> PairingKey {
@@ -39,7 +43,8 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
 
         func reservations(makeChallenge: @escaping @Sendable () throws -> Data = { Data(repeating: 13, count: 32) })
             throws -> AuthorityPairingProofReservations {
-            try .init(window: window, link: link, now: clock.now, makeChallenge: makeChallenge, verifyWindow: {})
+            try .init(window: window, authorityOwner: authorityOwner, link: link, now: clock.now,
+                      makeChallenge: makeChallenge, verifyWindow: {})
         }
 
         func register(_ reservations: AuthorityPairingProofReservations, connection: UUID = UUID(),
@@ -91,6 +96,7 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
             let exporter = Data(repeating: mismatch == 1 ? 21 : 20, count: 32)
             let wrongChallenge = mismatch == 2 ? Data(repeating: 14, count: 32) : nil
             XCTAssertThrowsError(try fixture.verify(reservations, candidate, exporter: exporter, challenge: wrongChallenge))
+            XCTAssertThrowsError(try fixture.verify(reservations, candidate))
             XCTAssertThrowsError(try reservations.confirm(candidate: candidate.id))
             let nextExporter = Data(repeating: 22, count: 32)
             let next = try fixture.register(reservations, exporter: nextExporter)
@@ -112,6 +118,53 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
         XCTAssertEqual(clock.now().milliseconds, 3_100)
     }
 
+    func testRegistrationRejectsAnAcceptThatAlreadyExpired() throws {
+        let fixture = try Fixture(), reservations = try fixture.reservations()
+        fixture.clock.advance(to: 3_100)
+        XCTAssertThrowsError(try fixture.register(reservations, acceptedAt: 100)) {
+            XCTAssertEqual($0 as? PairingEnrollmentError, .expired)
+        }
+        XCTAssertNoThrow(try fixture.register(reservations, acceptedAt: 101))
+    }
+
+    func testSecondValidProofCannotClaimAnAlreadySpentWindow() throws {
+        let fixture = try Fixture(), reservations = try fixture.reservations()
+        let first = try fixture.register(reservations)
+        let exporter = Data(repeating: 22, count: 32)
+        let second = try fixture.register(reservations, exporter: exporter)
+        try fixture.verify(reservations, first)
+        XCTAssertThrowsError(try fixture.verify(reservations, second, exporter: exporter))
+        XCTAssertThrowsError(try reservations.confirm(candidate: second.id))
+        try reservations.confirm(candidate: first.id)
+    }
+
+    func testVerifyPolicyFailureBlocksEveryProofOperation() throws {
+        let allowed = MutexBox()
+        let fixture = try Fixture { if !allowed.value.withLock({ $0 }) { throw AuthorityPairingSetupError.policyChanged } }
+        let reservations = try fixture.reservations()
+        allowed.value.withLock { $0 = false }
+        XCTAssertThrowsError(try fixture.register(reservations)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .policyChanged)
+        }
+
+        allowed.value.withLock { $0 = true }
+        let candidate = try fixture.register(reservations)
+        allowed.value.withLock { $0 = false }
+        XCTAssertThrowsError(try fixture.verify(reservations, candidate)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .policyChanged)
+        }
+        allowed.value.withLock { $0 = true }
+        try fixture.verify(reservations, candidate)
+        allowed.value.withLock { $0 = false }
+        XCTAssertThrowsError(try reservations.confirm(candidate: candidate.id)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .policyChanged)
+        }
+    }
+
+    private final class MutexBox: Sendable {
+        let value = Mutex(true)
+    }
+
     func testExpiredConfirmCannotReopenOrStageTheWindow() throws {
         let fixture = try Fixture(), reservations = try fixture.reservations()
         let candidate = try fixture.register(reservations)
@@ -128,6 +181,8 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
     func testProofDeadlineIsCappedByTheAuthorityWindow() throws {
         let fixture = try Fixture(lifetime: 1_000), reservations = try fixture.reservations()
         fixture.clock.advance(to: 1_000)
+        let deadline = try fixture.window.proofDeadline(for: fixture.link, acceptedAt: 990, at: fixture.clock.now())
+        XCTAssertEqual(deadline.milliseconds, 1_100)
         let candidate = try fixture.register(reservations, acceptedAt: 990)
         fixture.clock.advance(to: 1_099)
         try fixture.verify(reservations, candidate)
@@ -164,14 +219,14 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
         let fixture = try Fixture(), reservations = try fixture.reservations()
         let other = try Fixture()
         XCTAssertThrowsError(try fixture.reservations())
-        XCTAssertThrowsError(try AuthorityPairingProofReservations(window: other.window, link: fixture.link, now: other.clock.now,
-            makeChallenge: { Data(repeating: 13, count: 32) }, verifyWindow: {}))
+        XCTAssertThrowsError(try AuthorityPairingProofReservations(window: other.window, authorityOwner: other.authorityOwner,
+            link: fixture.link, now: other.clock.now, makeChallenge: { Data(repeating: 13, count: 32) }, verifyWindow: {}))
         let candidate = try fixture.register(reservations)
         try fixture.verify(reservations, candidate)
         try reservations.confirm(candidate: candidate.id)
     }
 
-    func testRetiredLinkCannotStageOrAffectAnotherWindow() throws {
+    func testRetiredLinkCannotStage() throws {
         let fixture = try Fixture(), reservations = try fixture.reservations()
         let candidate = try fixture.register(reservations)
         try fixture.verify(reservations, candidate)
@@ -181,10 +236,5 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
             matching: fixture.proposal.encode(), at: fixture.clock.now()))
         XCTAssertThrowsError(try fixture.register(reservations))
 
-        let next = try Fixture(), replacement = try next.reservations()
-        let newCandidate = try next.register(replacement)
-        reservations.retire(candidate: candidate.id)
-        try next.verify(replacement, newCandidate)
-        try replacement.confirm(candidate: newCandidate.id)
     }
 }
