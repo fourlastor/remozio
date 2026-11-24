@@ -139,7 +139,8 @@ class PinnedTLSClient private constructor(
             if (!authenticated && status == SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING) authenticate(tls)
             val wrap = status == SSLEngineResult.HandshakeStatus.NEED_WRAP ||
                 (status == SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING && source.hasRemaining())
-            val unwrapAgain = status == SSLEngineResult.HandshakeStatus.NEED_UNWRAP_AGAIN
+            // Some Android TLS runtimes omit this enum value even when the SDK exposes it.
+            val unwrapAgain = status.name == "NEED_UNWRAP_AGAIN"
             if (!wrap && incoming.position() == 0 && !unwrapAgain) break
             outgoing.clear(); decoded.clear()
             val result = if (wrap) tls.wrap(if (authenticated) source else ByteBuffer.allocate(0), outgoing) else {

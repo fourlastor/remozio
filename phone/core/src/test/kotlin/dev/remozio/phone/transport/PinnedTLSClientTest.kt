@@ -1,11 +1,16 @@
 package dev.remozio.phone.transport
 
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.net.Socket
+import java.nio.file.Files
+import java.nio.file.Path
 import java.security.KeyPairGenerator
 import java.security.Principal
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
+import java.util.spi.ToolProvider
 import javax.net.ssl.KeyManager
 import javax.net.ssl.SSLException
 import javax.net.ssl.X509KeyManager
@@ -74,4 +79,26 @@ class PinnedTLSClientTest {
         assertEquals(TLSClientState.CLOSED, engine.state())
         assertThrows(IllegalStateException::class.java) { engine.start() }
     }
+
+    @Test fun bytecodeDoesNotLinkTheOptionalUnwrapAgainField() {
+        val type = PinnedTLSClient::class.java
+        val bytecode = StringWriter()
+        val printer = PrintWriter(bytecode)
+        val javap = ToolProvider.findFirst("javap").orElseThrow()
+        val classpath = Path.of(type.protectionDomain.codeSource.location.toURI()).toString()
+        val classes = Files.walk(Path.of(classpath)).use { files ->
+            files.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".class") }
+                .sorted().map(Path::toString).toList()
+        }
+        assertFalse("No compiled phone/core classes found", classes.isEmpty())
+        for (batch in classes.chunked(32)) {
+            bytecode.buffer.setLength(0)
+            assertEquals(0, javap.run(printer, printer, "-v", *batch.toTypedArray()))
+            assertFalse("The Android runtime may omit the optional handshake status field",
+                bytecode.toString().lineSequence().any {
+                    "Fieldref" in it && "HandshakeStatus.NEED_UNWRAP_AGAIN:" in it
+                })
+        }
+    }
+
 }
