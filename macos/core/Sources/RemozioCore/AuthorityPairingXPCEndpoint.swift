@@ -84,7 +84,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         self.access = access; self.budget = budget; self.verify = verify; self.authorize = authorize
         self.invalidate = invalidate; self.onHandshake = onHandshake
     }
-    deinit { expiryTimer?.cancel(); attemptActivity?.close() }
+    deinit { expiryTimer?.cancel(); v2Window?.close(); attemptActivity?.close() }
     /// Samples actual ownership without waiting for the operation lock or mutating the pairing lifetime.
     func maintenancePairingWork() throws -> AuthorityMaintenancePairingWork {
         try state.withLock {

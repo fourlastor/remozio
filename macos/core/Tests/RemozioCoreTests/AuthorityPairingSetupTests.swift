@@ -1440,6 +1440,51 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             challenge: challenge, exporter: valid ? exporter : Data(repeating: 93, count: 32), proposal: proposal, tag: tag)
     }
 
+    func testAuthenticatedProofChecksAuthorityOwnerAndTransportPolicyAtStageAndCommit() throws {
+        for retireBeforeCommit in [false, true] {
+            let fixture = try Fixture(), foreign = try Fixture(accountByte: 4)
+            let window = try fixture.access.openV2Window(label: "Fixture", predecessor: nil)
+            let invitation = try PairingInvitationV2.decode(fixture.access.exportV2Window(window))
+            let policyActive = Box(true)
+            let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in
+                guard policyActive.value else { throw Failure.denied }
+            })
+            XCTAssertThrowsError(try foreign.access.proofReservations(for: window, link: link)) {
+                XCTAssertEqual($0 as? AuthorityPairingSetupError, .wrongScope)
+            }
+            let reservations = try fixture.access.proofReservations(for: window, link: link)
+            let draft = try fixture.proposal()
+            let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+                decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+            let bytes = try proposal.encode(), exporter = Data(repeating: 81, count: 32)
+            let candidate = try reservations.register(connection: UUID(), acceptedAt: 100,
+                peerPoint: proposal.transportKey.publicKey, exporter: exporter)
+            let tag = try invitation.proof(proposal: proposal, challenge: candidate.challenge, exporter: exporter)
+            try reservations.verify(candidate: candidate.id, proposalBytes: bytes, tag: tag)
+            XCTAssertThrowsError(try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {}))
+            try reservations.confirm(candidate: candidate.id)
+
+            if retireBeforeCommit {
+                let attempt = try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {})
+                let transcript = attempt.transcript
+                let signature = try fixture.biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+                policyActive.value = false
+                XCTAssertThrowsError(try fixture.access.commit(attempt, setupID: transcript.setupID,
+                    confirmedDigest: transcript.digest(), proof: signature, window: window, authorize: {})) {
+                    guard case Failure.denied = $0 else { return XCTFail("Expected Transport policy refusal") }
+                }
+            } else {
+                policyActive.value = false
+                XCTAssertThrowsError(try fixture.access.stageV2(window, connection: candidate.id, proposalBytes: bytes, authorize: {})) {
+                    guard case Failure.denied = $0 else { return XCTFail("Expected Transport policy refusal") }
+                }
+            }
+            XCTAssertEqual(try fixture.records(), 0)
+            XCTAssertEqual(fixture.environment.signed.value, 0)
+            try fixture.assertCheckpoint()
+        }
+    }
+
     func testV2ProofReservesOnlyTheExactProposalAndUsesExistingCommit() throws {
         let f = try Fixture(), endpoint = try f.endpoint()
         let invitation = try openV2(endpoint)
