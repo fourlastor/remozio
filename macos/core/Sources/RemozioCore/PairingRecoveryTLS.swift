@@ -23,15 +23,12 @@ enum PairingRecoveryTLS {
 
     static func exporter(_ metadata: sec_protocol_metadata_t) throws -> Data {
         let label = PairingRecoveryFrame.exporterLabel
-        guard let bytes = sec_protocol_metadata_create_secret(metadata, label.utf8.count, label, 32),
-              dispatch_data_get_size(bytes) == 32 else { throw DirectListenerError.invalidIdentity }
-        var exporter = Data()
-        exporter.reserveCapacity(32)
-        let copied = dispatch_data_apply(bytes) { _, _, buffer, size in
-            exporter.append(buffer.assumingMemoryBound(to: UInt8.self), count: size)
-            return true
+        guard let raw = sec_protocol_metadata_create_secret(metadata, label.utf8.count, label, 32) else {
+            throw DirectListenerError.invalidIdentity
         }
-        guard copied, exporter.count == 32 else { throw DirectListenerError.invalidIdentity }
-        return exporter
+        // Security returns the Objective-C dispatch type. Swift's Dispatch overlay owns its bytes.
+        let exporter = DispatchData._unconditionallyBridgeFromObjectiveC(raw)
+        guard exporter.count == 32 else { throw DirectListenerError.invalidIdentity }
+        return Data(exporter)
     }
 }
