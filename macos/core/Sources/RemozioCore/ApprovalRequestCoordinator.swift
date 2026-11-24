@@ -236,9 +236,100 @@ public final class ApprovalRequestCoordinator {
         return try write { tx in
             try verifyHost(tx)
             try recheckAdministrator()
+            if let predecessor = try tx.approvalEnrollments().first(where: { DeliveryRecipient($0) == selection.phone }),
+               !predecessor.approval.active,
+               try tx.removeRecoveryStageForRevocation(phoneID: selection.phone.phoneID,
+                                                        enrollmentEpoch: selection.phone.enrollmentEpoch, writer: writer) {
+                switch predecessor.gatewayRevocation?.progress {
+                case .pending: return .gatewayPending
+                case .applied: return .gatewayApplied
+                case .blocked: return .gatewayBlocked
+                case nil: return .revokedOnMac
+                }
+            }
             return try tx.revokeManagedPhone(selection.phone, expectedTrustRevision: selection.revision,
                 eventID: eventID, writer: writer, expectedAuditHead: head(tx))
         }
+    }
+
+    func stageRePair(phoneID: Data, proposalDigest: Data, now: () throws -> AuthorityMoment,
+                     authorize: () throws -> Void,
+                     prepare: (JournalTransaction, AuthorityMoment, PairingRecoveryStage?) throws -> PairingEnrollmentAttempt)
+        throws -> PairingEnrollmentAttempt {
+        if let existing = try read({ tx -> PairingEnrollmentAttempt? in
+            guard let stage = try tx.pendingRecoveryStage(phoneID: phoneID) else { return nil }
+            let moment = try now()
+            try checkClock(moment)
+            guard moment.epoch == stage.incarnation, moment.milliseconds >= stage.started else {
+                throw PairingEnrollmentError.expired
+            }
+            guard moment.milliseconds < stage.deadline else { return nil }
+            guard stage.proposalDigest == proposalDigest else { throw PairingRecoveryStageError.pendingForIdentity }
+            try authorize()
+            return try prepare(tx, moment, stage)
+        }) { return existing }
+
+        return try write { tx in
+            try authorize()
+            let moment = try now()
+            try checkClock(moment)
+            let attempt = try prepare(tx, moment, nil)
+            let stage = try attempt.recoveryStage()
+            guard stage.transcript.phone.scope.phoneID == phoneID, stage.proposalDigest == proposalDigest else {
+                throw PairingEnrollmentError.wrongContext
+            }
+            let ready = try now()
+            try checkClock(ready)
+            guard try !isDue(stage, at: ready) else { throw PairingEnrollmentError.expired }
+            try tx.reserveRecoveryStage(stage, now: ready)
+            return attempt
+        }
+    }
+
+    func expireRePair(_ attempt: PairingEnrollmentAttempt, now: () throws -> AuthorityMoment) throws -> Bool {
+        let identity = try attempt.recoveryStage()
+        let status = try read { tx -> (terminal: Bool, due: PairingRecoveryStage?) in
+            guard let stage = try tx.recoveryStage(setupID: identity.transcript.setupID) else {
+                throw PairingRecoveryStageError.noPendingStage
+            }
+            try requireSameStage(stage, as: identity)
+            guard stage.state == .pending else { return (true, nil) }
+            let moment = try now()
+            try checkClock(moment)
+            return (false, try isDue(stage, at: moment) ? stage : nil)
+        }
+        guard let due = status.due else { return status.terminal }
+        return try write { tx in
+            let moment = try now()
+            try checkClock(moment)
+            guard try isDue(due, at: moment) else { throw PairingEnrollmentError.expired }
+            try tx.expireRecoveryStage(due)
+            return true
+        }
+    }
+
+    func discardExpiredRePair(setupID: Data, digest: Data, verifyHost: (JournalTransaction) throws -> Void,
+                              authorize: () throws -> Void) throws {
+        try write { tx in
+            try verifyHost(tx)
+            try authorize()
+            let phoneID = try tx.discardExpiredRecoveryStage(setupID: setupID, digest: digest)
+            try tx.appendRecoveryStageEvent(phoneID: phoneID, writer: writer, authentication: .localAdministrator, reason: .userCancelled)
+        }
+    }
+
+    private func requireSameStage(_ stage: PairingRecoveryStage, as attempt: PairingRecoveryStage) throws {
+        guard stage.transcriptDigest == attempt.transcriptDigest, stage.proposalDigest == attempt.proposalDigest,
+              stage.incarnation == attempt.incarnation, stage.started == attempt.started, stage.deadline == attempt.deadline else {
+            throw PairingRecoveryStageError.noPendingStage
+        }
+    }
+
+    private func isDue(_ stage: PairingRecoveryStage, at moment: AuthorityMoment) throws -> Bool {
+        guard moment.epoch == stage.incarnation, moment.milliseconds >= stage.started else {
+            throw PairingEnrollmentError.expired
+        }
+        return moment.milliseconds >= stage.deadline
     }
 
     /// Local setup only. The host rechecks administrator consent inside the checkpointed commit.
@@ -251,15 +342,38 @@ public final class ApprovalRequestCoordinator {
         let transcript = attempt.transcript
         guard transcript.phone.scope.macID == mac, transcript.phone.scope.accountID == account,
               transcript.macAuthorityKey == authorityPublicKey else { throw PairingEnrollmentError.wrongContext }
-        let committed = try write { tx in
+        let committedResult: Result<(revision: UUID, gatewayControl: GatewayAuthorityEnvelope?), any Error> = try write { tx in
             try verifyHost(tx)
             try recheckAdministrator()
-            return try attempt.commit(transaction: tx, biometricProof: biometricProof, writer: writer,
+            var recoveryStage: PairingRecoveryStage?
+            if attempt.recoveryProposalDigest != nil {
+                guard let stage = try tx.recoveryStage(setupID: transcript.setupID),
+                      stage.state == .pending else { throw PairingRecoveryStageError.noPendingStage }
+                try requireSameStage(stage, as: attempt.recoveryStage())
+                let moment = try now()
+                try checkClock(moment)
+                if try isDue(stage, at: moment) {
+                    try tx.expireRecoveryStage(stage)
+                    return .failure(PairingEnrollmentError.expired)
+                }
+                do { try attempt.validateEnrollmentHistory(tx) }
+                catch let error as EnrollmentJournalError where error == .unavailableEnrollment || error == .recoveryRequired || error == .reusedIdentity {
+                    try tx.removePendingRecoveryStage(stage)
+                    try tx.appendRecoveryStageEvent(phoneID: transcript.phone.scope.phoneID, writer: writer,
+                                                    authentication: .system, reason: .bindingMismatch)
+                    return .failure(error)
+                }
+                recoveryStage = stage
+            }
+            let committed = try attempt.commit(transaction: tx, biometricProof: biometricProof, writer: writer,
                 expectedAuditHead: head(tx), addEventID: addEventID, removalEventID: removalEventID,
                 receiptTimeMs: receiptTimeMs, gateway: gateway, now: {
                     let moment = try now(); try checkClock(moment); return moment
                 })
+            if let recoveryStage { try tx.removePendingRecoveryStage(recoveryStage) }
+            return .success(committed)
         }
+        let committed = try committedResult.get()
         let receipt = try retainedPairingReceipt(setupID: transcript.setupID, phoneID: transcript.phone.scope.phoneID,
             epoch: transcript.phone.scope.enrollmentEpoch, authorityPublicKey: authorityPublicKey,
             verifyHost: verifyHost, sign: sign)
@@ -525,6 +639,7 @@ public final class ApprovalRequestCoordinator {
         }.sorted { $0.lexicographicallyPrecedes($1) }
         try write { tx in
             _ = try head(tx)
+            if checkpointed != nil { try tx.expireDueRecoveryStages(now: now) }
             for id in expired {
                 guard let entry = entries[id] else { throw ApprovalCoordinatorError.unknownRequest }
                 try append(tx, requestID: id, category: entry.category, kind: .expired, outcome: .expired,

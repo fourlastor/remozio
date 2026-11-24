@@ -25,6 +25,16 @@ VERSION_SQL = re.compile(
     rf"""\b(PRAGMA\s+(?:{SQL_SCHEMA}\s*\.\s*)?['"`\[]?user_version\b|pragma_user_version\b)""",
     re.IGNORECASE,
 )
+TIER_STORAGE = re.compile(r"\bauthority_feature_tier_v1\b", re.IGNORECASE)
+TIER_TABLE_REFERENCE = re.compile(r"\bAuthorityJournalSchema\s*\.\s*tierTable\b")
+TIER_READS = {
+    "JournalDatabase.swift": (
+        r"""SELECT 1 FROM main.sqlite_schema WHERE name IN ('\(AuthorityJournalSchema.tierTable)', '\(PairingRecoveryStageJournal.table)')""",
+    ),
+    "JournalContinuityDigest.swift": (
+        r"+ (recoveryFormat ? [AuthorityJournalSchema.tierTable, PairingRecoveryStageJournal.table] : [])",
+    ),
+}
 LEGACY_TIER_API = re.compile(r"\b(?:storageSchemaVersion\b|submissionSchemaVersion\s*(?=\())")
 PHYSICAL_ACCESSOR = re.compile(r"\bstorageFormatVersion\b")
 PHYSICAL_READER = re.compile(r"\b(?:AuthorityJournalSchema\s*\.\s*formatVersion\b|formatVersion\s*\(\s*on\s*:)")
@@ -55,6 +65,10 @@ def bypasses_resolver(filename, source):
     violations = []
     if filename not in INDEPENDENT_STORES and filename != "AuthorityJournalSchema.swift":
         violations.extend(match.group() for match in VERSION_SQL.finditer(sql_source))
+    if filename != "AuthorityJournalSchema.swift":
+        violations.extend(match.group() for match in TIER_STORAGE.finditer(sql_source))
+        tier_source = omit_lines_once(sql_source, TIER_READS.get(filename, ()))
+        violations.extend(match.group() for match in TIER_TABLE_REFERENCE.finditer(tier_source))
     if filename == "JournalDatabase.swift":
         source = omit_lines_once(source, PHYSICAL_ACCESSOR_IMPLEMENTATION)
     violations.extend(match.group() for match in LEGACY_TIER_API.finditer(source))
@@ -84,6 +98,9 @@ class AuthorityJournalFeatureTierGuardTest(unittest.TestCase):
             'try exec("PRA" + "GMA aux.user_" + "version")',
             'try exec(#"PRAGMA "# +\n #"aux."# + #"user_version"#)',
             'SELECT user_version FROM pragma_user_version',
+            'try exec("UPDATE main.authority_feature_tier_v1 SET tier=18")',
+            r'try exec("UPDATE main.\(AuthorityJournalSchema.tierTable) SET tier=18")',
+            r'try exec("DELETE FROM \(AuthorityJournalSchema . tierTable)")',
             "18 == tx.storageSchemaVersion",
             "try submissionSchemaVersion() >= 16",
             "guard (16...18).contains(try submissionSchemaVersion()) else { return }",
@@ -97,6 +114,8 @@ class AuthorityJournalFeatureTierGuardTest(unittest.TestCase):
         for filename in INDEPENDENT_STORES | {"AuthorityJournalSchema.swift"}:
             with self.subTest(filename=filename):
                 self.assertFalse(bypasses_resolver(filename, "PRAGMA main.user_version=18"))
+        self.assertFalse(bypasses_resolver("AuthorityJournalSchema.swift",
+            'try execute("UPDATE main.authority_feature_tier_v1 SET tier=18", on: db)'))
         for filename, lines in INDEPENDENT_READS_AND_WRITES.items():
             with self.subTest(filename=filename):
                 self.assertFalse(bypasses_resolver(filename, "\n".join(lines)))

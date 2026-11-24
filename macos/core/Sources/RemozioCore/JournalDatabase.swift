@@ -202,7 +202,7 @@ public final class JournalDatabase {
     fileprivate func storageFormatVersion(_ token: UUID) throws -> UInt64 {
         _ = try access(token)
         let version = try formatVersion()
-        guard (12...18).contains(version) else {
+        guard AuthorityJournalSchema.supportedFormats.contains(version) else {
             unavailable = true
             throw JournalDatabaseError.incompatibleStore
         }
@@ -218,6 +218,14 @@ public final class JournalDatabase {
             throw JournalDatabaseError.incompatibleStore
         }
         return UInt64(tier)
+    }
+
+    fileprivate func pairingRecoveryStages(_ token: UUID, install: Bool) throws -> PairingRecoveryStageJournal? {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        if install { try AuthorityJournalSchema.installRecoveryFormat(on: db) }
+        guard try AuthorityJournalSchema.recoveryFormatInstalled(on: db) else { return nil }
+        return PairingRecoveryStageJournal(db: db)
     }
 
     fileprivate func firstUnconfirmedGrantAbandonment(_ token: UUID) throws -> UInt64? {
@@ -424,10 +432,20 @@ public final class JournalDatabase {
     private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
         let format = try formatVersion()
         guard try integer("PRAGMA application_id") == Self.applicationID,
-              expectedVersion.map({ format == $0 }) ?? (12...18).contains(format), let db else {
+              expectedVersion.map({ format == $0 }) ?? AuthorityJournalSchema.supportedFormats.contains(format), let db else {
             throw JournalDatabaseError.incompatibleStore
         }
         let version = try expectedVersion ?? AuthorityJournalSchema.featureTier(on: db)
+        if format == AuthorityJournalSchema.recoveryFormat {
+            _ = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: true, tier: version)
+            try PairingRecoveryStageJournal.validateStorage(on: db)
+        } else {
+            try statement("""
+                SELECT 1 FROM main.sqlite_schema WHERE name IN ('\(AuthorityJournalSchema.tierTable)', '\(PairingRecoveryStageJournal.table)')
+                """) {
+                guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore }
+            }
+        }
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
             guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_int64(stmt, 0) == 1 else { throw JournalDatabaseError.incompatibleStore }
             for (column, value) in [(Int32(1), macID), (Int32(2), accountID)] {
@@ -550,6 +568,69 @@ public final class JournalTransaction {
             do { return try owner.featureTier(token) }
             catch { failed = true; throw error }
         }
+    }
+
+    func recoveryStage(setupID: Data) throws -> PairingRecoveryStage? {
+        try withRecoveryStages { try $0?.stage(setupID: setupID) }
+    }
+
+    func hasPairingRecoveryFormat() throws -> Bool {
+        try withRecoveryStages { $0 != nil }
+    }
+
+    func pendingRecoveryStage(phoneID: Data) throws -> PairingRecoveryStage? {
+        try withRecoveryStages { try $0?.pending(phoneID: phoneID) }
+    }
+
+    func reserveRecoveryStage(_ stage: PairingRecoveryStage, now: AuthorityMoment) throws {
+        try withRecoveryStages(write: true, install: true) { storage in
+            guard let storage else { throw JournalDatabaseError.incompatibleStore }
+            try storage.expireDueStages(now: now)
+            try storage.reserve(stage)
+        }
+    }
+
+    func expireRecoveryStage(_ stage: PairingRecoveryStage) throws {
+        try withRecoveryStages(write: true) { storage in
+            guard let storage else { throw PairingRecoveryStageError.noPendingStage }
+            try storage.expire(stage)
+        }
+    }
+
+    func removePendingRecoveryStage(_ stage: PairingRecoveryStage) throws {
+        try withRecoveryStages(write: true) { storage in
+            guard let storage else { throw PairingRecoveryStageError.noPendingStage }
+            try storage.removePending(stage)
+        }
+    }
+
+    func expireDueRecoveryStages(now: AuthorityMoment) throws {
+        try withRecoveryStages(write: true) { try $0?.expireDueStages(now: now) }
+    }
+
+    func hasRetiredRecoveryStages(incarnation: UUID) throws -> Bool {
+        try withRecoveryStages { try $0?.hasRetiredStages(incarnation: incarnation) ?? false }
+    }
+
+    func closeRetiredRecoveryStages(incarnation: UUID) throws {
+        try withRecoveryStages(write: true) { try $0?.closeRetiredStages(incarnation: incarnation) }
+    }
+
+    @discardableResult
+    func discardExpiredRecoveryStage(setupID: Data, digest: Data) throws -> Data {
+        try withRecoveryStages(write: true) { storage in
+            guard let storage else { throw PairingRecoveryStageError.notExpired }
+            return try storage.discardExpired(setupID: setupID, digest: digest)
+        }
+    }
+
+    private func withRecoveryStages<Value>(write: Bool = false, install: Bool = false,
+                                           _ body: (PairingRecoveryStageJournal?) throws -> Value) throws -> Value {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.pairingRecoveryStages(token, install: install))
+        } catch { failed = true; throw error }
     }
 
     /// Includes uncommitted writes in this transaction. Publish only after both durable stores commit.
@@ -826,6 +907,29 @@ public final class JournalTransaction {
         }
     }
 
+    func removeRecoveryStageForRevocation(phoneID: Data, enrollmentEpoch: Data, writer: AuditEpochWriter) throws -> Bool {
+        let removed = try withRecoveryStages(write: true) { stages in
+            try stages?.removeForRevocation(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch)
+        }
+        guard let removed else { return false }
+        let kind: AuditEventKind = removed == .pending ? .recovery : .cancelled
+        try appendRecoveryStageEvent(phoneID: phoneID, writer: writer, authentication: .localAdministrator, kind: kind, reason: .revoked)
+        return true
+    }
+
+    func appendRecoveryStageEvent(phoneID: Data, writer: AuditEpochWriter, authentication: AuditAuthentication,
+                                  kind: AuditEventKind = .recovery, reason: AuditReason) throws {
+        let scope = try approvalTrustSnapshot()
+        guard let current = try epoch(writer.epoch), current.head < UInt64.max else { throw AuditJournalError.headMismatch }
+        let event = try AuditEventMetadata(eventID: GatewayHostSnapshot.bytes(UUID()), macID: scope.macID,
+            accountID: scope.accountID, journalEpoch: writer.epoch, sequence: current.head + 1,
+            requestID: nil, eventTimeMs: nil, authorityReceiptTimeMs: nil, kind: kind, category: .enrollment,
+            action: nil, decisionPhoneID: nil, authentication: authentication, outcome: .accepted, reason: reason,
+            droppedEventCount: nil, peerDeviceID: phoneID)
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        try owner.appendEnrollmentEvent(event, token: token, writer: writer, expectedHead: current.head)
+    }
+
     func recordGatewayRevocation(_ phone: DeliveryRecipient, registration: GatewayRegistrationIdentity,
                                  progress: GatewayRevocationProgress) throws {
         try withEnrollment(write: true) { try $0.updateGatewayRevocation(phone, registration: registration, progress: progress) }
@@ -852,7 +956,7 @@ public final class JournalTransaction {
 
     /// Root-signed revocation evidence can only restrict authority. Expired delivery envelopes remain valid evidence.
     /// The host closes affected admission until this transaction and its continuity checkpoint have committed.
-    /// A changed return revision means that a system recovery event was appended at expectedAuditHead + 1.
+    /// A changed return revision means that a system recovery event was appended. Pairing stages stay untouched.
     public func recoverGatewayRevocation(canonicalPayload: Data, signature: Data, registration: GatewayRegistrationIdentity,
                                          expectedTrustRevision: UUID, eventID: Data, receiptTimeMs: UInt64?,
                                          writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> UUID {
@@ -967,7 +1071,9 @@ public final class JournalTransaction {
                             receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: auditHead)
                     }
                 }
-                if next != revision { changed.insert(phone); auditHead += 1; revision = next }
+                guard let head = try epoch(writer.epoch)?.head else { throw AuditJournalError.unavailableEpoch }
+                auditHead = head
+                if next != revision { changed.insert(phone); revision = next }
             }
             return GatewayTrustEvidenceRecovery(trustRevision: revision, auditHead: auditHead,
                 changedPhoneIDs: changed, restrictedPhoneIDs: try ledger.restrictedPhones())

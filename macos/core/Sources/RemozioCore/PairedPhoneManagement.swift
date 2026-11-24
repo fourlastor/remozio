@@ -48,7 +48,7 @@ public struct GatewayRevocationStatus: Equatable, Sendable {
 }
 
 enum PairedPhoneOperation: UInt64 {
-    case list, status, revoke, listForRePair, validateRePair
+    case list, status, revoke, listForRePair, validateRePair, discardExpiredRePair
 }
 
 public struct PairedPhoneSelection: Sendable {

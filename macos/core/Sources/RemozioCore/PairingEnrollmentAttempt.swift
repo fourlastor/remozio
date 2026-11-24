@@ -9,6 +9,7 @@ public enum PairingEnrollmentError: Error, Equatable {
 /// Network input cannot create this authorization context. A restart requires a new authorized attempt.
 public final class PairingEnrollmentAttempt: Sendable {
     public let transcript: PairingTranscript
+    let recoveryProposalDigest: Data?
     private let replacement: Replacement
     private let revision: UUID
     private let started: AuthorityMoment
@@ -41,7 +42,8 @@ public final class PairingEnrollmentAttempt: Sendable {
 
     init(transcript: PairingTranscript, trusted: ApprovalTrustSnapshot, replacement: Replacement,
          authorityPublicKey: Data, transportPublicKey: Data, minimumEnvelopeVersion: UInt64,
-         started: AuthorityMoment, startedAtUnixMillis: UInt64, deadlineMilliseconds: UInt64) throws {
+         started: AuthorityMoment, startedAtUnixMillis: UInt64, deadlineMilliseconds: UInt64,
+         recoveryProposalDigest: Data? = nil) throws {
         let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 5, maxItems: 5000)
         guard case let .map(offer) = try DeterministicCBOR.decode(transcript.phone.encode(), limits: limits),
               case let .array(scope) = offer[2], scope.count == 4,
@@ -54,7 +56,8 @@ public final class PairingEnrollmentAttempt: Sendable {
               transcript.expectedTrustRevision == revisionBytes,
               transcript.macAuthorityKey == authorityPublicKey, transcript.macTransportKey == transportPublicKey,
               transcript.minimumEnvelopeVersion == minimumEnvelopeVersion,
-              started.milliseconds < deadlineMilliseconds else {
+              started.milliseconds < deadlineMilliseconds,
+              recoveryProposalDigest.map({ $0.count == 32 && transcript.replacement != nil }) ?? true else {
             throw PairingEnrollmentError.wrongContext
         }
         guard startedAtUnixMillis >= transcript.issuedAtUnixMillis,
@@ -68,8 +71,15 @@ public final class PairingEnrollmentAttempt: Sendable {
                 EnrolledApprovalKey(id: transcript.biometricKey.keyID, keyClass: .biometric, publicKey: transcript.biometricKey.publicKey),
             ]))
         self.replacement = replacement
+        self.recoveryProposalDigest = recoveryProposalDigest
         self.transcript = transcript; self.revision = trusted.revision
         self.started = started; self.deadline = started.milliseconds + lifetime
+    }
+
+    func recoveryStage() throws -> PairingRecoveryStage {
+        guard let recoveryProposalDigest else { throw PairingEnrollmentError.wrongContext }
+        return try PairingRecoveryStage(transcript: transcript, proposalDigest: recoveryProposalDigest,
+            incarnation: started.epoch, started: started.milliseconds, deadline: deadline)
     }
 
     /// Retained setup cleanup uses the same bounded monotonic lifetime as enrollment commit.

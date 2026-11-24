@@ -152,6 +152,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
                 let status = try access.revokePhone(selection, authorize: { [authorize] in try authorize(authorization) })
                 return Data([UInt8(status.rawValue)])
+            case .discardExpiredRePair:
+                guard selection.count == 48, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AuthorityPairingSetupError.invalidConfirmation
+                }
+                try authorize(authorization)
+                try access.discardExpiredRePair(setupID: Data(selection.prefix(16)), digest: Data(selection.suffix(32)),
+                                               authorize: { [authorize] in try authorize(authorization) })
+                return Data([1])
             }
         }
     }
@@ -167,7 +175,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             defer { if !transferred { activity?.close(); stage.close() } }
             let replyStage = try stage.retained()
             state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
-            let staged = try access.stage(proposal)
+            let staged = try access.stage(proposal, authorize: { [authorize] in try authorize(authorization) })
             let bytes = try staged.transcript.encode()
             try state.withLock {
                 guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }

@@ -12,6 +12,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var storage: AuthorityStorage?
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
+    private var observePairingContention: (@Sendable () -> Void)?
     private var requestStartupAttempted = false
     private(set) var updateHealthOnly = false
     private var updateCompletionOnly = false
@@ -139,6 +140,11 @@ public final class AuthorityJournal: @unchecked Sendable {
                 let auditLimits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
                 let retainedBytes = 67_108_864
                 guard maximumPayloadBytes <= retainedBytes else { throw ApprovalCoordinatorError.invalidConfiguration }
+                let startupCommits = CheckpointedJournal(journal: database, continuity: storage.continuity)
+                if try startupCommits.read({ try $0.hasRetiredRecoveryStages(incarnation: clockEpoch) }) {
+                    let epoch = try storage.continuity.read().committed.journalEpoch
+                    try startupCommits.write(epoch: epoch) { try $0.closeRetiredRecoveryStages(incarnation: clockEpoch) }
+                }
                 let checkpoint = try storage.continuity.read().committed
                 var fresh = Data(count: 16)
                 guard fresh.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }) == errSecSuccess else {
@@ -193,6 +199,12 @@ public final class AuthorityJournal: @unchecked Sendable {
     public init(requests: sending ApprovalRequestCoordinator) {
         database = requests.database
         self.requests = requests
+    }
+
+    /// Fixture seam for observing a pairing operation that cannot acquire the owner lock.
+    convenience init(requests: sending ApprovalRequestCoordinator, observePairingContention: @escaping @Sendable () -> Void) {
+        self.init(requests: requests)
+        self.observePairingContention = observePairingContention
     }
 
     /// Attach before listeners start. Existing requests cannot be retroactively covered by this barrier.
@@ -258,6 +270,27 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    func stageRePair(phoneID: Data, proposalDigest: Data, now: () throws -> AuthorityMoment,
+                     authorize: () throws -> Void,
+                     prepare: (JournalTransaction, AuthorityMoment, PairingRecoveryStage?) throws -> PairingEnrollmentAttempt)
+        throws -> PairingEnrollmentAttempt {
+        try withPairingRequestOwner { requests in
+            try requests.stageRePair(phoneID: phoneID, proposalDigest: proposalDigest, now: now,
+                                    authorize: authorize, prepare: prepare)
+        }
+    }
+
+    func expireRePair(_ attempt: PairingEnrollmentAttempt, now: () throws -> AuthorityMoment) throws -> Bool {
+        try withPairingRequestOwner { try $0.expireRePair(attempt, now: now) }
+    }
+
+    func discardExpiredRePair(setupID: Data, digest: Data, verifyHost: (JournalTransaction) throws -> Void,
+                              authorize: () throws -> Void) throws {
+        try withPairingRequestOwner { requests in
+            try requests.discardExpiredRePair(setupID: setupID, digest: digest, verifyHost: verifyHost, authorize: authorize)
+        }
+    }
+
     /// Receipt recovery requires a current authenticated phone binding. It cannot grant or restore enrollment.
     public func pairingReceipt(setupID: Data, binding: AuthorityPeerBinding, signer: EnclaveAuthorityRequestSigner) throws -> Data? {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
@@ -283,13 +316,21 @@ public final class AuthorityJournal: @unchecked Sendable {
     }
     /// Pairing stays on the exported invocation stack. Native authorization callbacks do not cross executors.
     private func withPairingRequestOwner<Value>(_ body: (ApprovalRequestCoordinator) throws -> Value) throws -> Value {
-        try lock.withLock {
-            try requireNoRequestOperation()
-            guard let requests else { throw ApprovalCoordinatorError.unavailable }
-            try requests.requirePairingCheckpoint()
-            requestOperationActive = true; defer { requestOperationActive = false }
-            return try withStorageFailureCleanup { try body(requests) }
+        if let observePairingContention {
+            if !lock.try() {
+                observePairingContention()
+                lock.lock()
+            }
+        } else {
+            lock.lock()
         }
+        defer { lock.unlock() }
+        try requireNoRequestOperation()
+        guard let requests else { throw ApprovalCoordinatorError.unavailable }
+        try requests.requirePairingCheckpoint()
+        requestOperationActive = true
+        defer { requestOperationActive = false }
+        return try withStorageFailureCleanup { try body(requests) }
     }
 
     /// Enable the optional ledger under the existing foreground owner. No store, key or request owner is replaced.

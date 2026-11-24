@@ -40,6 +40,10 @@ enum JournalCheckpointRecovery {
                 return .historyDiscontinuity(previous)
             case .requireRepair:
                 // Storage errors propagate instead of being converted into a persistent repair condition.
+                // Preserve the journal and checkpoint when the recovery format cannot prove its stage boundary.
+                if try transaction.hasPairingRecoveryFormat() {
+                    return .repairRequired
+                }
                 try continuity.requireRecovery()
                 return .repairRequired
             }

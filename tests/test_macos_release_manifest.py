@@ -64,6 +64,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if value[0] == 'authority.journal':
                     value[1] = [12, 13, 14, 15, 16]
                     value[2] = [12, 13, 14, 15, 16]
+                    value[3] = {version: target for version, target in value[3].items() if target in value[2]}
             return values
         with patch.object(MANIFEST, 'declarations', side_effect=legacy), \
                 patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
@@ -448,16 +449,16 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(declarations['authority.installation-preparation'],
                          {0: 'authority.installation-preparation', 1: list(range(1, 30)), 2: list(range(1, 26)), 3: {1: 2, 24: 25}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
-        self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
+        self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)} | {v: 19 for v in range(12, 19)})
         self.assertEqual(MANIFEST.declarations(12)[-1][1], [2])
 
     def test_journal_declarations_match_the_storage_format_range(self):
-        source = (ROOT / 'macos/core/Sources/RemozioCore/JournalDatabase.swift').read_text()
-        storage_format = source.split('fileprivate func storageFormatVersion(', 1)[1].split('fileprivate func featureTier(', 1)[0]
-        match = re.search(r'\((\d+)\.\.\.(\d+)\)\.contains\(version\)', storage_format)
-        self.assertIsNotNone(match, 'JournalDatabase must declare its accepted storage format range')
-        first, last = map(int, match.groups())
-        expected = list(range(first, last + 1))
+        source = (ROOT / 'macos/core/Sources/RemozioCore/AuthorityJournalSchema.swift').read_text()
+        match = re.search(r'static let supportedFormats: ClosedRange<Int64> = (\d+)\.\.\.recoveryFormat', source)
+        self.assertIsNotNone(match, 'AuthorityJournalSchema must declare its accepted storage format range')
+        recovery = re.search(r'static let recoveryFormat: Int64 = (\d+)', source)
+        self.assertIsNotNone(recovery, 'AuthorityJournalSchema must declare its recovery format')
+        expected = list(range(int(match.group(1)), int(recovery.group(1)) + 1))
         for role in (2, 8):
             with self.subTest(role=role):
                 declaration = next(value for value in MANIFEST.declarations(role) if value[0] == 'authority.journal')

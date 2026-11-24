@@ -23,23 +23,30 @@ enum JournalContinuityDigest {
 
     static func read(_ db: OpaquePointer) throws -> JournalContinuityDigests {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
+        let recoveryFormat = try AuthorityJournalSchema.recoveryFormatInstalled(on: db)
+        let tier = try AuthorityJournalSchema.featureTier(on: db)
+        let catalog = try requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier)
+        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.recoveryFormat : (tier >= 15 ? tier : min(tier, 13))
+        return try JournalContinuityDigests(authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema),
+                                            ledger: digest(db, tables: catalog.ledger, domain: "ledger"))
+    }
+
+    static func requireCatalog(_ db: OpaquePointer, recoveryFormat: Bool, tier: Int64) throws -> (authority: [String], ledger: [String]) {
         var tables = Set<String>()
         try rows(db, "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             guard let name = sqlite3_column_text(row, 0) else { throw JournalDatabaseError.incompatibleStore }
             tables.insert(String(cString: name))
         }
-        let version = try AuthorityJournalSchema.featureTier(on: db)
-        guard (12...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
-        let authorityTables = Self.authorityTables + (version >= 13 ? ["authority_code_policy_v1"] : [])
-            + (version >= 15 ? ["command_submissions_v1"] : [])
-            + (version >= 16 ? ["gateway_submission_outbox_v1"] : [])
-            + (version >= 17 ? ["update_scheduling_state_v1", "update_scheduling_operations_v1"] : [])
-            + (version >= 18 ? [GatewayAuthorityJournal.abandonmentTable] : [])
-        let ledgerTables = Self.ledgerTables + (version >= 14 ? ["history_recoveries_v1"] : [])
+        guard (12...18).contains(tier) else { throw JournalDatabaseError.incompatibleStore }
+        let authorityTables = Self.authorityTables + (tier >= 13 ? ["authority_code_policy_v1"] : [])
+            + (tier >= 15 ? ["command_submissions_v1"] : [])
+            + (tier >= 16 ? ["gateway_submission_outbox_v1"] : [])
+            + (tier >= 17 ? ["update_scheduling_state_v1", "update_scheduling_operations_v1"] : [])
+            + (tier >= 18 ? [GatewayAuthorityJournal.abandonmentTable] : [])
+            + (recoveryFormat ? [AuthorityJournalSchema.tierTable, PairingRecoveryStageJournal.table] : [])
+        let ledgerTables = Self.ledgerTables + (tier >= 14 ? ["history_recoveries_v1"] : [])
         guard tables == Set(authorityTables + ledgerTables) else { throw JournalDatabaseError.incompatibleStore }
-        let authoritySchema = version >= 15 ? version : min(version, 13)
-        return try JournalContinuityDigests(authority: digest(db, tables: authorityTables, domain: "authority", schema: authoritySchema),
-                                            ledger: digest(db, tables: ledgerTables, domain: "ledger"))
+        return (authorityTables, ledgerTables)
     }
 
     private static func digest(_ db: OpaquePointer, tables: [String], domain: String, schema: Int64 = 12) throws -> Data {
