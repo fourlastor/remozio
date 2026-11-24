@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import os
@@ -122,16 +123,42 @@ public final class CommandSessionRegistry {
         do {
             current = try resolve(context)
             _ = synchronize(current)
-            guard case .map(let fields) = try DeterministicCBOR.decode(received.payload, limits: submissionLimits),
-                  case .unsigned(let schema) = fields[0], CommandSubmission.supportedSchemaVersions.contains(schema) else {
-                throw CommandCaptureError.version
-            }
-            let submission = try CommandSubmission(canonicalBytes: received.payload, limits: submissionLimits, expectedSchemaVersion: schema)
-            guard let session = sessions[submission.binding.callerBinding] else { throw CommandSessionRegistryError.unknownSession }
-            selected = session
+            selected = try admissionSession(payload: received.payload, limits: submissionLimits).session
         } catch { received.closeIfUnclaimed(); throw error }
         return try selected.prepareAdmission(received: received, expression: current.expression,
             userID: userID, auditSessionID: auditSessionID, submissionLimits: submissionLimits)
+    }
+
+    func sendDescriptorRefusal(_ rejected: CommandDescriptorRejectionReceipt, context: Context, submissionLimits: CBORLimits,
+                               timeoutMilliseconds: UInt32, checkCancellation: () throws -> Void,
+                               outcome: (CommandHandshakeProfile, CapturedSubmission, CommandAdmissionRejectionReason) -> CommandAdmissionOutcome) throws {
+        // Missing or invalid reply rights have no safe destination. The receiver releases them without replying.
+        guard let reply = rejected.reply else { return }
+        try begin(); defer { end() }
+        _ = synchronize(context)
+        let (submission, session) = try admissionSession(payload: rejected.payload, limits: submissionLimits)
+        let expected = try session.admissionPeerBinding(carrierVersion: rejected.carrierVersion, expression: context.expression,
+            userID: userID, auditSessionID: auditSessionID)
+        try rejected.caller.recheck(expression: context.expression, userID: userID, auditSessionID: auditSessionID)
+        guard rejected.caller.retainedAuditBinding == expected else { throw MachCommandHandshakeError.wrongBinding }
+        guard submission.schemaVersion == session.profile.submissionSchemaVersion else { throw CommandCaptureError.version }
+        try reply.recheck()
+        try checkCancellation()
+        let result = CommandAdmissionResultPayload(profile: session.profile, submission: submission.binding,
+            submissionDigest: Data(SHA256.hash(data: submission.canonicalBytes)),
+            outcome: outcome(session.profile, submission.binding, rejected.reason))
+        try checkCancellation()
+        try reply.send(result.canonicalBytes, timeoutMilliseconds: timeoutMilliseconds)
+    }
+
+    private func admissionSession(payload: Data, limits: CBORLimits) throws -> (submission: CommandSubmission, session: RetainedCommandHandshake) {
+        guard case .map(let fields) = try DeterministicCBOR.decode(payload, limits: limits),
+              case .unsigned(let schema) = fields[0], CommandSubmission.supportedSchemaVersions.contains(schema) else {
+            throw CommandCaptureError.version
+        }
+        let submission = try CommandSubmission(canonicalBytes: payload, limits: limits, expectedSchemaVersion: schema)
+        guard let session = sessions[submission.binding.callerBinding] else { throw CommandSessionRegistryError.unknownSession }
+        return (submission, session)
     }
 
     /// Run from the serial host loop even when no messages arrive. No deadline is imposed on admitted requests.

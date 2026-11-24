@@ -561,6 +561,14 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    func commandDescriptorRefusal(profile: CommandHandshakeProfile, submission: CapturedSubmission,
+                                  reason: CommandAdmissionRejectionReason) -> CommandAdmissionOutcome {
+        lock.withLock {
+            guard !requestOperationActive, !updatePolicyOperationActive else { return .uncertain(.admissionRejected) }
+            return commandRefusal(profile: profile, submission: submission, reason: reason)
+        }
+    }
+
     private func commandRefusal(profile: CommandHandshakeProfile, submission: CapturedSubmission,
                                 reason: CommandAdmissionRejectionReason?) -> CommandAdmissionOutcome {
         guard let reason else { return .uncertain(.admissionRejected) }

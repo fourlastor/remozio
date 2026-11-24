@@ -14,6 +14,23 @@ public enum CommandReceiveEvent: Sendable, Equatable {
     case rejected(CommandReceiveRejection)
 }
 
+/// Paces a streak of import failures. Other rejected messages do not interrupt it.
+struct CommandDescriptorRejectionPacing {
+    private var consecutiveFailures: UInt32 = 0
+
+    mutating func recordDescriptorRejection(capacity: Bool) -> UInt32? {
+        consecutiveFailures = min(consecutiveFailures + 1, 10)
+        return capacity || consecutiveFailures >= 4 ? 5 * consecutiveFailures : nil
+    }
+
+    mutating func observe(_ event: CommandReceiveEvent) {
+        switch event {
+        case .idle, .hello, .inputHandled: consecutiveFailures = 0
+        case .rejected: break
+        }
+    }
+}
+
 /// A thread-safe stop signal. It never disposes resources from another thread.
 public struct CommandReceiveStop: Sendable {
     fileprivate let state = OSAllocatedUnfairLock(initialState: false)
@@ -35,6 +52,10 @@ public final class CommandReceiveHost {
     private let maximumPayloadBytes: Int
     private let replyTimeoutMilliseconds: UInt32
     private let observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)?
+    private let descriptorOutcome: (CommandHandshakeProfile, CapturedSubmission, CommandAdmissionRejectionReason) -> CommandAdmissionOutcome
+    private let beforeDescriptorImport: ((CommandDescriptorImportSlot) throws -> Void)?
+    private let waitAfterDescriptorRejection: (UInt32) -> Void
+    private var descriptorRejectionPacing = CommandDescriptorRejectionPacing()
     private var busy = false
     private var running = false
     private var delivering = false
@@ -61,6 +82,8 @@ public final class CommandReceiveHost {
                     return snapshot
                 }
                 return try registry.context(snapshot)
+            }, descriptorOutcome: { profile, submission, reason in
+                journal.commandDescriptorRefusal(profile: profile, submission: submission, reason: reason)
             })
     }
 
@@ -69,8 +92,15 @@ public final class CommandReceiveHost {
          maximumSessions: Int, maximumPayloadBytes: Int, receiveWaitMilliseconds: UInt32 = 250,
          replyTimeoutMilliseconds: UInt32 = 5000, capabilities: CommandHandshakeCapabilities = .current,
          context: @escaping (CommandSessionRegistry) throws -> CommandSessionRegistry.Context,
-         observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil) throws {
+         observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil,
+         descriptorOutcome: @escaping (CommandHandshakeProfile, CapturedSubmission, CommandAdmissionRejectionReason) -> CommandAdmissionOutcome =
+            { _, _, _ in .uncertain(.admissionRejected) },
+         beforeDescriptorImport: ((CommandDescriptorImportSlot) throws -> Void)? = nil,
+         waitAfterDescriptorRejection: @escaping (UInt32) -> Void = { Thread.sleep(forTimeInterval: Double($0) / 1000) }) throws {
         self.observeTimeout = observeTimeout
+        self.descriptorOutcome = descriptorOutcome
+        self.beforeDescriptorImport = beforeDescriptorImport
+        self.waitAfterDescriptorRejection = waitAfterDescriptorRejection
         var references: mach_port_urefs_t = 0
         guard takingReceiveRight != MACH_PORT_NULL, takingReceiveRight != UInt32.max,
               mach_port_get_refs(mach_task_self_, takingReceiveRight, MACH_PORT_RIGHT_RECEIVE, &references) == KERN_SUCCESS,
@@ -101,8 +131,13 @@ public final class CommandReceiveHost {
     /// One bounded receive turn also prunes while idle or under continuous invalid traffic.
     /// The synchronous handler receives input ownership and must complete every separate admission gate.
     public func poll(handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
+        try poll(submissionLimits: nil, handleInput: handleInput)
+    }
+
+    private func poll(submissionLimits: CBORLimits?,
+                      handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
         guard !running, !delivering else { throw CommandReceiveHostError.operationActive }
-        return try receiveTurn(handleInput: handleInput)
+        return try receiveTurn(submissionLimits: submissionLimits, handleInput: handleInput)
     }
 
     /// Runs the sole receive loop. The synchronous handler may assemble its input but must not poll or reenter run.
@@ -176,7 +211,7 @@ public final class CommandReceiveHost {
     func pollAdmission(submissionLimits: CBORLimits, receiptTime: () -> UInt64?,
                        admit: (sending RetainedCommandAdmissionAttempt, UInt64?, CommandReceiveStop) throws -> IssuedRequestPayload,
                        onResult: (Result<IssuedRequestPayload, Error>) throws -> Void) throws -> CommandReceiveEvent {
-        try poll { received in
+        try poll(submissionLimits: submissionLimits) { received in
             let receiptTimeMs = receiptTime()
             let result: Result<IssuedRequestPayload, Error>
             do {
@@ -215,7 +250,15 @@ public final class CommandReceiveHost {
     private func accept(hello: sending MachCommandHello, context: CommandSessionRegistry.Context) throws -> CommandHandshakeProfile {
         try registry.accept(hello: hello, context: { context }, timeoutMilliseconds: replyTimeoutMilliseconds)
     }
-    private func receiveTurn(handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
+    private func receiveTurn(submissionLimits: CBORLimits? = nil,
+                             handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
+        let event = try receiveOne(submissionLimits: submissionLimits, handleInput: handleInput)
+        descriptorRejectionPacing.observe(event)
+        return event
+    }
+
+    private func receiveOne(submissionLimits: CBORLimits?,
+                            handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
         try begin(); defer { end() }
         let before = try currentContext()
         let receiver: MachCommandCallerReceiver
@@ -223,8 +266,26 @@ public final class CommandReceiveHost {
             auditSessionID: auditSessionID, maxPayloadBytes: maximumPayloadBytes, observeTimeout: observeTimeout) }
         catch { stop.requestStop(); throw error }
         let message: ReceivedMachCommandMessage
-        do { message = try receiver.receiveNext(timeoutMilliseconds: receiveWaitMilliseconds) }
-        catch let error as MachCommandCallerError {
+        do {
+            message = try receiver.receiveNext(timeoutMilliseconds: receiveWaitMilliseconds, beforeImport: beforeDescriptorImport,
+                rejectDescriptor: { [self] rejected in
+                    let context = try currentContext()
+                    if let submissionLimits {
+                        // A bad reply right or unbound request must not retire the listener or gain retry authority.
+                        try? registry.sendDescriptorRefusal(rejected, context: context, submissionLimits: submissionLimits,
+                            timeoutMilliseconds: min(10, replyTimeoutMilliseconds), checkCancellation: { try stop.check() },
+                            outcome: descriptorOutcome)
+                    }
+                })
+        } catch let error as CommandDescriptorImportRejection {
+            let capacity = error.reason == .capacityExceeded
+            if let delay = descriptorRejectionPacing.recordDescriptorRejection(capacity: capacity) {
+                try stop.check()
+                waitAfterDescriptorRejection(delay)
+                try stop.check()
+            }
+            return .rejected(capacity ? .capacity : .malformed)
+        } catch let error as MachCommandCallerError {
             // Even rejected traffic and empty queues must observe a changed or unreadable policy.
             _ = try currentContext()
             switch error {
@@ -233,10 +294,9 @@ public final class CommandReceiveHost {
             case .wrongPeer, .retired, .unavailable, .security: return .rejected(.wrongPeer)
             case .configuration, .mach: stop.requestStop(); throw error
             }
-        } catch let error as RetainedCommandInputError {
-            guard error == .system(EINVAL) else { stop.requestStop(); throw error }
-            _ = try currentContext()
-            return .rejected(.malformed)
+        } catch {
+            stop.requestStop()
+            throw error
         }
         let current: CommandSessionRegistry.Context
         do { current = try currentContext() }
