@@ -8720,10 +8720,11 @@ extension MachCommandCallerReceiverTests {
         try await worker.start()
         let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
-        _ = try workerElevationProfile(destination)
+        var unknownBinding = try workerElevationProfile(destination).callerBinding
+        unknownBinding[0] ^= 1
         let reply = try Endpoint()
         let submission = try commandSubmission(binding: .init(id: Data(repeating: 0xe1, count: 16),
-            nonce: Data(repeating: 0xe1, count: 32), callerBinding: Data(repeating: 0, count: 32)))
+            nonce: Data(repeating: 0xe1, count: 32), callerBinding: unknownBinding))
         try MachCommandAdmissionWire.send(submission.canonicalBytes, inputDescriptor: descriptor, destination: destination,
             replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
         try await waitForReceiveWorker { diagnostics.malformedCount == 1 }
