@@ -98,7 +98,8 @@ final class RetainedSetupImportAcknowledgementTests: XCTestCase {
     }
     private var budget: [Read: Int] {
         [.readTransaction: 2, .runtime: 4, .frame: 2 /* stable frame read cache: was 12 */, .activation: 4, .policyMarker: 2,
-         .policyScan: 14, .sharedImport: 16, .protectedRows: 2, .importInputs: 2]
+         .policyScan: 4 /* was 14: the policy scan runs inside the cached frame load */,
+         .sharedImport: 16 /* unchanged: every cache hit recaptures the shared import */, .protectedRows: 2, .importInputs: 2]
     }
     private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
 

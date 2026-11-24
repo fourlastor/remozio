@@ -267,12 +267,16 @@ final class PreparationStoreFrameCacheTests: XCTestCase {
     /// A different candidate key misses and gives exactly the outcome it gives in its own transaction.
     func testADifferentCandidateMissesAndKeepsItsOwnOutcome() throws {
         try fixture { f in
-            let machine = try f.machine(), other = otherKey(f.candidate)
+            let other = otherKey(f.candidate)
             enum Outcome { case value(MachineUpdateStableReleaseSnapshot), failure(String) }
             func outcome(_ load: () throws -> MachineUpdateStableReleaseSnapshot) -> Outcome {
                 do { return .value(try load()) } catch { return .failure(String(reflecting: error)) }
             }
-            let alone = outcome { try machine.stableMachineUpdateSnapshot(candidate: other) }
+            let alone = outcome { try f.machine().stableMachineUpdateSnapshot(candidate: other) }
+            // A `.corruptRecord` or `.incompatibleStore` thrown out of `transaction` marks the connection unavailable and
+            // shuts it down, so the probe below would fail with `.unavailable`. Reopen to give the probe a fresh connection.
+            try f.reopen(nil)
+            let machine = try f.machine()
             var shared: Outcome?
             let seen = try events(machine) {
                 try machine.withStableFrameCacheProbe { probe in
@@ -285,6 +289,72 @@ final class PreparationStoreFrameCacheTests: XCTestCase {
             case (.value(let a), .value(let b)?): try b.requireSame(as: a)
             case (.failure(let a), .failure(let b)?): XCTAssertEqual(a, b)
             default: XCTFail("The candidate outcome changed inside a shared read transaction")
+            }
+        }
+    }
+    /// The machine directory that holds `installation.sqlite`; the store's shared-import journal lives under it.
+    private func machineDirectory(_ f: RetainedMaterialWriterFixture) -> URL {
+        URL(fileURLWithPath: f.databasePath).deletingLastPathComponent()
+    }
+
+    /// The frame pins the shared-import journal and relay directory through `currentRowsDigest`. The SQLite lock does not
+    /// cover them, so a change there while the frame is cached must miss and be seen.
+    func testSharedImportChangeInsideTheReadTransactionMisses() throws {
+        try fixture { f in
+            let machine = try f.machine(), folder = machineDirectory(f)
+            let sharedImport = folder.appendingPathComponent("SharedSetupImport")
+            defer { try? FileManager.default.removeItem(at: sharedImport) }
+            var reads = 0
+            machine.observeStoreRead = { if $0 == .sharedImport { reads += 1 } }
+            defer { machine.observeStoreRead = nil }
+            let seen = try events(machine) {
+                try machine.withStableFrameCacheProbe { probe in
+                    let first = try probe.load(f.candidate)
+                    try probe.load(f.candidate).requireSame(as: first)
+                    XCTAssertEqual(reads, 2, "A hit must recapture the shared import")
+                    // Same steps as StableRuntimeImportTests.journal(initialize: true): a real, empty journal.
+                    let anchor = folder.deletingLastPathComponent().path
+                    let relative = folder.lastPathComponent + "/SharedSetupImport"
+                    let directory = try ProtectedSetupDirectory(anchor: anchor, relativePath: relative, owner: getuid())
+                    _ = try SetupDatabaseFileProvisioning.prepare(directory: directory, kind: .sharedSetupImport, owner: getuid())
+                    directory.close()
+                    let journal = try SharedSetupImportJournal(lease: .init(anchor: anchor, relativeDirectory: relative,
+                        owner: getuid(), ancestorOwner: getuid(), databaseName: "setup-import.sqlite"), owner: getuid(),
+                        macID: first.inventory.macID, installationID: first.inventory.installationID, initialize: true)
+                    try journal.close()
+                    let changed = try probe.load(f.candidate)
+                    XCTAssertThrowsError(try changed.requireSame(as: first), "The cache hid a shared-import change") {
+                        XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                    }
+                    try probe.load(f.candidate).requireSame(as: changed)
+                }
+            }
+            XCTAssertEqual(seen, [.miss, .hit, .miss, .hit])
+        }
+    }
+
+    /// When the shared-import capture fails on a hit, the load throws what an uncached load throws. The cached frame is
+    /// never returned.
+    func testSharedImportFailureOnAHitThrowsLikeAnUncachedLoad() throws {
+        try fixture { f in
+            let machine = try f.machine()
+            let blocker = machineDirectory(f).appendingPathComponent("SharedSetupImport")
+            defer { try? FileManager.default.removeItem(at: blocker) }
+            var onHit: String?
+            let seen = try events(machine) {
+                try machine.withStableFrameCacheProbe { probe in
+                    _ = try probe.load(f.candidate)
+                    // A regular file where the shared-import directory belongs: the capture cannot open it.
+                    XCTAssertTrue(FileManager.default.createFile(atPath: blocker.path, contents: Data("x".utf8)))
+                    XCTAssertThrowsError(try probe.load(f.candidate), "A failed capture returned the cached frame") {
+                        onHit = String(reflecting: $0)
+                    }
+                }
+            }
+            XCTAssertEqual(seen, [.miss])
+            // Last, because the uncached failure may leave the connection unavailable.
+            XCTAssertThrowsError(try machine.stableMachineUpdateSnapshot(candidate: f.candidate)) {
+                XCTAssertNotNil(onHit); XCTAssertEqual(String(reflecting: $0), onHit)
             }
         }
     }
