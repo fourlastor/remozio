@@ -193,7 +193,7 @@ public actor AuthorityTrustFeed {
         defer { pairingLookups[id] = nil; finishOperation() }
         do {
             try await link.start()
-            try await link.requirePairingLookupSupport()
+            _ = try await link.requirePairingLookupSupport()
             try requirePairingLookupAuthority()
             let value = try await body(link)
             try requirePairingLookupAuthority()
@@ -258,7 +258,10 @@ public actor AuthorityTrustFeed {
     }
     private func openRecoveryLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let recoveryLink { return recoveryLink }
+        if let recoveryLink {
+            if recoveryLink.channel.lifetimeActive { return recoveryLink }
+            retireRecoveryLink(recoveryLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireRecoveryLink(id) } }
         recoveryLink = (id, value)
@@ -300,7 +303,10 @@ public actor AuthorityTrustFeed {
     }
     private func openRegistrationLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let registrationLink { return registrationLink }
+        if let registrationLink {
+            if registrationLink.channel.lifetimeActive { return registrationLink }
+            retireRegistrationLink(registrationLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireRegistrationLink(id) } }
         registrationLink = (id, value)
@@ -351,7 +357,10 @@ public actor AuthorityTrustFeed {
     }
     private func openAuditLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let auditLink { return auditLink }
+        if let auditLink {
+            if auditLink.channel.lifetimeActive { return auditLink }
+            retireAuditLink(auditLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireAuditLink(id) } }
         auditLink = (id, value)
@@ -398,7 +407,10 @@ public actor AuthorityTrustFeed {
     }
     private func openRoutingLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let routingLink { return routingLink }
+        if let routingLink {
+            if routingLink.channel.lifetimeActive { return routingLink }
+            retireRoutingLink(routingLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireRoutingLink(id) } }
         routingLink = (id, value)
@@ -445,7 +457,10 @@ public actor AuthorityTrustFeed {
     }
     private func openUpdateSchedulingLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
         try requireActive()
-        if let updateSchedulingLink { return updateSchedulingLink }
+        if let updateSchedulingLink {
+            if updateSchedulingLink.channel.lifetimeActive { return updateSchedulingLink }
+            retireUpdateSchedulingLink(updateSchedulingLink.id)
+        }
         let id = UUID()
         let value = try factory { [weak self] in Task { await self?.retireUpdateSchedulingLink(id) } }
         updateSchedulingLink = (id, value)

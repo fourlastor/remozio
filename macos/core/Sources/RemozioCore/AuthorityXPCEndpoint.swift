@@ -6,7 +6,7 @@ public enum AuthorityXPCEndpointError: Error { case invalidConfiguration, unavai
 /// Share one budget across all authority transport endpoints. Admission never queues waiting work.
 public final class AuthorityXPCWorkBudget: @unchecked Sendable {
     private let lock = NSLock()
-    private let maximum: Int
+    let maximum: Int
     private var active = 0
     public init(maximum: Int = 8) throws {
         guard (1...64).contains(maximum) else { throw AuthorityXPCEndpointError.invalidConfiguration }
@@ -47,6 +47,8 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private var registrationReady = false
     private let pairingLookupHandler: AuthorityPairingLookupHandler?
     private var pairingLookupReady = false
+    private let pairingLookupBudget: AuthorityXPCWorkBudget?
+    private var pairingLookupAdmitted = false
     private var pairingLookupState = PairingRecoveryLookup()
     private var receiptReady = false
     private var wakeReady = false
@@ -69,6 +71,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                             exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
                             pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pairingLookup: AuthorityPairingLookupHandler? = nil,
+         pairingLookupBudget: AuthorityXPCWorkBudget? = nil,
                             phonePushRegistration: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)? = nil,
          phonePushRecovery: (@Sendable (AuthorityPeerBinding, PhonePushRecoveryFrame) throws -> PhonePushRecoveryFrame)? = nil,
          phoneAudit: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)? = nil,
@@ -81,7 +84,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
         self.init(macID: macID, accountID: accountID, budget: budget, activityJournal: activityJournal,
             verify: { _ = try invocation.verifyInvocation() }, verifyHandshakePolicy: verifyHandshakePolicy, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
             snapshot: snapshot, validate: validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs,
-            exchangeRequest: exchangeRequest, pairingReceipt: pairingReceipt, pairingLookup: pairingLookup, phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: phoneAudit, phoneRouting: phoneRouting, phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: wakeHints)
+            exchangeRequest: exchangeRequest, pairingReceipt: pairingReceipt, pairingLookup: pairingLookup, pairingLookupBudget: pairingLookupBudget, phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: phoneAudit, phoneRouting: phoneRouting, phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: wakeHints)
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: TransportAuthorityXPCProtocol.self)
         connection.exportedObject = self
@@ -98,6 +101,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
          pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
          pairingLookup: AuthorityPairingLookupHandler? = nil,
+         pairingLookupBudget: AuthorityXPCWorkBudget? = nil,
          phonePushRegistration: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)? = nil,
          phonePushRecovery: (@Sendable (AuthorityPeerBinding, PhonePushRecoveryFrame) throws -> PhonePushRecoveryFrame)? = nil,
          phoneAudit: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)? = nil,
@@ -106,12 +110,22 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) {
         self.activityJournal = activityJournal
         self.pairingLookupHandler = pairingLookup
+        self.pairingLookupBudget = pairingLookupBudget
         self.macID = macID; self.accountID = accountID; self.budget = budget
         self.verify = verify; self.verifyHandshakePolicy = verifyHandshakePolicy; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
         self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting; self.updateSchedulingExchange = phoneUpdateScheduling
     }
     public func close() {
-        let notify = lock.withLock { if closed { return false }; closed = true; ready = false; return true }
+        let notify = lock.withLock {
+            guard !closed else { return false }
+            closed = true
+            ready = false
+            if pairingLookupAdmitted {
+                pairingLookupAdmitted = false
+                pairingLookupBudget?.release()
+            }
+            return true
+        }
         if notify { invalidate() }
     }
     public func hello(reply: @escaping @Sendable (UInt64) -> Void) {
@@ -213,17 +227,17 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             send { reply(completed.value) }
         } catch { close(); reply(nil) }
     }
-    public func pairingLookupVersion(reply: @escaping @Sendable (UInt64) -> Void) {
+    public func pairingLookupVersion(reply: @escaping @Sendable (UInt64, UInt64) -> Void) {
         do {
             let completed = try work {
                 try verifyHandshakePolicy()
-                let supported = pairingLookupHandler != nil
-                lock.withLock { pairingLookupReady = supported }
-                return supported ? UInt64(1) : UInt64(0)
+                let quota = pairingLookupHandler == nil ? 0 : pairingLookupBudget?.maximum ?? 0
+                lock.withLock { pairingLookupReady = quota > 0 }
+                return UInt64(quota)
             }
             defer { completed.activity?.close() }
-            send { reply(completed.value) }
-        } catch { close(); reply(0) }
+            send { reply(completed.value > 0 ? 1 : 0, completed.value) }
+        } catch { close(); reply(0, 0) }
     }
 
     public func pairingLookup(_ request: Data, reply: @escaping @Sendable (Data?) -> Void) {
@@ -236,7 +250,11 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                 switch try PairingRecoveryIPC.decode(request) {
                 case let .begin(query, exporter, deadline):
                     let nonce = try lock.withLock {
-                        try pairingLookupState.begin(query: query, exporter: exporter, deadline: deadline)
+                        guard !closed, !pairingLookupAdmitted, let pairingLookupBudget, pairingLookupBudget.acquire() else {
+                            throw AuthorityXPCEndpointError.unavailable
+                        }
+                        pairingLookupAdmitted = true
+                        return try pairingLookupState.begin(query: query, exporter: exporter, deadline: deadline)
                     }
                     return try PairingRecoveryFrame.challenge(nonce).encode()
                 case let .finish(proof):

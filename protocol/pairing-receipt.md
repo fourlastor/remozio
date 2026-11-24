@@ -102,7 +102,7 @@ Verify all claims against the retained re-pair transcript. Verify the signature 
 The Mac offers the separate ALPN `remozio-pairing-recovery/1` on the existing Transport listener.
 Both direct and relay connections use TLS 1.3 with resumption, tickets, and early data disabled.
 The phone pins the Mac transport key from its retained transcript. Transport checks the candidate certificate format and confines the connection to recovery. Root authenticates the retained candidate key through the exporter-bound proof.
-Transport reserves two recovery slots within its listener limit and leaves room for an enrolled connection. Root accepts recovery configuration only when its connection limit covers the six persistent Transport links and both recovery slots.
+Root reserves capacity for six persistent Transport links and one overlapping replacement. If its connection limit leaves no capacity for recovery, Root still starts and advertises no recovery support. Transport admits at most two recovery connections and keeps an enrolled connection slot available.
 An older Transport or Root can leave the route unavailable. Enrolled receipt lookup keeps its version 1 binding and selectors.
 
 Each message has a four-byte unsigned big-endian length followed by a tag byte and the fields below.

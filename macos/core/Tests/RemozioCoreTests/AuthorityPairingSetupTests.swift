@@ -1534,9 +1534,12 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
                             if f.environment.selfDenied.value { throw Fault.injected }
                         }, sign: { try f.authority.signature(for: $0).rawRepresentation })
                 }
-            })
+            }, pairingLookupBudget: .init(maximum: 1))
         result.hello { XCTAssertEqual($0, 1) }
-        result.pairingLookupVersion { XCTAssertEqual($0, 1) }
+        result.pairingLookupVersion { version, capacity in
+            XCTAssertEqual(version, 1)
+            XCTAssertEqual(capacity, 1)
+        }
         return result
     }
 
@@ -1959,6 +1962,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         private final class Driver: AuthorityXPCDriver, OwnedAuthorityConnection, Sendable {
             let endpoint: AuthorityXPCEndpoint
             private let invalidation = Mutex<(@Sendable () -> Void)?>(nil)
+            private let preserveReservation = Mutex(false)
             private let observeRouting: @Sendable (Driver) -> Void
 
             init(endpoint: AuthorityXPCEndpoint, observeRouting: @escaping @Sendable (Driver) -> Void) {
@@ -1969,8 +1973,8 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             func start(invalidated: @escaping @Sendable () -> Void) {
                 invalidation.withLock { $0 = invalidated }
             }
-            func interrupt() {
-                endpoint.close()
+            func interruptKeepingReservation() {
+                preserveReservation.withLock { $0 = true }
                 let callback = invalidation.withLock { current in
                     let callback = current
                     current = nil
@@ -1985,8 +1989,12 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
                 endpoint.hello { reply(.hello($0)) }
             }
+            func releasePreservedReservation() {
+                preserveReservation.withLock { $0 = false }
+                close()
+            }
             func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
-                endpoint.pairingLookupVersion { reply(.pairingLookupVersion($0)) }
+                endpoint.pairingLookupVersion { reply(.pairingLookupVersion($0, $1)) }
             }
             func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
                 endpoint.pairingLookup(request) { reply($0.map(AuthorityXPCReply.pairingLookup) ?? .failed) }
@@ -1997,7 +2005,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             func validate(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
                 endpoint.validatePeer(binding) { reply(.validation($0)) }
             }
-            func close() { endpoint.close() }
+            func close() { if !preserveReservation.withLock({ $0 }) { endpoint.close() } }
         }
 
         let registry: AuthorityConnectionRegistry
@@ -2007,22 +2015,23 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         private let fixture: Fixture
         private let budget: AuthorityXPCWorkBudget
         private let handler: AuthorityPairingLookupHandler?
+        private let pairingLookupBudget: AuthorityXPCWorkBudget?
         private let validity: @Sendable () throws -> Void
         private let routingSupported: Bool
         private let routing = Mutex<Driver?>(nil)
 
-        init(_ f: Fixture, supported: Bool = true, routingSupported: Bool = false,
+        init(_ f: Fixture, supported: Bool = true, routingSupported: Bool = false, maximumConnections: Int = 8,
              validity: @escaping @Sendable () throws -> Void = {},
              signing: (@Sendable (Data) throws -> Data)? = nil) throws {
             fixture = f; journal = f.journal; self.validity = validity; self.routingSupported = routingSupported
-            registry = try .init(maximum: 8, timeoutMilliseconds: 5_000)
+            registry = try .init(maximum: maximumConnections, timeoutMilliseconds: 5_000)
             budget = try .init(maximum: 8)
             let entry = try Fixture.transportEntry()
             let configuration = try AuthorityServiceConfiguration(macID: f.mac, accountID: f.account,
                 journalDirectory: f.root.appendingPathComponent("store").path,
                 serviceName: "dev.remozio.authority.test", teamID: entry.teamID,
                 transportIdentifier: entry.identifier, transportHashes: [entry.codeDirectoryHash],
-                transportUID: getuid(), maximumPayloadBytes: 16_384)
+                transportUID: getuid(), maximumPayloadBytes: 16_384, maximumConnections: maximumConnections)
             access = try AuthorityTransportAccess(journal: journal, peerPolicy: configuration.transportPolicy,
                 macID: f.mac, accountID: f.account, maximumPayloadBytes: configuration.maximumPayloadBytes,
                 minimumEnvelopeVersion: 1, auditVersions: [])
@@ -2030,7 +2039,14 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             let providers = try AuthorityRequestProviders(configuration: configuration,
                 publicKey: f.authority.publicKey.x963Representation, signing: sign,
                 routing: { throw Fault.injected }, receiptValidation: { _ in try validity() })
-            handler = supported ? access.pairingLookupHandler(providers.pairingLookupProvider(clock: f.environment.now)) : nil
+            let quota = AuthorityTransportConnectionCapacity.recoveryQuota(maximumConnections)
+            if supported, quota > 0 {
+                pairingLookupBudget = try .init(maximum: quota)
+                handler = access.pairingLookupHandler(providers.pairingLookupProvider(clock: f.environment.now))
+            } else {
+                pairingLookupBudget = nil
+                handler = nil
+            }
             try registry.start()
         }
 
@@ -2044,7 +2060,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
                 activityJournal: journal, verify: { try validity() }, verifyHandshakePolicy: { try access.verifyCurrent() },
                 invalidate: { [weak registry] in registry?.remove(id) },
                 onHandshake: { [weak registry] in registry?.handshake(id) },
-                snapshot: { try access.snapshot() }, validate: { try access.validate($0) }, pairingLookup: handler, phoneRouting: route)
+                snapshot: { try access.snapshot() }, validate: { try access.validate($0) }, pairingLookup: handler, pairingLookupBudget: pairingLookupBudget, phoneRouting: route)
             let driver = Driver(endpoint: endpoint) { [weak self] observed in
                 self?.routing.withLock { $0 = observed }
             }
@@ -2052,13 +2068,15 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             return AuthorityXPCChannel(driver: driver, timeoutMilliseconds: 2_000, onClose: onClose)
         }
 
-        func retireRoutingLink() throws {
+        func retireRoutingLinkKeepingReservation() throws -> @Sendable () -> Void {
             let retired = routing.withLock { current in
                 let old = current
                 current = nil
                 return old
             }
-            try XCTUnwrap(retired).interrupt()
+            let driver = try XCTUnwrap(retired)
+            driver.interruptKeepingReservation()
+            return { driver.releasePreservedReservation() }
         }
     }
 
@@ -2175,7 +2193,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
 
     func testNativeRecoveryIdleDeadlineAndCancellationReleaseBothBudgets() async throws {
         let f = try Fixture(configureTransport: true), client = P256.Signing.PrivateKey()
-        let root = try RecoveryRoot(f)
+        let root = try RecoveryRoot(f, maximumConnections: 9)
         defer { root.registry.close() }
         let service = try recoveryService(f, root: root, timeout: 1_500)
         try await service.start()
@@ -2266,7 +2284,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
 
     func testNativeRecoveryHasItsOwnAdmissionLimitInsideTheListener() async throws {
         let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
-        let root = try RecoveryRoot(f)
+        let root = try RecoveryRoot(f, maximumConnections: 9)
         defer { root.registry.close() }
         let service = try recoveryService(f, root: root)
         try await service.start()
@@ -2330,13 +2348,20 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
 
     func testNativeRecoveryUnavailableOnLegacyTransportOrRoot() async throws {
         let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
-        let root = try RecoveryRoot(f, supported: false)
-        defer { root.registry.close() }
-        let service = try recoveryService(f, root: root)
-        try await service.start()
-        let state = await service.state
-        XCTAssertEqual(state, .noEligiblePhones)
-        await service.closeAndWait()
+        for (supported, limit) in [(false, 8), (true, 7)] {
+            let root = try RecoveryRoot(f, supported: supported, maximumConnections: limit)
+            defer { root.registry.close() }
+            let service = try recoveryService(f, root: root)
+            try await service.start()
+            let state = await service.state
+            XCTAssertEqual(state, .noEligiblePhones)
+            let ordinary = try root.open(onClose: {})
+            try await ordinary.start()
+            let trust = try await ordinary.fetchTrust(expectedMacID: f.mac, expectedAccountID: f.account)
+            XCTAssertTrue(trust.peers.isEmpty)
+            await ordinary.close()
+            await service.closeAndWait()
+        }
 
         let enrolled = try DirectApprovalPeer(scope: .init(macID: f.mac, accountID: f.account,
             phoneID: Data(repeating: 53, count: 16), enrollmentEpoch: Data(repeating: 54, count: 16)),
@@ -2358,18 +2383,28 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         await legacy.closeAndWait()
     }
 
-    func testRecoveryCapacityRequiresSpaceForPersistentLinksAndRecovery() throws {
-        try AuthorityTransportConnectionCapacity.validate(7, recoveryEnabled: false)
-        XCTAssertThrowsError(try AuthorityTransportConnectionCapacity.validate(7, recoveryEnabled: true))
-        XCTAssertNoThrow(try AuthorityTransportConnectionCapacity.validate(8, recoveryEnabled: true))
+    func testRecoveryQuotaKeepsTheReplacementMarginAtEveryRootCapacity() {
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(6), 0)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(7), 0)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(8), 1)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(9), 2)
+        XCTAssertEqual(AuthorityTransportConnectionCapacity.recoveryQuota(10), 3)
     }
 
-    func testFullRecoveryAdmissionStillAllowsAuxiliaryReopenAndEnrolledApproval() async throws {
+    func testFullDefaultRecoveryQuotaAllowsImmediateAuxiliaryReplacementAndApproval() async throws {
+        try await checkFullQuotaAllowsReplacementAndApproval(maximumConnections: 8)
+    }
+
+    func testFullTwoSlotRecoveryQuotaAllowsImmediateAuxiliaryReplacementAndApproval() async throws {
+        try await checkFullQuotaAllowsReplacementAndApproval(maximumConnections: 9)
+    }
+
+    private func checkFullQuotaAllowsReplacementAndApproval(maximumConnections: Int) async throws {
         let f = try Fixture(configureTransport: true), phone = P256.Signing.PrivateKey()
         let (proposal, biometric) = try proposal(f, transportKey: phone.publicKey)
         let attempt = try stage(f, proposal), query = try lookupQuery(attempt.transcript)
         _ = try commit(f, attempt, key: biometric)
-        let root = try RecoveryRoot(f, routingSupported: true)
+        let root = try RecoveryRoot(f, routingSupported: true, maximumConnections: maximumConnections)
         defer { root.registry.close() }
         let feed = AuthorityTrustFeed(macID: f.mac, accountID: f.account, factory: { try root.open(onClose: $0) })
         let service = try recoveryService(f, root: root, feed: feed)
@@ -2377,30 +2412,32 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let port = try await waitForService(service)
         let phoneIdentity = try identity(phone)
         var persistent: [AuthorityXPCChannel] = []
-        while availableRootSlots(root) > 2 {
+        let quota = AuthorityTransportConnectionCapacity.recoveryQuota(maximumConnections)
+        while availableRootSlots(root) > quota + 1 {
             let link = try root.open(onClose: {})
             try await link.start()
             persistent.append(link)
         }
         let serverKey = f.transport.publicKey.x963Representation
-        let (first, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
-            serverKey: serverKey, identity: phoneIdentity)
-        let (second, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
-            serverKey: serverKey, identity: phoneIdentity)
-        defer { first.abort(); second.abort() }
-        for channel in [first, second] {
+        var recoveryChannels: [NetworkByteChannel] = []
+        defer { for channel in recoveryChannels { channel.abort() } }
+        for _ in 0..<quota {
+            let (channel, _) = try connectLookup(port: port, purpose: PairingRecoveryFrame.applicationProtocol,
+                serverKey: serverKey, identity: phoneIdentity)
+            recoveryChannels.append(channel)
             try await channel.start(timeoutMilliseconds: 3_000)
             try await sendRecovery(.lookup(query), to: channel)
             guard case .challenge = try await readRecovery(from: channel) else { throw Fault.injected }
         }
-        XCTAssertEqual(availableRootSlots(root), 0)
+        XCTAssertEqual(availableRootSlots(root), 1)
         let opened = root.connections.withLock { $0 }
-        try root.retireRoutingLink()
-        try await waitForRootSlots(1, in: root)
-        do { try await feed.requirePhoneRoutingSupport() }
-        catch AuthorityXPCError.closed { try await feed.requirePhoneRoutingSupport() }
+        let releaseOld = try root.retireRoutingLinkKeepingReservation()
+        defer { releaseOld() }
+        try await feed.requirePhoneRoutingSupport()
         XCTAssertEqual(root.connections.withLock { $0 }, opened + 1)
+        // The replacement overlaps the retired reservation while recovery consumes its full quota.
         XCTAssertEqual(availableRootSlots(root), 0)
+        releaseOld()
 
         let (approved, _) = try connectLookup(port: port, purpose: EnrolledChannelPurpose.approvals.applicationProtocol,
             serverKey: serverKey, identity: phoneIdentity)
@@ -2418,7 +2455,8 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         XCTAssertEqual(peer.peer.scope, attempt.transcript.phone.scope)
         XCTAssertEqual(peer.peer.role, .mac)
 
-        for channel in [first, second, approved] { await channel.close() }
+        for channel in recoveryChannels { await channel.close() }
+        await approved.close()
         for link in persistent { await link.close() }
         await service.closeAndWait()
     }
@@ -2430,7 +2468,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let listener = try DirectApprovalListener(identity: identity(f.transport), peers: [], binding: .loopback,
             event: { event in if case let .ready(value) = event { port.value = value } },
             handler: { _, _ in XCTFail("Recovery entered the approval handler") },
-            sharedWorkBudget: .init(maximum: 8), recoveryMacID: f.mac,
+            sharedWorkBudget: .init(maximum: 8), recoveryMacID: f.mac, sharedRecoveryBudget: .init(maximum: 2),
             recovery: { channel, exporter, _, _ in
                 serverExporters.withLock { $0.append(exporter) }
                 _ = try await channel.receive()

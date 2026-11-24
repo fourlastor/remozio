@@ -29,12 +29,17 @@ public actor DirectApprovalTransportHost {
     private let macID: Data
     private let accountID: Data
     private let factory: Factory
+    private let maximumRecoveryConnections: Int
     private let validatePeer: @Sendable (DirectApprovalPeer, UUID) async throws -> Void
     private var handler: @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void
     private var handlerSealed = false
     private final class FeatureSupport: Sendable { let value = Mutex(false) }
+    private struct RecoveryConfiguration: Sendable {
+        let handler: DirectApprovalListener.RecoveryHandler
+        let budget: AuthorityXPCWorkBudget
+    }
     private final class RecoverySupport: Sendable {
-        let handler = Mutex<DirectApprovalListener.RecoveryHandler?>(nil)
+        let configuration = Mutex<RecoveryConfiguration?>(nil)
     }
     private let pairingRecovery = RecoverySupport()
     private let phoneRoutingSupport = FeatureSupport()
@@ -57,18 +62,18 @@ public actor DirectApprovalTransportHost {
         guard macID.count == 16, accountID.count == 16 else { throw DirectListenerError.invalidConfiguration }
         self.macID = macID; self.accountID = accountID
         self.validatePeer = validatePeer; self.handler = handler
+        maximumRecoveryConnections = max(0, maximumConnections - 1)
         let connectionBudget = try AuthorityXPCWorkBudget(maximum: maximumConnections)
-        let recoveryBudget = try AuthorityXPCWorkBudget(maximum: AuthorityTransportConnectionCapacity.pairingRecovery)
         let routingSupport = phoneRoutingSupport, auditSupport = phoneAuditSupport
         let updateSupport = phoneUpdateSchedulingSupport
         let pairingRecovery = pairingRecovery
         factory = { _, peers, event, handler in
-            let recovery = pairingRecovery.handler.withLock { $0 }
+            let recovery = pairingRecovery.configuration.withLock { $0 }
             return try DirectApprovalListener(identity: identity, peers: peers, binding: binding,
                 maximumConnections: maximumConnections, timeoutMilliseconds: timeoutMilliseconds,
                 enablePhoneRouting: routingSupport.value.withLock { $0 }, enablePhoneAudit: auditSupport.value.withLock { $0 },
                 enablePhoneUpdateScheduling: updateSupport.value.withLock { $0 }, event: event, handler: handler, sharedWorkBudget: connectionBudget,
-                recoveryMacID: recovery == nil ? nil : macID, sharedRecoveryBudget: recoveryBudget, recovery: recovery)
+                recoveryMacID: recovery == nil ? nil : macID, sharedRecoveryBudget: recovery?.budget, recovery: recovery?.handler)
         }
     }
 
@@ -77,6 +82,7 @@ public actor DirectApprovalTransportHost {
          handler: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void = { _, _ in }) {
         self.macID = macID; self.accountID = accountID
         self.factory = factory; self.validatePeer = validatePeer; self.handler = handler
+        maximumRecoveryConnections = AuthorityTransportConnectionCapacity.maximumListenerRecovery
     }
 
     func configureHandler(_ value: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void) throws {
@@ -84,9 +90,12 @@ public actor DirectApprovalTransportHost {
         handler = value
     }
 
-    func configurePairingRecovery(_ handler: @escaping DirectApprovalListener.RecoveryHandler) throws {
+    func configurePairingRecovery(quota: Int, _ handler: @escaping DirectApprovalListener.RecoveryHandler) throws {
         guard !handlerSealed, !closed else { throw DirectHostError.stopped }
-        pairingRecovery.handler.withLock { $0 = handler }
+        let maximum = min(quota, maximumRecoveryConnections, AuthorityTransportConnectionCapacity.maximumListenerRecovery)
+        guard maximum > 0 else { return }
+        let budget = try AuthorityXPCWorkBudget(maximum: maximum)
+        pairingRecovery.configuration.withLock { $0 = RecoveryConfiguration(handler: handler, budget: budget) }
     }
 
     /// Configure before listener admission. Support stays fixed for this authority incarnation.
@@ -180,7 +189,7 @@ public actor DirectApprovalTransportHost {
     }
     private func open() throws {
         guard authority?.isActive != false, let trust else { state = .authorityUnavailable; throw DirectHostError.authorityUnavailable }
-        guard !trust.peers.isEmpty || pairingRecovery.handler.withLock({ $0 != nil }) else { state = .noEligiblePhones; return }
+        guard !trust.peers.isEmpty || pairingRecovery.configuration.withLock({ $0 != nil }) else { state = .noEligiblePhones; return }
         do {
             let generation = UUID(), handler = handler
             let value = try factory(generation, trust.peers, { [weak self] event in

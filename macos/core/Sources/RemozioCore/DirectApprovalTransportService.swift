@@ -79,12 +79,12 @@ public actor DirectApprovalTransportService {
             }
             try await feed.start(host: host)
             if useDefaultDelivery {
-                let pairingLookupSupported: Bool
-                do { try await feed.withPairingLookup { _ in }; pairingLookupSupported = true }
+                let pairingLookupQuota: Int
+                do { pairingLookupQuota = try await feed.withPairingLookup { try await $0.requirePairingLookupSupport() } }
                 catch is CancellationError { throw CancellationError() }
-                catch { pairingLookupSupported = false }
-                if pairingLookupSupported {
-                    try await host.configurePairingRecovery { [weak self] channel, exporter, uptimeDeadline, deadline in
+                catch { pairingLookupQuota = 0 }
+                if pairingLookupQuota > 0 {
+                    try await host.configurePairingRecovery(quota: pairingLookupQuota) { [weak self] channel, exporter, uptimeDeadline, deadline in
                         guard let self else { throw DirectHostError.stopped }
                         try await self.runPairingLookup(on: channel, exporter: exporter,
                             uptimeDeadline: uptimeDeadline, deadline: deadline)
