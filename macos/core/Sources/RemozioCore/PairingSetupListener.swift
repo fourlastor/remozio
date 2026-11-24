@@ -143,7 +143,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
             guard started, !closed else { return nil }
-            if v2 == nil {
+            if self.v2 == nil {
                 guard slots.count < maximumConnections else { return nil }
             } else {
                 guard admitSource(connection.endpoint, at: accepted) else { return nil }
@@ -167,11 +167,12 @@ public final class PairingSetupListener: @unchecked Sendable {
         if let evicted { cancel(evicted) }
         guard let slot else { connection.cancel(); return }
         let channel = slot.channel, invitation = invitation, timeout = setupTimeoutMilliseconds
-        let handshakeTimeout = v2 == nil ? handshakeTimeoutMilliseconds : 3_000
-        let handler = handler, v2 = v2
+        let windowV2 = self.v2
+        let handshakeTimeout = windowV2 == nil ? handshakeTimeoutMilliseconds : 3_000
+        let handler = handler
         let keep = lock.withLock { () -> Bool in
             guard !closed, slots[id] === slot else { return false }
-            if v2 != nil {
+            if windowV2 != nil {
                 slot.proofTimer = Task { [weak self] in
                     do { try await ContinuousClock().sleep(until: deadline) } catch { return }
                     self?.expireProof(id)
@@ -184,13 +185,13 @@ public final class PairingSetupListener: @unchecked Sendable {
                     guard let metadata = Self.metadata(connection: connection, applicationProtocol: applicationProtocol),
                           let point = Self.candidatePoint(metadata: metadata) else { throw DirectListenerError.invalidIdentity }
                     let proof: PairingSetupV2Connection?
-                    if let v2 {
+                    if let windowV2 {
                         guard ContinuousClock.now < deadline else { throw PairingSetupChannelError.rejected }
-                        proof = try .init(windowID: v2.windowID, connection: id,
+                        proof = try .init(windowID: windowV2.windowID, connection: id,
                             challenge: AuthorityPairingSetupAccess.secureRandom(32), exporter: Self.exporter(metadata),
                             reserve: { [weak self] proof in
                                 guard let self else { throw PairingSetupChannelError.closed }
-                                try self.reserveProof(proof, deadline: deadline, reserve: v2.reserve)
+                                try self.reserveProof(proof, deadline: deadline, reserve: windowV2.reserve)
                             })
                     } else { proof = nil }
                     let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
@@ -200,7 +201,7 @@ public final class PairingSetupListener: @unchecked Sendable {
                     await session.closeAndWait()
                 } catch {}
                 await channel.close()
-                v2?.disconnect(id)
+                windowV2?.disconnect(id)
                 self?.release(id)
             }
             return true
