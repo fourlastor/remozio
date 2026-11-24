@@ -1,5 +1,9 @@
 package dev.remozio.protocol
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlin.test.assertTrue
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -7,6 +11,27 @@ import kotlin.test.assertFails
 import kotlin.test.assertIs
 
 class PairingRecoveryFrameTest {
+    @Test fun sharedRecoveryFramesRoundTripIncludingBothSignedExpiryReasons() {
+        val vectors = Json.parseToJsonElement(TestVectors.pairingRecoveryFrames).jsonObject
+        fun hex(s: String) = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        fun bytes(key: String) = hex(vectors.getValue(key).jsonPrimitive.content)
+        val transcript = PairingTranscript.decode(bytes("transcript"))
+        for ((name, value) in vectors.getValue("frames").jsonObject) {
+            val payload = hex(value.jsonPrimitive.content)
+            val frame = PairingRecoveryFrame.decode(payload)
+            assertContentEquals(payload, frame.encode(), name)
+            when {
+                name == "lookup" -> assertContentEquals(bytes("signingInput"),
+                    assertIs<PairingRecoveryFrame.Lookup>(frame).query.signingInput(bytes("exporter"), bytes("challenge")))
+                name.startsWith("expired-") -> {
+                    val expiry = assertIs<PairingRecoveryFrame.Expired>(frame).receipt
+                    assertEquals(name.last().digitToInt().toULong(), expiry.reason.tag)
+                    assertTrue(expiry.verify(transcript), name)
+                }
+            }
+        }
+    }
+
     @Test fun lookupAndProofInputMatchTheMacWireOrder() {
         val setup = ByteArray(16) { 1 }
         val digest = ByteArray(32) { 2 }

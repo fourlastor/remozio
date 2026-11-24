@@ -201,7 +201,8 @@ class RemozioApplication : Application() {
     }
     internal val pairingReceipts by lazy {
         PairingReceiptRecovery(pairing, { parent, record -> androidPairingReceiptWire(this, parent, record) },
-            openRePair = { parent, access -> androidRePairRecoveryWire(this, parent, pairing, access) })
+            openRePair = { parent, access, budget -> androidRePairRecoveryWire(this, parent, pairing, access, budget) },
+            onSlowJoin = { elapsed -> android.util.Log.w("RemozioPairing", "Recovery I/O cleanup exceeded its attempt budget ($elapsed ms)") })
     }
     internal fun retirePairing(attempt: AndroidPairingAttempt): kotlinx.coroutines.Deferred<Result<Unit>> {
         attempt.close()

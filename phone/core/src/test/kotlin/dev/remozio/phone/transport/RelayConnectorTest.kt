@@ -76,7 +76,7 @@ class RelayConnectorTest {
             var checked = false
             try {
                 assertFailsWith<IOException> {
-                    fixture.connector.connect(CoroutineScope(owner), fixture.credential) {
+                    fixture.connector.connectRecovery(CoroutineScope(owner), fixture.credential, PairingRecoveryRelayLease()) {
                         checked = true
                         throw IOException("Predecessor no longer eligible")
                     }
@@ -84,6 +84,36 @@ class RelayConnectorTest {
                 assertTrue(checked)
                 assertEquals(0, fixture.server.requestCount)
             } finally {
+                owner.cancel()
+                withTimeout(5_000) { owner.join() }
+            }
+        }
+    }
+
+    @Test fun revocationAfterAuthorizationClosesTheSocketBeforeTheUpgradeCanWrite() = runBlocking<Unit> {
+        Fixture().use { fixture ->
+            fixture.upgrade(object : WebSocketListener() {})
+            val owner = SupervisorJob()
+            val lease = PairingRecoveryRelayLease()
+            val authorized = CompletableDeferred<Unit>()
+            val resume = CompletableDeferred<Unit>()
+            try {
+                val attempt = async {
+                    assertFailsWith<IOException> {
+                        fixture.connector.connectRecovery(CoroutineScope(owner), fixture.credential, lease) {
+                            authorized.complete(Unit)
+                            resume.await()
+                        }
+                    }
+                }
+                withTimeout(5_000) { authorized.await() }
+                lease.close()
+                resume.complete(Unit)
+                withTimeout(5_000) { attempt.await() }
+                assertEquals(0, fixture.server.requestCount)
+            } finally {
+                lease.close()
+                resume.complete(Unit)
                 owner.cancel()
                 withTimeout(5_000) { owner.join() }
             }

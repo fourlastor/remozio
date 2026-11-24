@@ -11,6 +11,7 @@ import dev.remozio.phone.enrollment.RePairProposalMaterial
 import dev.remozio.phone.enrollment.RePairReservation
 import dev.remozio.phone.enrollment.canAbandonAmbiguousRePair
 import dev.remozio.phone.enrollment.rePairPredecessor
+import dev.remozio.phone.transport.PairingRecoveryRelayLease
 import java.util.concurrent.atomic.AtomicBoolean
 import dev.remozio.protocol.CborValue
 import dev.remozio.protocol.PairingExpiryReceipt
@@ -30,7 +31,7 @@ internal class StoredPairingHost(
     private val openForSetup: () -> EncryptedEnrollmentStore,
     private val openExisting: () -> EncryptedEnrollmentStore?,
     private val enrollmentAccess: Mutex,
-    private val invalidateLocked: suspend (Set<CborValue.Bytes>) -> Unit,
+    private val invalidateConnectionsLocked: suspend (Set<CborValue.Bytes>) -> Unit,
     private val validateKeys: (PhoneEnrollment) -> Unit,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val rePairKeys: RePairKeyCleanup = AndroidRePairKeyCleanup,
@@ -38,6 +39,7 @@ internal class StoredPairingHost(
 ) {
     private val liveRePairs = mutableSetOf<CborValue.Bytes>()
     private val preparedLeases = mutableMapOf<CborValue.Bytes, MutableSet<PreparedPairingLease>>()
+    private val recoveryRelays = mutableMapOf<PreparedPairingLease, RecoveryRelayAccess>()
 
     /** Explicit setup reads can initialize storage. Ordinary inventory reads keep using openExisting. */
     suspend fun setupSnapshot(): EnrollmentSnapshot = withContext(dispatcher) {
@@ -205,7 +207,7 @@ internal class StoredPairingHost(
     suspend fun recoverable(recordID: CborValue.Bytes): PreparedPairingAccess = withContext(dispatcher) {
         enrollmentAccess.withLock {
             checkNotNull(openExisting()).use { store ->
-                require(recordID !in liveRePairs)
+                if (recordID in liveRePairs) throw PairingRecoveryInProgress()
                 val row = store.snapshot().entries.single { it.enrollment.recordID == recordID }
                 require(row.phase == EnrollmentPhase.PREPARED && row.rePair?.proofMayHaveBeenSent != false)
                 store.recoverPairing(recordID.copyBytes())
@@ -216,7 +218,7 @@ internal class StoredPairingHost(
 
     private fun borrowPreparedLocked(record: StoredPhoneEnrollment): PreparedPairingAccess {
         val id = record.enrollment.recordID
-        if (record.rePair != null) require(preparedLeases[id].isNullOrEmpty())
+        if (record.rePair != null && !preparedLeases[id].isNullOrEmpty()) throw PairingRecoveryInProgress()
         validateKeys(record.enrollment)
         require(preparedLeases.values.sumOf { it.size } < 32)
         val lease = PreparedPairingLease()
@@ -224,25 +226,52 @@ internal class StoredPairingHost(
         return PreparedPairingAccess(record, lease)
     }
 
+    suspend fun borrowRecoveryRelay(expected: PreparedPairingAccess): RecoveryRelayAccess? = withContext(dispatcher) {
+        enrollmentAccess.withLock {
+            check(expected.lease !in recoveryRelays)
+            val predecessor = recoveryRelayPredecessorLocked(expected) ?: return@withLock null
+            RecoveryRelayAccess(expected.record.enrollment.recordID, predecessor, PairingRecoveryRelayLease())
+                .also { recoveryRelays[expected.lease] = it }
+        }
+    }
+
+    suspend fun releaseRecoveryRelay(expected: PreparedPairingAccess, relay: RecoveryRelayAccess) = withContext(dispatcher) {
+        relay.lease.close()
+        enrollmentAccess.withLock { recoveryRelays.remove(expected.lease, relay) }
+    }
+
     /** A missing or changed predecessor disables the relay without changing the candidate's direct route. */
     suspend fun recoveryRelayPredecessor(expected: PreparedPairingAccess): StoredPhoneEnrollment? = withContext(dispatcher) {
-        enrollmentAccess.withLock {
-            val recordID = expected.record.enrollment.recordID
-            if (!expected.lease.isCurrent() || preparedLeases[recordID]?.singleOrNull() !== expected.lease) {
-                return@withLock null
-            }
-            checkNotNull(openExisting()).use { store ->
-                val snapshot = store.snapshot()
-                val current = snapshot.entries.singleOrNull { it.enrollment.recordID == recordID } ?: return@use null
-                if (!current.sameConnectionAs(expected.record)) return@use null
-                val rePair = current.rePair ?: return@use null
-                val predecessor = runCatching { rePairPredecessor(snapshot, rePair.invitation) }.getOrNull()
-                predecessor?.takeIf {
-                    it.phase == EnrollmentPhase.ACTIVE && it.enrollment.recordID == current.pairing?.replacingRecordID &&
-                        it.enrollment.relayCredential != null
-                }
+        enrollmentAccess.withLock { recoveryRelayPredecessorLocked(expected) }
+    }
+
+    private fun recoveryRelayPredecessorLocked(expected: PreparedPairingAccess): StoredPhoneEnrollment? {
+        val recordID = expected.record.enrollment.recordID
+        if (!expected.lease.isCurrent() || preparedLeases[recordID]?.singleOrNull() !== expected.lease) return null
+        return checkNotNull(openExisting()).use { store ->
+            val snapshot = store.snapshot()
+            val current = snapshot.entries.singleOrNull { it.enrollment.recordID == recordID } ?: return@use null
+            if (!current.sameConnectionAs(expected.record)) return@use null
+            val rePair = current.rePair ?: return@use null
+            val predecessor = runCatching { rePairPredecessor(snapshot, rePair.invitation) }.getOrNull()
+            predecessor?.takeIf {
+                it.phase == EnrollmentPhase.ACTIVE && it.enrollment.recordID == current.pairing?.replacingRecordID &&
+                    it.enrollment.relayCredential != null
             }
         }
+    }
+
+    private fun closeRecoveryRelaysLocked(ids: Set<CborValue.Bytes>) {
+        val affected = recoveryRelays.filterValues { it.candidate in ids || it.predecessor.enrollment.recordID in ids }
+        for ((borrow, relay) in affected) {
+            recoveryRelays.remove(borrow)
+            relay.lease.close()
+        }
+    }
+
+    private suspend fun invalidateLocked(ids: Set<CborValue.Bytes>) {
+        closeRecoveryRelaysLocked(ids)
+        invalidateConnectionsLocked(ids)
     }
 
     /** The recovery owner calls this only after joining its I/O. */
@@ -268,6 +297,7 @@ internal class StoredPairingHost(
     suspend fun release(recordID: CborValue.Bytes, lease: PreparedPairingLease) = withContext(dispatcher) {
         lease.close()
         enrollmentAccess.withLock {
+            recoveryRelays.remove(lease)?.lease?.close()
             preparedLeases[recordID]?.let { values ->
                 values.remove(lease)
                 if (values.isEmpty()) preparedLeases.remove(recordID)
@@ -308,6 +338,7 @@ internal class StoredPairingHost(
                     return@use attempt.activate(store, receipt.copyBytes())
                 }
                 val previous = store.snapshot()
+                closeRecoveryRelaysLocked(affected)
                 val committed = attempt.activate(store, receipt.copyBytes())
                 val retired = committed.entries.filter { entry ->
                     entry.phase == EnrollmentPhase.REMOVED && previous.entries.any {
@@ -404,6 +435,10 @@ internal class PreparedPairingLease : AutoCloseable {
     override fun close() { active.set(false) }
 }
 internal class PreparedPairingAccess(val record: StoredPhoneEnrollment, val lease: PreparedPairingLease)
+internal class RecoveryRelayAccess(
+    val candidate: CborValue.Bytes, val predecessor: StoredPhoneEnrollment, val lease: PairingRecoveryRelayLease,
+)
+internal class PairingRecoveryInProgress : IllegalStateException("Pairing check already in progress")
 
 internal class OrdinaryPairingReplacementPending : IllegalStateException("This pairing has a pending replacement")
 

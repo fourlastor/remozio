@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -26,14 +27,49 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+/** A single recovery relay can be stopped before or after its socket is opened. */
+class PairingRecoveryRelayLease : AutoCloseable {
+    private val lock = Any()
+    private var revoked = false
+    private var abort: (() -> Unit)? = null
+
+    fun isCurrent(): Boolean = synchronized(lock) { !revoked }
+
+    internal fun bind(closeSocket: () -> Unit) {
+        val accepted = synchronized(lock) {
+            if (revoked) false else {
+                check(abort == null)
+                abort = closeSocket
+                true
+            }
+        }
+        if (!accepted) {
+            closeSocket()
+            throw IOException("Pairing recovery relay unavailable")
+        }
+    }
+
+    override fun close() {
+        val action = synchronized(lock) {
+            revoked = true
+            abort.also { abort = null }
+        }
+        action?.invoke()
+    }
+}
+
 /** Platform HTTPS trust for the outer relay only. The caller must still establish pinned inner TLS. */
 class RelayConnector internal constructor(private val sockets: SSLSocketFactory) {
     constructor() : this(SSLSocketFactory.getDefault() as SSLSocketFactory)
 
     /** Uses the exact endpoint retained with the credential; callers cannot substitute a route. */
-    suspend fun connect(parent: CoroutineScope, credential: RelayAccessCredential,
-        requireCurrent: suspend () -> Unit = {},
-    ): EncryptedRecordTransport = connect(parent, credential.endpoint, credential, requireCurrent = requireCurrent)
+    suspend fun connect(parent: CoroutineScope, credential: RelayAccessCredential): EncryptedRecordTransport =
+        connect(parent, credential.endpoint, credential)
+
+    /** Revocation closes this connection's socket, including while the upgrade is in progress. */
+    suspend fun connectRecovery(parent: CoroutineScope, credential: RelayAccessCredential,
+        lease: PairingRecoveryRelayLease, requireCurrent: suspend () -> Unit,
+    ): EncryptedRecordTransport = connectOwned(parent, credential.endpoint, credential, 15_000, 32_768, 1, lease, requireCurrent)
 
     suspend fun connect(
         parent: CoroutineScope,
@@ -42,7 +78,11 @@ class RelayConnector internal constructor(private val sockets: SSLSocketFactory)
         timeoutMillis: Long = 15_000,
         maximumMessageBytes: Int = 32_768,
         queueCapacity: Int = 1,
-        requireCurrent: suspend () -> Unit = {},
+    ): EncryptedRecordTransport = connectOwned(parent, endpoint, credential, timeoutMillis, maximumMessageBytes, queueCapacity, null) {}
+
+    private suspend fun connectOwned(parent: CoroutineScope, endpoint: RelayEndpoint, credential: RelayAccessCredential,
+        timeoutMillis: Long, maximumMessageBytes: Int, queueCapacity: Int,
+        lease: PairingRecoveryRelayLease?, requireCurrent: suspend () -> Unit,
     ): EncryptedRecordTransport {
         require(credential.endpoint == endpoint)
         require(timeoutMillis in 1..60_000 && maximumMessageBytes in 1..32_768 && queueCapacity in 1..64)
@@ -51,10 +91,14 @@ class RelayConnector internal constructor(private val sockets: SSLSocketFactory)
         val provisional = AtomicReference<SocketCarrier?>()
         try {
             val carrier = open(parentJob, endpoint, credential, timeoutMillis, maximumMessageBytes,
-                queueCapacity, requireCurrent, provisional)
+                queueCapacity, lease, requireCurrent, provisional)
             currentCoroutineContext().ensureActive()
             provisional.set(null)
             return carrier
+        } catch (cancelled: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            if (lease?.isCurrent() == false) throw IOException("Pairing recovery relay unavailable")
+            throw cancelled
         } finally {
             withContext(NonCancellable) {
                 provisional.getAndSet(null)?.let { it.close(); it.awaitClosed() }
@@ -63,13 +107,14 @@ class RelayConnector internal constructor(private val sockets: SSLSocketFactory)
     }
 
     private suspend fun open(parentJob: Job, endpoint: RelayEndpoint, credential: RelayAccessCredential, timeoutMillis: Long,
-        maximumMessageBytes: Int, queueCapacity: Int, requireCurrent: suspend () -> Unit,
+        maximumMessageBytes: Int, queueCapacity: Int, lease: PairingRecoveryRelayLease?, requireCurrent: suspend () -> Unit,
         provisional: AtomicReference<SocketCarrier?>,
     ): SocketCarrier = withTimeoutOrNull(timeoutMillis) {
         suspendCancellableCoroutine { continuation ->
             val lifetime = SocketLifetime(parentJob)
             val setup = launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
                 try {
+                    lease?.bind(lifetime::close)
                     val raw = Socket()
                     lifetime.install(raw)
                     raw.connect(InetSocketAddress(endpoint.host, endpoint.port), timeoutMillis.toInt())
@@ -88,6 +133,7 @@ class RelayConnector internal constructor(private val sockets: SSLSocketFactory)
                     if (secure.applicationProtocol !in listOf("", "http/1.1")) throw IOException("Relay protocol rejected")
                     requireCurrent()
                     coroutineContext.ensureActive()
+                    check(lease?.isCurrent() != false)
                     WebSocketUpgrade.exchange(secure.inputStream, secure.outputStream, endpoint, credential)
                     coroutineContext.ensureActive()
                     secure.soTimeout = 0

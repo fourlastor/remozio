@@ -135,6 +135,8 @@ If a global failure or a failure after valid proof prevents a signed result, the
 
 On Android, the saved attempt keeps its existing prepared-record lease for the whole explicit check.
 A check can make up to three lookups in one 30-second network budget, with one- and two-second delays between attempts.
+Each attempt has at most eight seconds for network work. Direct discovery uses at most half of that attempt's budget.
+When the local enrollment owner invalidates the predecessor, it closes the affected relay socket and leaves direct recovery available. Local shutdown cannot recall headers the relay already received. Keep the prepared-record lease until cleanup joins, even when the network budget expires.
 If the route or exporter is unavailable, or every reply is inconclusive, Android keeps the exact preparation and keys.
 A signed commit uses the existing verified activation path.
 

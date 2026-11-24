@@ -29,20 +29,31 @@ class PairingRecoveryChannel private constructor(
     private val requireCurrent: suspend () -> Unit,
 ) : AutoCloseable {
     private val started = AtomicBoolean(false)
+    private val closed = AtomicBoolean(false)
 
     suspend fun lookup(): PairingRecoveryFrame.Reply {
         check(started.compareAndSet(false, true))
+        val material = synchronized(exporter) {
+            check(!closed.get())
+            exporter.copyOf().also { exporter.fill(0) }
+        }
         return try {
-            exchange(query, exporter, session::send, session::receive, keys::signRecovery, requireCurrent)
+            exchange(query, material, session::send, session::receive, keys::signRecovery) {
+                check(!closed.get())
+                requireCurrent()
+            }
         } finally {
-            exporter.fill(0)
+            material.fill(0)
         }
     }
 
-    override fun close() = session.close()
-    suspend fun closeAndJoin() {
-        try { session.closeAndJoin() } finally { exporter.fill(0) }
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        session.close()
+        synchronized(exporter) { exporter.fill(0) }
     }
+
+    suspend fun closeAndJoin() { close(); session.closeAndJoin() }
 
     companion object {
         suspend fun connect(parent: CoroutineScope, direct: Flow<ApprovalCarrierRoute>, relay: ApprovalCarrierRoute?,
