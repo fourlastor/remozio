@@ -13,6 +13,8 @@ dependencies {
     implementation(libs.ktor.websockets)
     implementation(libs.kotlinx.coroutines.core)
     testImplementation(libs.bouncycastle.bcprov)
+    // The Linux pairing test needs an SSLEngine TLS exporter that JDK 21 does not expose.
+    testImplementation(libs.conscrypt.openjdk)
     testImplementation(libs.okhttp.mockwebserver3)
     testImplementation(libs.okhttp.tls)
     testImplementation(kotlin("test-junit"))

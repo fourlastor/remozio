@@ -14,7 +14,7 @@ let usage = """
     usage: remozio-linux-pair [--state-dir DIR] <command>
       init [--label LABEL]   create the identity once
       invite                 print the invitation (and a QR code when qrencode is installed)
-      pair [--listen ADDRESS:PORT] [--no-advertise]
+      pair [--listen ADDRESS:PORT] [--no-advertise] [--v2]
                              accept one phone, compare codes, commit and send the receipt
       list                   show enrolled phones
     """
@@ -72,6 +72,7 @@ func run(_ arguments: [String]) throws -> Int32 {
     case "pair":
         var listen = "0.0.0.0:0"
         var advertise = true
+        var version2 = false
         var rest = options[...]
         while let option = rest.popFirst() {
             switch option {
@@ -79,10 +80,12 @@ func run(_ arguments: [String]) throws -> Int32 {
                 guard let value = rest.popFirst() else { throw UsageError(message: "--listen needs ADDRESS:PORT") }
                 listen = value
             case "--no-advertise": advertise = false
+            case "--v2": version2 = true
             default: throw UsageError(message: "unknown pair option \(option)")
             }
         }
-        return try pair(identity: PairingIdentity.load(from: store), store: store, listen: listen, advertise: advertise)
+        return try pair(identity: PairingIdentity.load(from: store), store: store, listen: listen,
+                        advertise: advertise, version2: version2)
     default:
         throw UsageError(message: "unknown command \(command)")
     }
@@ -127,11 +130,12 @@ func printInvitation(_ identity: PairingIdentity) throws {
 
 // MARK: pair
 
-func pair(identity: PairingIdentity, store: PairingCommitStore, listen: String, advertise: Bool) throws -> Int32 {
+func pair(identity: PairingIdentity, store: PairingCommitStore, listen: String, advertise: Bool, version2: Bool) throws -> Int32 {
     let (address, port) = try parseListen(listen)
+    let loopback = address.s_addr == in_addr_t(0x7f00_0001).bigEndian
+    guard !version2 || loopback else { throw UsageError(message: "--v2 requires --listen 127.0.0.1:PORT") }
     let listener = try Listener(address: address, port: port)
     defer { listener.close() }
-    let loopback = address.s_addr == in_addr_t(0x7f00_0001).bigEndian
     print("Listening on \(listen.split(separator: ":").dropLast().joined(separator: ":")):\(listener.port)")
     var publisher: ServicePublisher?
     if loopback {
@@ -144,43 +148,62 @@ func pair(identity: PairingIdentity, store: PairingCommitStore, listen: String, 
     }
     defer { publisher?.stop() }
     let server = try TLSPairingServer(identity: identity, nowUnixSeconds: Int64(Date().timeIntervalSince1970),
-                                      lifetimeSeconds: 86_400)
+                                      lifetimeSeconds: 86_400, version2: version2)
     let console = StandardInputConsole()
+    let invitation = version2 ? try identity.invitationV2(lifetimeMilliseconds: 120_000) : nil
+    let windowDeadline = invitation.map { remozio_tls_now_ms() + Int64($0.lifetimeMilliseconds) }
+    if let invitation {
+        print("Invitation v2:")
+        print(try invitation.exportText())
+    }
     print("Waiting for a phone. Press Ctrl-C to stop.")
-    while true {
-        let fd = try listener.accept()
+    while let fd = try listener.accept(deadline: windowDeadline) {
         let accepted = remozio_tls_now_ms()
+        let proofDeadline = windowDeadline.map { min($0, accepted + 3_000) }
+        let handshakeDeadline = proofDeadline ?? accepted + PairingAuthoritySession.maximumLimitMilliseconds
         let stream: TLSPairingStream, point: Data
         do {
-            (stream, point) = try server.accept(fd: fd, deadline: accepted + PairingAuthoritySession.maximumLimitMilliseconds)
+            (stream, point) = try server.accept(fd: fd, deadline: handshakeDeadline)
         } catch {
             print("Refused a connection: \(describe(error))")
+            if version2 { print("V2 proposal bytes received: 0.") }
             continue
         }
         defer { stream.close() }
         let session = PairingAuthoritySession(identity: identity, store: store, stream: stream, peerPoint: point,
                                               console: console, now: { remozio_tls_now_ms() })
-        do {
-            switch try session.run() {
-            case .enrolled(let setupID, let phoneID):
-                print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))). Receipt sent.")
-                return 0
-            case .enrolledReceiptUndelivered(let setupID, let phoneID, let reason):
-                print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))), but the receipt was not delivered: \(reason).")
-                print("Not retried. The phone keeps the setup pending; `list` shows the enrollment.")
-                return 3
-            case .enrolledStateUnknown(let setupID, let error):
-                print("Enrolled state unknown for setup \(hex(setupID)): \(error). No receipt sent; not retried.")
-                return 4
+        let outcome = Result { () throws(PairingSessionFailure) -> PairingSessionOutcome in
+            if let invitation, let proofDeadline {
+                return try session.runV2(invitation: invitation, proofDeadline: proofDeadline,
+                                         exporter: stream.invitationExporter)
             }
-        } catch {
-            print("Setup failed: \(describe(error.error)).")
+            return try session.run()
+        }
+        switch outcome {
+        case .success(.enrolled(let setupID, let phoneID)):
+            print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))). Receipt sent.")
+            return 0
+        case .success(.enrolledReceiptUndelivered(let setupID, let phoneID, let reason)):
+            print("Enrolled phone \(hex(phoneID)) (setup \(hex(setupID))), but the receipt was not delivered: \(reason).")
+            print("Not retried. The phone keeps the setup pending; `list` shows the enrollment.")
+            return 3
+        case .success(.enrolledStateUnknown(let setupID, let error)):
+            print("Enrolled state unknown for setup \(hex(setupID)): \(error). No receipt sent; not retried.")
+            return 4
+        case .failure(let failure):
+            print("Setup failed: \(describe(failure.error)).")
+            // Before a transcript, the only client frame in v2 is its proposal. No credential bytes are logged.
+            if version2 && !failure.transcriptSent {
+                print("V2 proposal bytes received: \(stream.bytesRead).")
+            }
             // A candidate that never saw a transcript never reached the operator; keep waiting for the right phone.
-            guard error.transcriptSent else { continue }
+            guard failure.transcriptSent else { continue }
             print("Nothing was enrolled.")
             return 1
         }
     }
+    print("The invitation expired. Nothing was enrolled.")
+    return 1
 }
 
 func parseListen(_ value: String) throws -> (in_addr, UInt16) {
@@ -219,8 +242,21 @@ final class Listener {
         self.port = UInt16(bigEndian: socketAddress.sin_port)
     }
 
-    func accept() throws -> Int32 {
+    func accept(deadline: Int64?) throws -> Int32? {
         while true {
+            if let deadline {
+                let remaining = deadline - remozio_tls_now_ms()
+                guard remaining > 0 else { return nil }
+                var poller = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let ready = poll(&poller, 1, Int32(min(remaining, 1_000)))
+                if ready < 0, errno == EINTR { continue }
+                guard ready >= 0 else { throw SystemError(operation: "poll", code: errno) }
+                if ready == 0 { continue }
+                guard poller.revents & Int16(POLLIN) != 0 else {
+                    throw SystemError(operation: "listener unavailable", code: 0)
+                }
+                guard remozio_tls_now_ms() < deadline else { return nil }
+            }
             let client = Glibc.accept(fd, nil, nil)
             if client >= 0 { _ = fcntl(client, F_SETFD, FD_CLOEXEC); return client }
             guard errno == EINTR || errno == ECONNABORTED else { throw SystemError(operation: "accept", code: errno) }

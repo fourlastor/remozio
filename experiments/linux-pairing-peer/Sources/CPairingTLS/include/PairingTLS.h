@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define REMOZIO_TLS_ALPN "remozio-pairing/1"
+#define REMOZIO_TLS_EXPORTER_LENGTH 32
 #define REMOZIO_TLS_POINT_LENGTH 65
 #define REMOZIO_TLS_DEFAULT_HANDSHAKE_MS 15000
 #define REMOZIO_TLS_MAX_HANDSHAKE_MS 60000
@@ -50,6 +51,9 @@ void remozio_tls_free(void *pointer);
  * mandatory client certificate. */
 RemozioTLSContext *remozio_tls_server_context_new(const uint8_t *cert_der, size_t cert_length,
                                                   const uint8_t *key_der, size_t key_length);
+/* V2 is an explicit server profile. It refuses v1 and does not advertise either profile. */
+RemozioTLSContext *remozio_tls_server_context_new_v2(const uint8_t *cert_der, size_t cert_length,
+                                                    const uint8_t *key_der, size_t key_length);
 RemozioTLSContext *remozio_tls_client_context_new(const RemozioTLSClientOptions *options,
                                                   const uint8_t *cert_der, size_t cert_length,
                                                   const uint8_t *key_der, size_t key_length);
@@ -75,6 +79,10 @@ RemozioTLSStatus remozio_tls_read(RemozioTLSConnection *connection, uint8_t *buf
  * write is not reported, so the caller must close it and never retry on the same connection. */
 RemozioTLSStatus remozio_tls_write(RemozioTLSConnection *connection, const uint8_t *buffer, size_t length,
                                    int cancel_fd, int64_t deadline_ms);
+
+/* Derive the 32-byte exporter for an established pairing v2 connection, with an empty context. */
+RemozioTLSStatus remozio_tls_export_pairing_v2(const RemozioTLSConnection *connection, const char *label,
+                                               uint8_t material[REMOZIO_TLS_EXPORTER_LENGTH]);
 
 /* Negotiated settings, for tests that assert them instead of library defaults. */
 int remozio_tls_negotiated_version(const RemozioTLSConnection *connection);

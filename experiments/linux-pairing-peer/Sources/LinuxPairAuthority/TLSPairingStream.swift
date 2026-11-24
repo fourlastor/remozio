@@ -1,9 +1,11 @@
 import CPairingTLS
 import Foundation
+import RemozioProtocol
 
-/// One accepted `remozio-pairing/1` connection from the C shim. Closing is the owner's job.
+/// One accepted pairing connection from the C shim. Closing is the owner's job.
 public final class TLSPairingStream: PairingByteStream {
     private var connection: OpaquePointer?
+    public private(set) var bytesRead = 0
 
     init(connection: OpaquePointer) { self.connection = connection }
 
@@ -29,7 +31,19 @@ public final class TLSPairingStream: PairingByteStream {
         let capacity = buffer.count
         let status = buffer.withUnsafeMutableBufferPointer { remozio_tls_read(connection, $0.baseAddress, capacity, -1, deadline, &count) }
         try Self.check(status)
+        bytesRead += count
         return Data(buffer.prefix(count))
+    }
+
+    public func invitationExporter() throws -> Data {
+        guard let connection else { throw PairingSessionError.stream("closed") }
+        var material = Data(count: Int(REMOZIO_TLS_EXPORTER_LENGTH))
+        let status = material.withUnsafeMutableBytes { buffer in
+            remozio_tls_export_pairing_v2(connection, PairingInvitationV2.exporterLabel,
+                                          buffer.bindMemory(to: UInt8.self).baseAddress)
+        }
+        try Self.check(status)
+        return material
     }
 
     static func check(_ status: RemozioTLSStatus) throws {
@@ -58,12 +72,15 @@ public final class TLSPairingStream: PairingByteStream {
 public final class TLSPairingServer {
     private let context: OpaquePointer
 
-    public init(identity: PairingIdentity, nowUnixSeconds: Int64, lifetimeSeconds: Int64) throws {
+    public init(identity: PairingIdentity, nowUnixSeconds: Int64, lifetimeSeconds: Int64, version2: Bool = false) throws {
         let (certificate, key) = try identity.transportCertificate(nowUnixSeconds: nowUnixSeconds, lifetimeSeconds: lifetimeSeconds)
         let made = certificate.withUnsafeBytes { cert in
             key.withUnsafeBytes { key in
-                remozio_tls_server_context_new(cert.bindMemory(to: UInt8.self).baseAddress, cert.count,
-                                               key.bindMemory(to: UInt8.self).baseAddress, key.count)
+                let certificate = cert.bindMemory(to: UInt8.self).baseAddress
+                let privateKey = key.bindMemory(to: UInt8.self).baseAddress
+                return version2
+                    ? remozio_tls_server_context_new_v2(certificate, cert.count, privateKey, key.count)
+                    : remozio_tls_server_context_new(certificate, cert.count, privateKey, key.count)
             }
         }
         guard let made else { throw PairingSessionError.stream("server context") }

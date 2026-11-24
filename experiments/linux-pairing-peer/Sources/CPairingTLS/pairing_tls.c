@@ -22,6 +22,7 @@ struct RemozioTLSContext {
     SSL_CTX *ctx;
     int is_server;
     int tickets_received;
+    const unsigned char *pairing_alpn;
 };
 
 struct RemozioTLSConnection {
@@ -29,7 +30,8 @@ struct RemozioTLSConnection {
     int fd;
 };
 
-static const unsigned char alpn_wire[] = {17, 'r', 'e', 'm', 'o', 'z', 'i', 'o', '-', 'p', 'a', 'i', 'r', 'i', 'n', 'g', '/', '1'};
+static const unsigned char alpn_v1[] = "\x11" REMOZIO_TLS_ALPN;
+static const unsigned char alpn_v2[] = "\x11" "remozio-pairing/2";
 
 int64_t remozio_tls_now_ms(void) {
     struct timespec now;
@@ -135,10 +137,12 @@ static int accept_any_certificate(int preverified, X509_STORE_CTX *store) {
 
 static int select_alpn(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in,
                        unsigned int inlen, void *argument) {
-    (void)ssl; (void)argument;
-    if (inlen != sizeof(alpn_wire) || memcmp(in, alpn_wire, sizeof(alpn_wire)) != 0) return SSL_TLSEXT_ERR_ALERT_FATAL;
-    *out = alpn_wire + 1;
-    *outlen = sizeof(alpn_wire) - 1;
+    (void)ssl;
+    const RemozioTLSContext *context = argument;
+    const unsigned char *wire = context->pairing_alpn;
+    if (inlen != (unsigned int)wire[0] + 1 || memcmp(in, wire, inlen) != 0) return SSL_TLSEXT_ERR_ALERT_FATAL;
+    *out = wire + 1;
+    *outlen = wire[0];
     return SSL_TLSEXT_ERR_OK;
 }
 
@@ -214,11 +218,13 @@ static BIO *socket_bio_new(int fd) {
     return bio;
 }
 
-static RemozioTLSContext *context_new(int is_server, int min_version, int max_version, const uint8_t *cert_der,
+static RemozioTLSContext *context_new(int is_server, int min_version, int max_version, const unsigned char *alpn,
+                                      const uint8_t *cert_der,
                                       size_t cert_length, const uint8_t *key_der, size_t key_length) {
     RemozioTLSContext *context = calloc(1, sizeof(*context));
     if (!context) return NULL;
     context->is_server = is_server;
+    context->pairing_alpn = alpn;
     context->ctx = SSL_CTX_new(is_server ? TLS_server_method() : TLS_client_method());
     if (!context->ctx) goto fail;
     SSL_CTX *ctx = context->ctx;
@@ -235,7 +241,7 @@ static RemozioTLSContext *context_new(int is_server, int min_version, int max_ve
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | (is_server ? SSL_VERIFY_FAIL_IF_NO_PEER_CERT : 0), accept_any_certificate);
     if (is_server) {
         if (!SSL_CTX_set_num_tickets(ctx, 0) || !SSL_CTX_set_max_early_data(ctx, 0)) goto fail;
-        SSL_CTX_set_alpn_select_cb(ctx, select_alpn, NULL);
+        SSL_CTX_set_alpn_select_cb(ctx, select_alpn, context);
     }
     if (cert_der) {
         const unsigned char *cursor = cert_der;
@@ -257,14 +263,20 @@ fail:
 RemozioTLSContext *remozio_tls_server_context_new(const uint8_t *cert_der, size_t cert_length, const uint8_t *key_der,
                                                   size_t key_length) {
     if (!cert_der || !key_der) return NULL;
-    return context_new(1, TLS1_3_VERSION, TLS1_3_VERSION, cert_der, cert_length, key_der, key_length);
+    return context_new(1, TLS1_3_VERSION, TLS1_3_VERSION, alpn_v1, cert_der, cert_length, key_der, key_length);
+}
+
+RemozioTLSContext *remozio_tls_server_context_new_v2(const uint8_t *cert_der, size_t cert_length, const uint8_t *key_der,
+                                                    size_t key_length) {
+    if (!cert_der || !key_der) return NULL;
+    return context_new(1, TLS1_3_VERSION, TLS1_3_VERSION, alpn_v2, cert_der, cert_length, key_der, key_length);
 }
 
 RemozioTLSContext *remozio_tls_client_context_new(const RemozioTLSClientOptions *options, const uint8_t *cert_der,
                                                   size_t cert_length, const uint8_t *key_der, size_t key_length) {
     int min = options && options->min_version ? options->min_version : TLS1_3_VERSION;
     int max = options && options->max_version ? options->max_version : TLS1_3_VERSION;
-    RemozioTLSContext *context = context_new(0, min, max, cert_der, cert_length, key_der, key_length);
+    RemozioTLSContext *context = context_new(0, min, max, alpn_v1, cert_der, cert_length, key_der, key_length);
     if (!context) return NULL;
     if (!options || !options->offer_no_alpn) {
         const char *alpn = options && options->alpn ? options->alpn : REMOZIO_TLS_ALPN;
@@ -312,11 +324,11 @@ done:
     return ok;
 }
 
-static int alpn_is_pairing(SSL *ssl) {
+static int alpn_is_pairing(SSL *ssl, const unsigned char *wire) {
     const unsigned char *selected = NULL;
     unsigned int length = 0;
     SSL_get0_alpn_selected(ssl, &selected, &length);
-    return selected && length == sizeof(alpn_wire) - 1 && memcmp(selected, alpn_wire + 1, length) == 0;
+    return selected && length == wire[0] && memcmp(selected, wire + 1, length) == 0;
 }
 
 static RemozioTLSStatus handshake(RemozioTLSContext *context, int fd, int cancel_fd, int64_t deadline_ms,
@@ -339,7 +351,7 @@ static RemozioTLSStatus handshake(RemozioTLSContext *context, int fd, int cancel
     status = drive(ssl, fd, cancel_fd, deadline_ms, context->is_server ? do_accept : do_connect, NULL, NULL);
     if (status != REMOZIO_TLS_OK) goto fail;
     if (SSL_version(ssl) != TLS1_3_VERSION) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }
-    if (!alpn_is_pairing(ssl)) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }
+    if (!alpn_is_pairing(ssl, context->pairing_alpn)) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }
     if (!check_peer(ssl, point)) { status = REMOZIO_TLS_PEER_CERTIFICATE; goto fail; }
     RemozioTLSConnection *created = calloc(1, sizeof(*created));
     if (!created) { status = REMOZIO_TLS_INTERNAL; goto fail; }
@@ -385,6 +397,19 @@ RemozioTLSStatus remozio_tls_write(RemozioTLSConnection *connection, const uint8
         if (status != REMOZIO_TLS_OK) return status;
         buffer += written;
         length -= written;
+    }
+    return REMOZIO_TLS_OK;
+}
+
+RemozioTLSStatus remozio_tls_export_pairing_v2(const RemozioTLSConnection *connection, const char *label,
+                                               uint8_t material[REMOZIO_TLS_EXPORTER_LENGTH]) {
+    if (!material) return REMOZIO_TLS_INVALID_ARGUMENT;
+    memset(material, 0, REMOZIO_TLS_EXPORTER_LENGTH);
+    if (!connection || !label || !alpn_is_pairing(connection->ssl, alpn_v2)) return REMOZIO_TLS_INVALID_ARGUMENT;
+    if (SSL_export_keying_material(connection->ssl, material, REMOZIO_TLS_EXPORTER_LENGTH,
+                                   label, strlen(label), NULL, 0, 1) != 1) {
+        OPENSSL_cleanse(material, REMOZIO_TLS_EXPORTER_LENGTH);
+        return REMOZIO_TLS_PROTOCOL;
     }
     return REMOZIO_TLS_OK;
 }

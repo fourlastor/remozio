@@ -78,6 +78,11 @@ public struct PairingIdentity: Sendable {
         return identity
     }
 
+    public func invitationV2(lifetimeMilliseconds: UInt64) throws -> PairingInvitationV2 {
+        try PairingInvitationV2(invitation: invitation(), windowID: randomBytes(16), secret: randomBytes(32),
+                                lifetimeMilliseconds: lifetimeMilliseconds)
+    }
+
     public func invitation() throws -> PairingInvitation {
         try PairingInvitation(macID: macID, accountID: accountID, label: label, authorityPublicKey: authorityPublicKey,
                               transportPublicKey: transportPublicKey, minimumEnvelopeVersion: Self.minimumEnvelopeVersion)

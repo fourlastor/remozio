@@ -11,15 +11,18 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.Security
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.KeyManager
+import javax.net.ssl.SSLEngine
 import kotlinx.coroutines.*
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
+import org.conscrypt.Conscrypt
 import org.junit.Test
 import kotlin.test.*
 
@@ -83,8 +86,9 @@ class LinuxPairToolLoopbackTest {
         }
 
         /** Starts `pair` on an ephemeral loopback port and returns the port. */
-        fun startPairing(): Int {
-            val process = ProcessBuilder(tool.path, "--state-dir", state.toString(), "pair", "--listen", "127.0.0.1:0")
+        fun startPairing(version2: Boolean = false): Int {
+            val arguments = listOf(tool.path, "--state-dir", state.toString(), "pair", "--listen", "127.0.0.1:0")
+            val process = ProcessBuilder(if (version2) arguments + "--v2" else arguments)
                 .redirectErrorStream(true).start()
             pairing = process
             Thread { process.inputStream.bufferedReader().forEachLine { lines.put(it) } }.apply { isDaemon = true; start() }
@@ -97,8 +101,11 @@ class LinuxPairToolLoopbackTest {
 
         fun next(timeoutMillis: Long): String {
             val line = checkNotNull(lines.poll(timeoutMillis, TimeUnit.MILLISECONDS)) { "pair printed nothing more; so far: $output" }
-            output.add(line); return line
+            output.add(if (line.startsWith("remozio-pairing:v2:")) "Invitation v2 (redacted)" else line)
+            return line
         }
+
+        fun v2Invitation(): PairingInvitationV2 = PairingInvitationV2.importText(awaitLine("remozio-pairing:v2:"))
 
         fun awaitLine(prefix: String): String {
             while (true) { val line = next(10_000); if (line.startsWith(prefix)) return line }
@@ -113,7 +120,10 @@ class LinuxPairToolLoopbackTest {
         fun awaitExit(): Int {
             val process = checkNotNull(pairing)
             assertTrue(process.waitFor(15, TimeUnit.SECONDS), "pair did not exit; output: $output")
-            while (true) { val line = lines.poll(1, TimeUnit.SECONDS) ?: break; output.add(line) }
+            while (true) {
+                val line = lines.poll(1, TimeUnit.SECONDS) ?: break
+                output.add(if (line.startsWith("remozio-pairing:v2:")) "Invitation v2 (redacted)" else line)
+            }
             return process.exitValue()
         }
 
@@ -130,6 +140,101 @@ class LinuxPairToolLoopbackTest {
         override fun close() {
             pairing?.let { if (it.isAlive) { it.destroyForcibly(); it.waitFor(5, TimeUnit.SECONDS) } }
             directory.toFile().deleteRecursively()
+        }
+    }
+
+    private inline fun <T> withExporterTLS(block: () -> T): T {
+        val provider = Conscrypt.newProvider()
+        check(Security.insertProviderAt(provider, 1) == 1)
+        try {
+            return block()
+        } finally {
+            Security.removeProvider(provider.name)
+        }
+    }
+
+    private fun exporter(overrideALPN: String? = null) = object : PairingV2TLSProvider {
+        override fun configure(engine: SSLEngine) {
+            Conscrypt.setUseSessionTickets(engine, false)
+            if (overrideALPN != null) Conscrypt.setApplicationProtocols(engine, arrayOf(overrideALPN))
+        }
+
+        override fun export(engine: SSLEngine): ByteArray? =
+            Conscrypt.exportKeyingMaterial(engine, PairingInvitationV2.EXPORTER_LABEL, ByteArray(0), 32)
+    }
+
+    private suspend fun authenticateV2(scope: CoroutineScope, fixture: Fixture, port: Int,
+        phone: Phone, invitation: PairingInvitationV2, provider: PairingV2TLSProvider,
+    ): PairingSetupChannel = authenticatePairingV2Routes(scope,
+        kotlinx.coroutines.flow.flowOf(ApprovalCarrierRoute { owner -> fixture.open(owner, port) }),
+        phone.keys, invitation, phone.proposal(invitation.invitation), 8_000, provider)
+
+    @Test fun v2ClientPairsWithTheLinuxToolAndVerifiesTheReceipt(): Unit = runBlocking {
+        withExporterTLS {
+            Fixture().use { fixture ->
+                val port = fixture.startPairing(version2 = true)
+                val invitation = fixture.v2Invitation()
+                assertContentEquals(fixture.invitation.encode(), invitation.invitation.encode())
+                val phone = Phone(3)
+                val owner = SupervisorJob()
+                val scope = CoroutineScope(owner)
+                try {
+                    val channel = authenticateV2(scope, fixture, port, phone, invitation, exporter())
+                    try {
+                        val transcript = withTimeout(10_000) { channel.awaitTranscriptV2(invitation) }
+                        fixture.awaitLine("Compare on the phone.")
+                        fixture.type(transcript.verificationCode())
+                        val receipt = withTimeout(10_000) { channel.submitProof(transcript.digest(), phone.proof(transcript)) }
+                        assertTrue(transcript.verify(receipt, invitation.invitation.authorityPublicKey.copyBytes(),
+                            PairingProofPurpose.MAC_COMMIT))
+                    } finally {
+                        channel.closeAndJoin()
+                    }
+                    assertEquals(0, fixture.awaitExit(), fixture.output.joinToString("\n"))
+                    assertEquals(1, fixture.enrolledPhones().size)
+                } finally {
+                    owner.cancelAndJoin()
+                }
+            }
+        }
+    }
+
+    @Test fun wrongPinSendsNoV2Proposal(): Unit = runBlocking { rejectsBeforeV2Proposal(wrongPin = true) }
+
+    @Test fun wrongAlpnSendsNoV2Proposal(): Unit = runBlocking { rejectsBeforeV2Proposal(wrongPin = false) }
+
+    private suspend fun rejectsBeforeV2Proposal(wrongPin: Boolean) {
+        withExporterTLS {
+            Fixture().use { fixture ->
+                val port = fixture.startPairing(version2 = true)
+                val offered = fixture.v2Invitation()
+                val original = offered.invitation
+                val invitation = if (wrongPin) {
+                    val changed = PairingInvitation(original.macID.copyBytes(), original.accountID.copyBytes(),
+                        original.label, original.authorityPublicKey.copyBytes(), point(key()), original.minimumEnvelopeVersion)
+                    PairingInvitationV2(changed, offered.windowID.copyBytes(), ByteArray(32),
+                        lifetimeMilliseconds = offered.lifetimeMilliseconds)
+                } else offered
+                val provider = exporter(if (wrongPin) null else PairingSetupFrame.APPLICATION_PROTOCOL)
+                val owner = SupervisorJob()
+                val scope = CoroutineScope(owner)
+                var reachedProposalWrite = false
+                try {
+                    rejectedWithin(10_000) {
+                        val channel = authenticateV2(scope, fixture, port, Phone(3), invitation, provider)
+                        try {
+                            channel.awaitTranscriptV2(invitation) { reachedProposalWrite = true }
+                        } finally {
+                            channel.closeAndJoin()
+                        }
+                    }
+                    assertFalse(reachedProposalWrite)
+                    assertEquals("V2 proposal bytes received: 0.", fixture.awaitLine("V2 proposal bytes received:"))
+                    assertEquals(emptyList(), fixture.enrolledPhones())
+                } finally {
+                    owner.cancelAndJoin()
+                }
+            }
         }
     }
 

@@ -55,7 +55,18 @@ leaks. Every rejection case, including both directions of the post-handshake rej
 requires the process to hold exactly the descriptors it held before. They inspect the timer clock, absolute arming,
 handshake cap and descriptor cleanup through `/proc/self/fdinfo`.
 
-### Attended host suspend probe (`remozio-tls-suspend-probe`)
+### Pairing v2 loopback
+
+Run `remozio-linux-pair pair --v2 --listen 127.0.0.1:0` to open a two-minute v2 window.
+Pass the invitation printed by that command to the client. Keep the invitation private until it expires.
+This listener uses TLS 1.3, the v2 ALPN, and proof tied to a TLS exporter.
+The tool then asks for the same operator confirmation as v1.
+
+The Linux CI loopback tests use disposable keys to check the v2 proof and receipt against the native tool.
+They also check that a wrong pin or ALPN sends zero Proposal bytes to the tool.
+The default command continues to serve v1.
+
+## Attended host suspend probe (`remozio-tls-suspend-probe`)
 
 The tests show that each wait arms an absolute `CLOCK_BOOTTIME` timer. They do not suspend the host. That needs an
 operator, so the check script builds this probe and never runs it.
