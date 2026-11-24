@@ -4,18 +4,33 @@ import Network
 import Security
 import RemozioProtocol
 
+/// Only public window metadata crosses to Transport. The callbacks target the same Authority owner.
+struct PairingSetupV2Ingress: Sendable {
+    let windowID: Data
+    let lifetimeMilliseconds: UInt64
+    let reserve: @Sendable (PairingSetupV2Proof) throws -> Void
+    let disconnect: @Sendable (UUID) -> Void
+}
+
 /// Bounded setup ingress for unpaired candidates. Construct in the transport role with its existing identity.
 /// The handler relays claims to the signed app; only that app's authenticated Root channel can authorize enrollment.
 public final class PairingSetupListener: @unchecked Sendable {
     private final class Slot: @unchecked Sendable {
         let channel: NetworkByteChannel
         var task: Task<Void, Never>?
+        var proofTimer: Task<Void, Never>?
+        var proved = false
         init(_ channel: NetworkByteChannel) { self.channel = channel }
     }
     private let listener: NWListener
     private let queue = DispatchQueue(label: "dev.remozio.pairing-listener")
     private let lock = NSLock()
     private let invitation: PairingInvitation
+    private let v2: PairingSetupV2Ingress?
+    private let applicationProtocol: String
+    private var unproved: [UUID] = []
+    private var sources: [String: (until: ContinuousClock.Instant, count: Int)] = [:]
+    private var expiry: Task<Void, Never>?
     private let maximumConnections: Int
     private let handshakeTimeoutMilliseconds: UInt64
     private let setupTimeoutMilliseconds: UInt64
@@ -26,20 +41,36 @@ public final class PairingSetupListener: @unchecked Sendable {
     private var started = false
     private var closed = false
     private var ready = false
-    public init(identity: SecIdentity, invitation: PairingInvitation,
+    public convenience init(identity: SecIdentity, invitation: PairingInvitation,
                 binding: DirectApprovalListener.Binding = .localNetwork, maximumConnections: Int = 2,
                 handshakeTimeoutMilliseconds: UInt64 = 15_000, setupTimeoutMilliseconds: UInt64 = 300_000,
                 event: @escaping @Sendable (DirectListenerEvent) -> Void,
                 handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
+        try self.init(identity: identity, invitation: invitation, binding: binding, maximumConnections: maximumConnections,
+                      handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds, setupTimeoutMilliseconds: setupTimeoutMilliseconds,
+                      v2: nil, event: event, handler: handler)
+    }
+
+    init(identity: SecIdentity, invitation: PairingInvitation, binding: DirectApprovalListener.Binding,
+         maximumConnections: Int, handshakeTimeoutMilliseconds: UInt64, setupTimeoutMilliseconds: UInt64,
+         v2: PairingSetupV2Ingress?, event: @escaping @Sendable (DirectListenerEvent) -> Void,
+         handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
               (1...300_000).contains(setupTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
+        if let v2 {
+            guard binding == .loopback, v2.windowID.count == 16, (1...300_000).contains(v2.lifetimeMilliseconds) else {
+                throw DirectListenerError.invalidConfiguration
+            }
+        }
         var certificate: SecCertificate?
         guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess, let certificate,
               Self.candidatePoint(certificate: SecCertificateCopyData(certificate) as Data) == invitation.transportPublicKey,
               let local = sec_identity_create(identity) else { throw DirectListenerError.invalidIdentity }
         self.invitation = invitation; self.maximumConnections = maximumConnections
         self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.setupTimeoutMilliseconds = setupTimeoutMilliseconds
-        self.handler = handler; self.event = event
+        self.handler = handler; self.event = event; self.v2 = v2
+        let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
+        self.applicationProtocol = applicationProtocol
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
         sec_protocol_options_set_local_identity(options, local)
         sec_protocol_options_set_min_tls_protocol_version(options, .TLSv13)
@@ -47,7 +78,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         sec_protocol_options_set_peer_authentication_required(options, true)
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_tls_tickets_enabled(options, false)
-        sec_protocol_options_add_tls_application_protocol(options, PairingSetupFrame.applicationProtocol)
+        sec_protocol_options_add_tls_application_protocol(options, applicationProtocol)
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
             complete(Self.candidatePoint(metadata: metadata) != nil)
         }, queue)
@@ -72,6 +103,13 @@ public final class PairingSetupListener: @unchecked Sendable {
         try lock.withLock {
             guard !started, !closed else { throw DirectListenerError.alreadyStarted }
             started = true; listener.start(queue: queue)
+            if let v2 {
+                let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(v2.lifetimeMilliseconds)))
+                expiry = Task { [weak self] in
+                    do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+                    self?.close()
+                }
+            }
         }
         queue.asyncAfter(deadline: .now() + .milliseconds(Int(handshakeTimeoutMilliseconds))) { [weak self] in
             guard let self else { return }
@@ -99,42 +137,143 @@ public final class PairingSetupListener: @unchecked Sendable {
     }
     private func accept(_ connection: NWConnection) {
         let id = UUID()
+        let accepted = ContinuousClock.now
+        let deadline = accepted.advanced(by: .seconds(3))
+        let applicationProtocol = applicationProtocol
+        var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
-            guard started, !closed, slots.count < maximumConnections else { return nil }
-            let value = Slot(NetworkByteChannel(connection: connection) { Self.candidatePoint(connection: $0) != nil })
-            slots[id] = value; return value
+            guard started, !closed else { return nil }
+            if self.v2 == nil {
+                guard slots.count < maximumConnections else { return nil }
+            } else {
+                guard admitSource(connection.endpoint, at: accepted) else { return nil }
+                if unproved.count == 4 {
+                    // Keep canceled work bounded while its actual handlers drain.
+                    guard retired.count < 4, let oldest = unproved.first,
+                          let owned = slots.removeValue(forKey: oldest) else { return nil }
+                    unproved.removeFirst()
+                    retired[oldest] = owned
+                    evicted = owned
+                }
+                unproved.append(id)
+            }
+            let value = Slot(NetworkByteChannel(connection: connection) {
+                Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
+                    .flatMap { Self.candidatePoint(metadata: $0) } != nil
+            })
+            slots[id] = value
+            return value
         }
+        if let evicted { cancel(evicted) }
         guard let slot else { connection.cancel(); return }
         let channel = slot.channel, invitation = invitation, timeout = setupTimeoutMilliseconds
-        let handshakeTimeout = handshakeTimeoutMilliseconds, handler = handler
+        let windowV2 = self.v2
+        let handshakeTimeout = windowV2 == nil ? handshakeTimeoutMilliseconds : 3_000
+        let handler = handler
         let keep = lock.withLock { () -> Bool in
             guard !closed, slots[id] === slot else { return false }
+            if windowV2 != nil {
+                slot.proofTimer = Task { [weak self] in
+                    do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+                    self?.expireProof(id)
+                }
+            }
             slot.task = Task { [weak self] in
-            do {
-                try await channel.start(timeoutMilliseconds: handshakeTimeout)
-                try Task.checkCancellation()
-                guard let point = Self.candidatePoint(connection: connection) else { throw DirectListenerError.invalidIdentity }
-                let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
-                    peerPoint: point, timeoutMilliseconds: timeout)
-                do { try Task.checkCancellation(); try await handler(session) }
-                catch { await session.closeAndWait(); throw error }
-                await session.closeAndWait()
-            } catch {}
-            await channel.close(); self?.release(id)
+                do {
+                    try await channel.start(timeoutMilliseconds: handshakeTimeout)
+                    try Task.checkCancellation()
+                    guard let metadata = Self.metadata(connection: connection, applicationProtocol: applicationProtocol),
+                          let point = Self.candidatePoint(metadata: metadata) else { throw DirectListenerError.invalidIdentity }
+                    let proof: PairingSetupV2Connection?
+                    if let windowV2 {
+                        guard ContinuousClock.now < deadline else { throw PairingSetupChannelError.rejected }
+                        proof = try .init(windowID: windowV2.windowID, connection: id,
+                            challenge: AuthorityPairingSetupAccess.secureRandom(32), exporter: Self.exporter(metadata),
+                            reserve: { [weak self] proof in
+                                guard let self else { throw PairingSetupChannelError.closed }
+                                try self.reserveProof(proof, deadline: deadline, reserve: windowV2.reserve)
+                            })
+                    } else { proof = nil }
+                    let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
+                        peerPoint: point, timeoutMilliseconds: timeout, v2: proof)
+                    do { try Task.checkCancellation(); try await handler(session) }
+                    catch { await session.closeAndWait(); throw error }
+                    await session.closeAndWait()
+                } catch {}
+                await channel.close()
+                windowV2?.disconnect(id)
+                self?.release(id)
             }
             return true
         }
         if !keep { channel.abort() }
     }
-    private func release(_ id: UUID) { lock.withLock { slots[id] = nil; retired[id] = nil } }
+
+    private func admitSource(_ endpoint: NWEndpoint, at now: ContinuousClock.Instant) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        sources = sources.filter { $0.value.until > now }
+        let key = String(describing: host)
+        if let record = sources[key] {
+            guard record.count < 8 else { return false }
+            sources[key] = (record.until, record.count + 1)
+        } else {
+            guard sources.count < 64 else { return false }
+            sources[key] = (now.advanced(by: .seconds(1)), 1)
+        }
+        return true
+    }
+
+    private func reserveProof(_ proof: PairingSetupV2Proof, deadline: ContinuousClock.Instant,
+                              reserve: (PairingSetupV2Proof) throws -> Void) throws {
+        let id = proof.connection
+        let slot = try lock.withLock {
+            guard !closed, ContinuousClock.now < deadline, let slot = slots[id], !slot.proved else {
+                throw PairingSetupChannelError.rejected
+            }
+            return slot
+        }
+        try reserve(proof)
+        // An eviction or close can win while Authority is verifying. The handler retires that reservation on exit.
+        try lock.withLock {
+            guard !closed, ContinuousClock.now < deadline, slots[id] === slot, !slot.proved else {
+                throw PairingSetupChannelError.rejected
+            }
+            slot.proved = true
+            slot.proofTimer?.cancel(); slot.proofTimer = nil
+            unproved.removeAll { $0 == id }
+        }
+    }
+
+    private func expireProof(_ id: UUID) {
+        let slot = lock.withLock { () -> Slot? in
+            guard let slot = slots[id], !slot.proved else { return nil }
+            return slot
+        }
+        if let slot { cancel(slot) }
+    }
+
+    private func cancel(_ slot: Slot) { slot.channel.abort(); slot.task?.cancel() }
+
+    private func release(_ id: UUID) {
+        lock.withLock {
+            (slots[id] ?? retired[id])?.proofTimer?.cancel()
+            slots[id] = nil; retired[id] = nil
+            unproved.removeAll { $0 == id }
+        }
+    }
+
     private func finish(_ result: DirectListenerEvent) {
         let owned = lock.withLock { () -> [Slot]? in
-            guard !closed else { return nil }; closed = true
-            let result = Array(slots.values); retired = slots; slots.removeAll(); return result
+            guard !closed else { return nil }
+            closed = true
+            expiry?.cancel(); expiry = nil
+            for (id, slot) in slots { retired[id] = slot }
+            slots.removeAll(); unproved.removeAll(); sources.removeAll()
+            return Array(retired.values)
         }
         guard let owned else { return }
         listener.cancel()
-        for slot in owned { slot.channel.abort(); slot.task?.cancel() }
+        for slot in owned { cancel(slot) }
         queue.async { [event] in event(result) }
     }
     // This verifies a TLS candidate's key, not enrollment, hardware custody or authorization.
@@ -154,13 +293,24 @@ public final class PairingSetupListener: @unchecked Sendable {
         guard accessible, let leaf else { return nil }
         return candidatePoint(certificate: SecCertificateCopyData(leaf) as Data)
     }
-    private static func candidatePoint(connection: NWConnection) -> Data? {
-        guard let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
-              let name = sec_protocol_metadata_copy_negotiated_protocol(tls.securityProtocolMetadata) else { return nil }
+    private static func metadata(connection: NWConnection, applicationProtocol: String) -> sec_protocol_metadata_t? {
+        guard let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else { return nil }
+        let metadata = tls.securityProtocolMetadata
+        guard let name = sec_protocol_metadata_copy_negotiated_protocol(metadata) else { return nil }
         defer { free(UnsafeMutableRawPointer(mutating: name)) }
-        guard String(cString: name) == PairingSetupFrame.applicationProtocol,
-              sec_protocol_metadata_get_negotiated_tls_protocol_version(tls.securityProtocolMetadata) == .TLSv13,
-              !sec_protocol_metadata_get_early_data_accepted(tls.securityProtocolMetadata) else { return nil }
-        return candidatePoint(metadata: tls.securityProtocolMetadata)
+        guard String(cString: name) == applicationProtocol,
+              sec_protocol_metadata_get_negotiated_tls_protocol_version(metadata) == .TLSv13,
+              !sec_protocol_metadata_get_early_data_accepted(metadata) else { return nil }
+        return metadata
+    }
+
+    private static func exporter(_ metadata: sec_protocol_metadata_t) throws -> Data {
+        let label = PairingInvitationV2.exporterLabel
+        guard let secret = sec_protocol_metadata_create_secret(metadata, label.utf8.count, label, 32) else {
+            throw DirectListenerError.invalidIdentity
+        }
+        let bytes = DispatchData._unconditionallyBridgeFromObjectiveC(secret)
+        guard bytes.count == 32 else { throw DirectListenerError.invalidIdentity }
+        return Data(bytes)
     }
 }

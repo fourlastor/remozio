@@ -390,11 +390,16 @@ struct RenderSetupPreview {
         ] {
             var state = PairingPresentation()
             state.phase = phase
-            state.invitationText = try PairingInvitation(macID: Data(repeating: 1, count: 16),
+            let invitation = try PairingInvitation(macID: Data(repeating: 1, count: 16),
                 accountID: Data(repeating: 2, count: 16), label: "Synthetic Mac",
                 authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
                 transportPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
-                minimumEnvelopeVersion: 1).exportText()
+                minimumEnvelopeVersion: 1)
+            if phase == .waitingForPhone {
+                state.invitationText = try PairingInvitationV2(invitation: invitation, windowID: Data(repeating: 3, count: 16),
+                    secret: Data(repeating: 4, count: 32), lifetimeMilliseconds: 120_000).exportText()
+                state.invitationIsCredential = true
+            }
             state.comparisonCode = "37MRQ S9XSE 3EMYL 7QA8F"
             state.remainingSeconds = 42
             state.phones = [.init(id: Data(repeating: 1, count: 16), suffix: "C4D8E012")]

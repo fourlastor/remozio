@@ -14,6 +14,7 @@ struct PairingPhoneRow: Identifiable {
 struct PairingPresentation {
     var phase: MacPairingSessionPhase = .idle
     var invitationText: String?
+    var invitationIsCredential = false
     var phones: [PairingPhoneRow] = []
     var comparisonCode: String?
     var remainingSeconds: UInt64?
@@ -21,7 +22,12 @@ struct PairingPresentation {
     init() {}
     init(_ snapshot: MacPairingSessionSnapshot) {
         phase = snapshot.phase
-        invitationText = try? (snapshot.rePairInvitation?.exportText() ?? snapshot.invitation?.exportText())
+        if let invitation = snapshot.invitationV2 {
+            invitationText = try? invitation.exportText()
+            invitationIsCredential = true
+        } else {
+            invitationText = try? (snapshot.rePairInvitation?.exportText() ?? snapshot.invitation?.exportText())
+        }
         phones = snapshot.candidates.filter { $0.phase == .proposed }.map {
             .init(id: $0.id, suffix: $0.proposal.phone.scope.phoneID.suffix(4).map { String(format: "%02X", $0) }.joined())
         }
@@ -203,6 +209,29 @@ struct RePairSheet: View {
     }
 }
 
+@MainActor
+private struct PairingPasteboardEntry {
+    let text: String
+    let changeCount: Int
+
+    static func copy(_ text: String) -> Self? {
+        let item = NSPasteboardItem()
+        guard item.setString(text, forType: .string),
+              item.setData(Data(), forType: .init("org.nspasteboard.ConcealedType")),
+              item.setData(Data(), forType: .init("org.nspasteboard.TransientType")) else { return nil }
+        let pasteboard = NSPasteboard.general
+        let count = pasteboard.prepareForNewContents(with: .currentHostOnly)
+        guard pasteboard.writeObjects([item]), pasteboard.changeCount == count else { return nil }
+        return Self(text: text, changeCount: count)
+    }
+
+    func clearIfOwned() {
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.string(forType: .string) == text, pasteboard.changeCount == changeCount else { return }
+        pasteboard.prepareForNewContents(with: .currentHostOnly)
+    }
+}
+
 struct PairingSheetContent: View {
     let state: PairingPresentation
     let working: Bool
@@ -210,6 +239,7 @@ struct PairingSheetContent: View {
     let onConfirm: () -> Void
     let onClose: () -> Void
     var rePairIdentifier: String? = nil
+    @State private var copiedCredential: PairingPasteboardEntry? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Group {
@@ -233,6 +263,16 @@ struct PairingSheetContent: View {
             }
         }
         .padding(24).frame(minWidth: 440, idealWidth: 520, maxWidth: 600, minHeight: 460, idealHeight: 620)
+        .onChange(of: state.invitationText) { _, _ in clearCopiedCredential() }
+        .onChange(of: state.phase) { _, phase in
+            if phase != .waitingForPhone { clearCopiedCredential() }
+        }
+        .onDisappear { clearCopiedCredential() }
+    }
+
+    private func clearCopiedCredential() {
+        copiedCredential?.clearIfOwned()
+        copiedCredential = nil
     }
     private var isFinished: Bool { [.receiptSent, .registeredOnMac, .outcomeUnknown, .expired, .unavailable, .closed].contains(state.phase) }
     @ViewBuilder private var content: some View {
@@ -250,7 +290,14 @@ struct PairingSheetContent: View {
                     HStack { Spacer(); Image(nsImage: image).interpolation(.none).resizable().scaledToFit().frame(width: 220, height: 220).padding(16).background(.white, in: RoundedRectangle(cornerRadius: 8))
                         .accessibilityLabel(Text("Pairing invitation for this Mac")); Spacer() }
                 }
-                Button("Copy pairing text") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
+                Button("Copy pairing text") {
+                    if state.invitationIsCredential {
+                        copiedCredential = PairingPasteboardEntry.copy(text)
+                    } else {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
+                }
                 Text("Use the copied text if you cannot scan this screen.").font(.callout).foregroundStyle(.primary)
             }
             ForEach(state.phones) { phone in

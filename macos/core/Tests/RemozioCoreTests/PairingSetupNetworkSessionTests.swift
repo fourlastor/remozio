@@ -36,7 +36,10 @@ final class PairingSetupNetworkSessionTests: XCTestCase {
         func proofFrame() throws -> PairingSetupFrame { try .proof(setupID: transcript.setupID, digest: transcript.digest(), signature: proof()) }
     }
     private func wire(_ frame: PairingSetupFrame) throws -> Data {
-        let bytes = try frame.encode(), n = UInt32(bytes.count)
+        try wire(frame.encode())
+    }
+    private func wire(_ bytes: Data) -> Data {
+        let n = UInt32(bytes.count)
         return Data([UInt8(n >> 24), UInt8((n >> 16) & 255), UInt8((n >> 8) & 255), UInt8(n & 255)]) + bytes
     }
     private actor Stream: ApprovalByteStream {
@@ -135,5 +138,66 @@ final class PairingSetupNetworkSessionTests: XCTestCase {
             await session.close(); let closes = await stream.closes; XCTAssertEqual(closes, 1)
         }
     }
-}
 
+    private func setupV2(_ fixture: Fixture, proposal: PairingPhoneProposal? = nil) throws
+        -> (AuthorityPairingV2Window, AuthorityMoment, PairingSetupV2Connection, PairingSetupPreludeV2) {
+        let invitation = try PairingInvitationV2(invitation: fixture.invitation, windowID: Data(repeating: 14, count: 16),
+            secret: Data(repeating: 15, count: 32), lifetimeMilliseconds: 120_000)
+        let start = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+        let window = try AuthorityPairingV2Window(invitation: invitation, predecessor: nil, started: start)
+        let challenge = Data(repeating: 16, count: 32), exporter = Data(repeating: 17, count: 32)
+        let proposal = proposal ?? fixture.proposal
+        let tag = try invitation.proof(proposal: proposal, challenge: challenge, exporter: exporter)
+        let context = PairingSetupV2Connection(windowID: invitation.windowID, connection: UUID(),
+            challenge: challenge, exporter: exporter,
+            reserve: { try window.reserve($0, at: start) })
+        return (window, start, context, .proposal(proposal, tag: tag))
+    }
+
+    func testV2ChallengeAndProvedProposalReplaceTheLegacyPrelude() async throws {
+        let f = try Fixture()
+        let (window, moment, context, proposal) = try setupV2(f)
+        let stream = Stream([try wire(proposal.encode()), try wire(f.proofFrame())])
+        let session = try await PairingSetupNetworkSession.accept(stream: stream, invitation: f.invitation,
+            peerPoint: f.transport.publicKey.x963Representation, v2: context)
+        let connection = await session.provedConnection
+        XCTAssertEqual(connection, context.connection)
+        let retained = try await session.proposal()
+        XCTAssertEqual(try retained.encode(), try f.proposal.encode())
+        XCTAssertEqual(try window.takeProposal(connection: context.connection, matching: retained.encode(), at: moment).encode(),
+            try f.proposal.encode())
+        let output = await stream.output
+        XCTAssertEqual(output, try wire(PairingSetupPreludeV2.challenge(context.challenge).encode()))
+        try await session.stage(f.transcript)
+        let proof = try await session.receiveProof()
+        XCTAssertTrue(try f.transcript.verify(signature: proof, publicKey: f.biometric.publicKey.x963Representation, purpose: .phoneBiometric))
+        try await session.sendReceipt(f.receipt())
+        await session.closeAndWait()
+    }
+
+    func testV2RefusesLegacyProposalAndCannotReplaceAProvedProposal() async throws {
+        let f = try Fixture()
+        let (_, _, context, proposal) = try setupV2(f)
+        let legacy = try wire(PairingSetupFrame.proposal(f.proposal))
+        let oldStream = Stream([legacy])
+        do {
+            _ = try await PairingSetupNetworkSession.accept(stream: oldStream, invitation: f.invitation,
+                peerPoint: f.transport.publicKey.x963Representation, v2: context)
+            XCTFail("Accepted a legacy proposal before proof")
+        } catch PairingError.invalidTranscript {}
+        let legacyCloses = await oldStream.closes
+        XCTAssertEqual(legacyCloses, 1)
+
+        let stream = Stream([try wire(proposal.encode()), legacy])
+        let session = try await PairingSetupNetworkSession.accept(stream: stream, invitation: f.invitation,
+            peerPoint: f.transport.publicKey.x963Representation, v2: context)
+        try await session.stage(f.transcript)
+        do {
+            _ = try await session.receiveProof()
+            XCTFail("Accepted a second proposal")
+        } catch PairingSetupChannelError.rejected {}
+        await session.closeAndWait()
+        let closes = await stream.closes
+        XCTAssertEqual(closes, 1)
+    }
+}

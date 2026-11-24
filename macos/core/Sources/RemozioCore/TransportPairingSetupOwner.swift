@@ -5,12 +5,16 @@ import Security
 
 protocol TransportPairingPeer: Sendable {
     var isClosed: Bool { get async }
+    var provedConnection: UUID? { get async }
     func proposal() async throws -> PairingPhoneProposal
     func stage(_ transcript: PairingTranscript) async throws
     func receiveProof() async throws -> Data
     func sendReceipt(_ signature: Data) async throws
     func abort()
     func close() async
+}
+extension TransportPairingPeer {
+    var provedConnection: UUID? { get async { nil } }
 }
 extension PairingSetupNetworkSession: TransportPairingPeer {}
 protocol TransportPairingIngress: Sendable {
@@ -20,6 +24,7 @@ protocol TransportPairingIngress: Sendable {
 }
 private final class NativePairingIngress: TransportPairingIngress, @unchecked Sendable {
     let listener: PairingSetupListener
+    init(listener: PairingSetupListener) { self.listener = listener }
     init(identity: SecIdentity, invitation: PairingInvitation, configuration: TransportPairingControlConfiguration,
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (any TransportPairingPeer) async throws -> Void) throws {
@@ -108,6 +113,7 @@ public actor TransportPairingSetupOwner {
     private let lifetime = PairingControlLifetime()
     private var invitation: PairingInvitation?
     private var rePair: RePairInvitation?
+    private var requiresProof = false
     private let rePairAdmission: TransportRePairAdmission
     private var rePairReservation: DeliveryRecipient?
     private var ingress: (any TransportPairingIngress)?
@@ -165,7 +171,23 @@ public actor TransportPairingSetupOwner {
         return DeliveryRecipient(phoneID: invitation.predecessor.phoneID, enrollmentEpoch: invitation.predecessor.epoch)
     }
 
-    private func begin(_ invitation: PairingInvitation, rePair: RePairInvitation?) async throws -> UInt16 {
+    // The installed XPC owner uses the v1 entry points until v2 is enabled explicitly.
+    func beginV2(_ window: MacPairingV2PublicWindow, identity: SecIdentity,
+                 reserve: @escaping @Sendable (PairingSetupV2Proof) throws -> Void,
+                 disconnect: @escaping @Sendable (UUID) -> Void) async throws -> UInt16 {
+        let holder = PairingIdentityHolder(identity)
+        let ingress = PairingSetupV2Ingress(windowID: window.id, lifetimeMilliseconds: window.lifetimeMilliseconds,
+                                            reserve: reserve, disconnect: disconnect)
+        let rePair = window.replacement.map { RePairInvitation(invitation: window.invitation, predecessor: $0) }
+        return try await begin(window.invitation, rePair: rePair, v2Factory: { invitation, event, handler in
+            let listener = try PairingSetupListener(identity: holder.identity, invitation: invitation, binding: .loopback,
+                maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
+                setupTimeoutMilliseconds: window.lifetimeMilliseconds, v2: ingress, event: event, handler: { try await handler($0) })
+            return NativePairingIngress(listener: listener)
+        })
+    }
+
+    private func begin(_ invitation: PairingInvitation, rePair: RePairInvitation?, v2Factory: Factory? = nil) async throws -> UInt16 {
         try active()
         guard !started, invitation.macID == configuration.macID, invitation.accountID == configuration.accountID,
               invitation.minimumEnvelopeVersion == 1 else { throw TransportPairingControlError.invalidMessage }
@@ -175,8 +197,9 @@ public actor TransportPairingSetupOwner {
             rePairReservation = predecessor
         }
         started = true; self.invitation = invitation; self.rePair = rePair
+        requiresProof = v2Factory != nil
         do {
-            let listener = try factory(invitation, { [weak self] event in Task { await self?.changed(event) } },
+            let listener = try (v2Factory ?? factory)(invitation, { [weak self] event in Task { await self?.changed(event) } },
                 { [weak self] peer in guard let self else { peer.abort(); return }; try await self.accept(peer) })
             ingress = listener
             guard lifetime.register(UUID(), abort: { listener.close() }) else { throw TransportPairingControlError.closed }
@@ -272,13 +295,16 @@ public actor TransportPairingSetupOwner {
     }
     private func openingExpired() { settleOpening(.failure(TransportPairingControlError.timedOut)); abort() }
     private func accept(_ peer: any TransportPairingPeer) async throws {
-        let id = UUID()
+        let provedConnection = await peer.provedConnection
+        let id = provedConnection ?? UUID()
+        let limit = requiresProof ? 1 : configuration.maximumCandidates
         do {
-            try active(); guard entries.count < configuration.maximumCandidates, let invitation else {
+            try active()
+            guard requiresProof == (provedConnection != nil), entries.count < limit, let invitation else {
                 throw TransportPairingControlError.busy
             }
             let proposal = try await peer.proposal(); try active()
-            guard entries.count < configuration.maximumCandidates,
+            guard entries.count < limit, entries[id] == nil,
                   (rePair?.matches(proposal) ?? (proposal.replacement == nil)),
                   proposal.phone.scope.macID == invitation.macID, proposal.phone.scope.accountID == invitation.accountID else {
                 throw TransportPairingControlError.invalidMessage
