@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import RemozioProtocol
 import Security
+import Synchronization
 
 public enum AuthorityPairingSetupError: Error, Equatable {
     case invalidConfiguration, unavailable, policyChanged, wrongScope, unsupportedReplacement, invalidConfirmation
@@ -37,6 +38,19 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
 final class AuthorityPairingSetupAccess: Sendable {
     typealias Commit = @Sendable (PairingEnrollmentAttempt, Data, Data, () throws -> Void,
                                  @Sendable (JournalTransaction) throws -> Void) throws -> Data
+    enum PairingVersion: Equatable { case legacy, v2 }
+
+    final class VersionAdmission: Sendable {
+        private let access: AuthorityPairingSetupAccess
+        private let id: UUID
+        fileprivate init(access: AuthorityPairingSetupAccess, id: UUID) {
+            self.access = access
+            self.id = id
+        }
+        deinit { _ = access.pairingVersions.withLock { $0.removeValue(forKey: id) } }
+    }
+
+    private let pairingVersions = Mutex<[UUID: PairingVersion]>([:])
     private let journal: AuthorityJournal
     let maintenanceAdmission: AuthorityMaintenancePairingAdmission
     private let macID: Data
@@ -103,6 +117,16 @@ final class AuthorityPairingSetupAccess: Sendable {
         appEntry = retained.0; appRevision = retained.1
         self.now = now; self.unixMilliseconds = unixMilliseconds; self.random = random; self.validateSelf = validateSelf; self.commitPairing = commit
         self.gatewayRevocations = gatewayRevocations
+    }
+
+    /// Endpoints retain the admission through the attempt and its in-flight replies.
+    func admitPairingVersion(_ version: PairingVersion) throws -> VersionAdmission {
+        try pairingVersions.withLock {
+            guard $0.values.allSatisfy({ $0 == version }) else { throw AuthorityPairingSetupError.unavailable }
+            let id = UUID()
+            $0[id] = version
+            return VersionAdmission(access: self, id: id)
+        }
     }
 
     func acquireReleaseActivity() throws -> ReleaseActivityToken? { try journal.acquireReleaseActivity() }

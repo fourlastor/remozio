@@ -42,6 +42,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         var stage: AuthorityMaintenancePairingAdmission.Stage?
         var currentOperation: UUID?, retiringStages: [UUID: [AuthorityMaintenancePairingAdmission.Stage]] = [:]
         var operations: [UUID: Bool] = [:]
+        var replyingVersions: [UUID: AuthorityPairingSetupAccess.VersionAdmission] = [:]
     }
     private let state = Mutex(WorkState())
     private var ready: Bool { get { state.withLock { $0.ready } } set { state.withLock { $0.ready = newValue } } }
@@ -62,6 +63,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
     private var expiryTimer: DispatchSourceTimer?
     private var v2Window: AuthorityPairingV2Window?
+    private var v2Admission: AuthorityPairingSetupAccess.VersionAdmission?
+    private var attemptAdmission: AuthorityPairingSetupAccess.VersionAdmission?
 
     convenience init(connection: NSXPCConnection, policy: XPCPeerPolicy, access: AuthorityPairingSetupAccess,
                      budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void,
@@ -106,7 +109,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func close() {
         let notify = lock.withLock {
             guard !closed else { return false }
-            closed = true; ready = false; v2Window?.close(); clearAttempt(); return true
+            closed = true; ready = false; closeV2Window(); clearAttempt(); return true
         }
         if notify { invalidate() }
     }
@@ -195,9 +198,12 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func openPairingV2(label: String, predecessor: PairedPhoneSelection?, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
             guard attempt == nil, v2Window == nil else { throw AuthorityPairingSetupError.unavailable }
+            let admission = try access.admitPairingVersion(.v2)
+            retainVersionForReply(admission)
             let window = try access.openV2Window(label: label, predecessor: predecessor)
             let bytes = try access.exportV2Window(window)
             v2Window = window
+            v2Admission = admission
             startExpiryTimer()
             return bytes
         }
@@ -205,14 +211,17 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
 
     func reservePairingV2(_ proof: PairingSetupV2Proof) throws {
         let completed = try work {
-            guard let v2Window else { throw AuthorityPairingSetupError.unavailable }
+            guard let v2Window, let v2Admission else { throw AuthorityPairingSetupError.unavailable }
+            retainVersionForReply(v2Admission)
             try access.reserveV2(v2Window, proof: proof)
         }
         completed.completion.close()
     }
 
     func disconnectPairingV2(_ connection: UUID) {
-        lock.withLock { v2Window?.disconnected(connection) }
+        lock.withLock {
+            if v2Window?.disconnected(connection) == true { clearV2Admission() }
+        }
     }
 
     func stagePairingV2(_ proposal: Data, connection: UUID, authorization: Data,
@@ -230,6 +239,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             guard (v2Window == nil) == (connection == nil) else { throw AuthorityPairingSetupError.unavailable }
             guard attempt == nil, proposal.count <= 132_000,
                   authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingSetupError.unavailable }
+            let admission: AuthorityPairingSetupAccess.VersionAdmission
+            if connection == nil {
+                admission = try access.admitPairingVersion(.legacy)
+            } else {
+                guard let v2Admission else { throw AuthorityPairingSetupError.unavailable }
+                admission = v2Admission
+            }
+            retainVersionForReply(admission)
             try authorize(authorization)
             let stage = try access.maintenanceAdmission.reserveStage()
             let activity: ReleaseActivityToken?
@@ -250,6 +267,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
                 $0.attempt = staged; $0.activity = activity; $0.stage = stage
             }; transferred = true
+            attemptAdmission = admission
             startExpiryTimer()
             return bytes
         }
@@ -262,14 +280,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             }
             // An ambiguous commit must reconcile its durable receipt. This connection cannot blindly commit again.
             clearAttempt()
-            defer { v2Window?.close() }
+            defer { closeV2Window() }
             return try access.commit(pending, setupID: setupID, confirmedDigest: confirmedDigest, proof: biometricProof,
                 window: v2Window, authorize: { [authorize] in try authorize(authorization) })
         }
     }
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) {
         do {
-            let completed = try work { v2Window?.close(); clearAttempt() }
+            let completed = try work { closeV2Window(); clearAttempt() }
             defer { completed.completion.close() }
             send { reply(true) }
         }
@@ -302,7 +320,11 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             state.withLock { $0.operations[id] = activity != nil }
             let owned = Completion(activity: activity) { [self] in
                 let stages = state.withLock { $0.retiringStages.removeValue(forKey: id) }; stages?.forEach { $0.close() }
-                _ = state.withLock { $0.operations.removeValue(forKey: id) }
+                let admission = state.withLock { state in
+                    state.operations.removeValue(forKey: id)
+                    return state.replyingVersions.removeValue(forKey: id)
+                }
+                withExtendedLifetime(admission) {}
             }
             completion = owned
             try access.verifyCurrent()
@@ -312,7 +334,21 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             return (value, owned)
         }
     }
+    private func retainVersionForReply(_ admission: AuthorityPairingSetupAccess.VersionAdmission) {
+        state.withLock {
+            if let operation = $0.currentOperation { $0.replyingVersions[operation] = admission }
+        }
+    }
+    private func closeV2Window() {
+        v2Window?.close()
+        clearV2Admission()
+    }
+    private func clearV2Admission() {
+        if let v2Admission { retainVersionForReply(v2Admission) }
+        v2Admission = nil
+    }
     private func clearAttempt() {
+        if let attemptAdmission { retainVersionForReply(attemptAdmission) }
         expiryTimer?.cancel(); expiryTimer = nil
         let stage = state.withLock { s -> AuthorityMaintenancePairingAdmission.Stage? in
             s.attempt = nil; guard let stage = s.stage else { return nil }; s.stage = nil
@@ -320,6 +356,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         }
         attemptActivity?.close()
         state.withLock { $0.activity = nil }; stage?.close()
+        attemptAdmission = nil
     }
     private func startExpiryTimer() {
         guard expiryTimer == nil else { return }
@@ -336,7 +373,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 if let v2Window { try access.expireV2WindowIfDue(v2Window) }
                 if let attempt, try access.isExpired(attempt) { clearAttempt() }
             } catch {
-                v2Window?.close()
+                closeV2Window()
                 clearAttempt()
             }
         }

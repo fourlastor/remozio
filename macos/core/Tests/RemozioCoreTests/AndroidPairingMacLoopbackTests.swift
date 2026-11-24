@@ -52,7 +52,7 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
             reserve: { proof in
                 try window.reserve(proof, at: now())
                 observation.value.withLock { $0.reservations += 1 }
-            }, disconnect: window.disconnected)
+            }, disconnect: { _ = window.disconnected($0) })
         let listener = try PairingSetupListener(
             identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport), invitation: publicInvitation,
             binding: .loopback, maximumConnections: 4, handshakeTimeoutMilliseconds: 5_000, setupTimeoutMilliseconds: 30_000,
