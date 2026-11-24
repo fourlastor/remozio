@@ -33,6 +33,9 @@ final class CommandExecution {
     private var terminalDeliveryPending = false
     private var terminalDeliveryFinished = false
     var dispatchRevision: UInt64 = 0
+    var filesystemProbe: CommandFilesystemProbe<CommandFilesystemCapture.MetadataProof>?
+    var needsFinalFilesystemProbe = false
+    var canPrepare: Bool { !disposed && !cancelledBeforeRelease && monitor == nil }
     var terminalCommitFailed = false
 
     private init(resources: RetainedCommandExecutionResources, approval: CommandExecutionApproval,
@@ -64,14 +67,15 @@ final class CommandExecution {
 
     /// A failed spawn can return a live monitor. Retain it until actual reaping or ownership loss.
     func prepare(monitorPath: String, childPath: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32,
-                 releaseActivity: ReleaseActivityToken? = nil) throws {
+                 releaseActivity: ReleaseActivityToken? = nil, filesystemChecked: Bool = false) throws {
         guard validation != nil, !disposed, !released, !cancelledBeforeRelease, monitor == nil,
               (resources.capture.ioMode == .pipes && !resources.requiresStreamPump ||
                resources.capture.ioMode == .pty && resources.requiresStreamPump) else { throw CommandExecutionError.unavailable }
         let frame = try CommandChildLaunchSpecification(capture: resources.capture,
+            resolvedExecutablePath: resources.resolvedExecutablePath,
             preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask).canonicalBytes
         try validateLauncher(); try validateElevation(resources.capture)
-        try recheck()
+        try recheck(filesystemChecked: filesystemChecked)
         if resources.requiresPipeControls {
             pipeControls = try CommandPipeControlChannel(channel: resources.makeStreamAuthority())
         }
@@ -127,10 +131,10 @@ final class CommandExecution {
         if status != 0 { cancelBeforeRelease(); throw CommandExecutionError.native(status) }
     }
 
-    func recheck() throws {
+    func recheck(filesystemChecked: Bool = false) throws {
         guard let validation else { throw CommandExecutionError.unavailable }
         try resources.recheck(expression: validation.callerExpression, userID: validation.callerUserID,
-            auditSessionID: validation.callerSessionID)
+            auditSessionID: validation.callerSessionID, filesystemChecked: filesystemChecked)
     }
 
     /// Call only after the dispatch transition commits and all final checks pass.
@@ -143,6 +147,8 @@ final class CommandExecution {
     }
     func cancelBeforeRelease() {
         guard !released else { return }
+        filesystemProbe?.cancel()
+        filesystemProbe = nil
         cancelledBeforeRelease = true; pendingSignals.removeAll()
         cancelOwned()
     }
@@ -306,6 +312,8 @@ final class CommandExecution {
         guard !disposed else { return true }
         guard !terminalDeliveryPending, pump?.readyForTerminal ?? true else { return false }
         if let monitor, remozio_command_monitor_dispose(monitor) != 0 { return false }
+        filesystemProbe?.cancel()
+        filesystemProbe = nil
         monitor = nil; monitorOwned = false; targetActive = false; disposed = true; pump?.close(); pipeControls?.close(); resources.close(); return true
     }
 }

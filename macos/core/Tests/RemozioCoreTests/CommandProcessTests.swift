@@ -22,16 +22,20 @@ final class CommandProcessTests: XCTestCase {
         guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
     }
     override func tearDownWithError() throws { if let directory { try FileManager.default.removeItem(at: directory) } }
-    private func frame(mode: String = "output", missing: Bool = false, budget: UInt32 = 5000, large: Bool = false, ioMode: CommandIOMode = .pipes) throws -> Data {
+    private func frame(mode: String = "output", missing: Bool = false, budget: UInt32 = 5000,
+                       large: Bool = false, ioMode: CommandIOMode = .pipes,
+                       filesystem: CommandFilesystemCapture? = nil) throws -> Data {
         var environment = [CapturedEnvironmentEntry(name: Data("CWD".utf8), value: Data(directory.path.utf8), source: .minimal),
             .init(name: Data("EMPTY".utf8), value: Data(), source: .requested),
             .init(name: Data("RAW".utf8), value: Data([0xfd]), source: .requested)]
         if large { environment.insert(.init(name: Data("BIG".utf8), value: Data(repeating: 0x61, count: 1_048_576), source: .requested), at: 0) }
+        let target = try filesystem.map { _ in try CommandTargetResolver.resolve(uid: getuid()) }
+            ?? .init(uid: getuid(), gid: getgid(), supplementaryGroups: [], observedName: nil)
         let capture = try CommandCapture(schemaVersion: 1,
-            executable: .init(path: Data((missing ? "/nonexistent/remozio-command" : launcher.path).utf8), identity: .init(device: 1, inode: 2), sha256: Data(count: 32)),
+            executable: filesystem?.executable ?? .init(path: Data((missing ? "/nonexistent/remozio-command" : launcher.path).utf8), identity: .init(device: 1, inode: 2), sha256: Data(count: 32)),
             arguments: [Data([0xff]), Data(), Data([0xfe]), Data(mode.utf8)],
             directory: .init(path: Data(directory.path.utf8), identity: .init(device: 1, inode: 3)),
-            target: .init(uid: getuid(), gid: getgid(), supplementaryGroups: [], observedName: nil),
+            target: target,
             environment: environment,
             input: .init(kind: .pipe, streamBinding: Data(count: 16), observedPath: nil, identity: nil),
             ioMode: ioMode, disconnectBehavior: .terminate,
@@ -40,6 +44,10 @@ final class CommandProcessTests: XCTestCase {
             ancestry: .init(completeness: .unavailable, entries: [], reason: .unsupported), unverifiedRationale: nil,
             submission: .init(id: Data(count: 16), nonce: Data(count: 32), callerBinding: Data(count: 16)),
             limits: .init(maxBytes: 2_097_152, maxDepth: 16, maxItems: 1024))
+        if let filesystem {
+            return try CommandChildLaunchSpecification(capture: capture, resolvedExecutablePath: filesystem.resolvedExecutablePath,
+                preparationMilliseconds: budget, fileCreationMask: 0o022).canonicalBytes
+        }
         return try CommandChildLaunchSpecification(legacyCapture: capture, preparationMilliseconds: budget, fileCreationMask: 0o022).canonicalBytes
     }
     private final class Resources {
@@ -113,6 +121,23 @@ final class CommandProcessTests: XCTestCase {
         XCTAssertEqual(Data(error.prefix(max(0, Int(errCount)))), Data("ERR".utf8))
         XCTAssertEqual(remozio_command_process_signal(process, SIGTERM), ESRCH)
     }
+    func testChildUsesResolvedExecutableAndPreservesOriginalArgvZero() throws {
+        let link = directory.appendingPathComponent("tool-link")
+        XCTAssertEqual(symlink(launcher.lastPathComponent, link.path), 0)
+        let filesystem = try CommandFilesystemCapture(executablePath: Data(link.path.utf8), directoryPath: Data(directory.path.utf8))
+        let resources = try Resources(directory: directory)
+        Darwin.close(resources.input[1]); resources.input[1] = -1
+        let process = try spawn(resources, frame: frame(filesystem: filesystem))
+        defer { retire(process) }
+        try until(process) { $0.prepared }
+        XCTAssertEqual(unlink(link.path), 0)
+        XCTAssertEqual(remozio_command_process_release(process), 0)
+        let ended = try until(process) { $0.reaped }
+        XCTAssertTrue(ended.exec_observed)
+        // The fixture exits 91 if argv[0] differs from the original raw bytes.
+        XCTAssertEqual(ended.wait_status, 7 << 8)
+    }
+
     func testExecFailureDoesNotBecomeACommandExit() throws {
         let resources = try Resources(directory: directory), process = try spawn(resources, frame: frame(missing: true))
         defer { retire(process) }

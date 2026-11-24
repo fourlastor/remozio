@@ -68,7 +68,8 @@ public final class RetainedCommandAdmissionAttempt {
     }
 
     func assemble(context: CommandAdmissionCaptureContext, expression: String, userID: uid_t,
-                  auditSessionID: au_asid_t?, checkCancellation: @Sendable () throws -> Void) throws -> RetainedCommandCapture {
+                  auditSessionID: au_asid_t?, checkCancellation: @Sendable () throws -> Void,
+                  capturedFilesystem: CommandFilesystemCapture? = nil) throws -> RetainedCommandCapture {
         guard claimed, !closed, let received, let reply else { throw CommandAdmissionAttemptError.closed }
         self.received = nil
         // Capture owns input cleanup on failure. The attempt keeps its detached reply until success.
@@ -77,7 +78,7 @@ public final class RetainedCommandAdmissionAttempt {
             expression: expression, userID: userID, auditSessionID: auditSessionID, resolvedTarget: context.target,
             minimalEnvironment: context.minimalEnvironment, streamBinding: context.streamBinding,
             submissionLimits: submissionLimits, captureLimits: context.limits, maximumAncestryEntries: context.maximumAncestryEntries,
-            checkCancellation: checkCancellation, admissionProfile: profile)
+            checkCancellation: checkCancellation, admissionProfile: profile, capturedFilesystem: capturedFilesystem)
         do { try command.installAdmissionReply(reply) }
         catch { command.close(); throw error }
         self.reply = nil

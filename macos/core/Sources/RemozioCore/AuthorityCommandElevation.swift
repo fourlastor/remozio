@@ -27,7 +27,7 @@ extension AuthorityJournal {
         let check = CommandElevationAdmissionCheck(profile: attempt.profile, callerUID: attempt.userID, policy: elevationPolicy,
             schemaVersion: captureSchemaVersion, environment: minimalEnvironment, streamBinding: streamBinding,
             limits: captureLimits, maximumAncestryEntries: maximumAncestryEntries)
-        return try admitCommandAttempt(attempt, resolve: check.resolve, draft: { try check.draft($0, build: draft) },
+        return try admitCommandAttempt(attempt, resolve: check.resolve, draft: { try check.draft($0, build: draft) }, validateCapture: check.validateCapture,
             now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
     }
 
@@ -56,7 +56,7 @@ extension AuthorityJournal {
             schemaVersion: captureSchemaVersion, environment: minimalEnvironment, streamBinding: streamBinding,
             limits: captureLimits, maximumAncestryEntries: maximumAncestryEntries)
         return try admitCommandAttempt(attempt, expression: expression, resolve: check.resolve,
-            draft: { try check.draft($0, build: draft) }, now: now, receiptTimeMs: receiptTimeMs,
+            draft: { try check.draft($0, build: draft) }, validateCapture: check.validateCapture, now: now, receiptTimeMs: receiptTimeMs,
             checkCancellation: checkCancellation)
     }
 
@@ -106,8 +106,12 @@ private struct CommandElevationAdmissionCheck: Sendable {
         return .capture(try context(target))
     }
 
-    func draft(_ capture: CommandCapture, build: (CommandCapture) throws -> ApprovalRequestDraft) throws -> ApprovalRequestDraft {
+    func validateCapture(_ capture: CommandCapture) throws {
         try policy.validate(capture: capture)
+    }
+
+    func draft(_ capture: CommandCapture, build: (CommandCapture) throws -> ApprovalRequestDraft) throws -> ApprovalRequestDraft {
+        try validateCapture(capture)
         let result = try build(capture)
         try policy.validate(capture: capture)
         return result

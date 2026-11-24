@@ -4,6 +4,7 @@ import RemozioProtocol
 
 /// Owns the original command resources inside the serialized Root controller. This grants no child release permission.
 final class RetainedCommandExecutionResources {
+    var resolvedExecutablePath: Data { filesystem.resolvedExecutablePath }
     let capture: CommandCapture
     let request: CommandAdmittedRequest
     private let caller: RetainedCommandCaller
@@ -50,7 +51,8 @@ final class RetainedCommandExecutionResources {
             auditSessionID: currentPolicy.expectedAuditSessionID, checkCancellation: checkCancellation)
     }
     /// Internal fixture identity seam. Production requires the current protected caller policy.
-    func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCancellation: () throws -> Void = {}) throws {
+    func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCancellation: () throws -> Void = {},
+                 filesystemChecked: Bool = false) throws {
         guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
         do {
             if requiresMappedLayout {
@@ -59,7 +61,7 @@ final class RetainedCommandExecutionResources {
             }
             try checkCancellation()
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
-            try filesystem.recheck(checkCancellation: checkCancellation)
+            if !filesystemChecked { try filesystem.recheck(checkCancellation: checkCancellation) }
             try input.withBorrowedDescriptor { _ in () }
             try outputs.recheckStreams(); try terminal.recheck()
             if let stdioObservation {
@@ -68,6 +70,15 @@ final class RetainedCommandExecutionResources {
             }
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         } catch { retireExecutionResources(); throw error }
+    }
+
+    func makeFilesystemRecheck() throws -> CommandFilesystemCapture.Recheck {
+        guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
+        return try filesystem.makeRecheck()
+    }
+    func verifyFilesystemMetadata(_ proof: CommandFilesystemCapture.MetadataProof) throws {
+        guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
+        try filesystem.verifyMetadata(proof)
     }
 
     /// Checks the original caller without treating executable changes as a running-command cancellation.
