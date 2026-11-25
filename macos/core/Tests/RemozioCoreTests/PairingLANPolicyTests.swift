@@ -23,7 +23,7 @@ final class PairingLANPolicyTests: XCTestCase {
     private func subnet(_ address: PairingLANRoute.Address, mask: [UInt8], family: Int32 = AF_UNSPEC,
                         offset: Int, reportedLength: UInt8? = nil) -> PairingLANSubnet? {
         let length = offset + mask.count
-        let header = [reportedLength ?? UInt8(length), UInt8(family)] + Array(repeating: 0, count: offset - 2)
+        let header: [UInt8] = [reportedLength ?? UInt8(length), UInt8(family)] + Array(repeating: UInt8(0), count: offset - 2)
         return PairingLANSubnet(bound: address, netmask: header + mask)
     }
 
