@@ -1,5 +1,5 @@
 {
- "source": "Class weights and method entries from the green full main push run 45520267476 on 4cf5156a, 2026-11-25, after #955 and #959: each class weight is the sum of its passing per-test durations in the two Mac core tests jobs (CI mode, -O, three concurrent shard processes per runner), and each method entry is that test's duration in the same run. The classes that run did not execute keep their earlier values: LiveOwnedJobInspectionTests, RelayConnectorProcessTests, SignedReleaseInspectionTests.",
+ "source": "Class weights and method entries from the green full main run 45520267476 on 4cf5156a, 2026-11-25, after #955 and #959: each class weight is the sum of its passing per-test durations in the Mac core tests jobs (CI mode, -O, three concurrent shard processes per runner), and each method entry is that test's duration in the same run. A test reported twice, for example re-run in isolation by scripts/core-test-time-guard.py, keeps its maximum duration. The classes that run did not execute keep their earlier values: LiveOwnedJobInspectionTests, RelayConnectorProcessTests, SignedReleaseInspectionTests. GatewayRuntimeActivationOperationTests comes from PR run 45546462155 (#971, which splits its interrupted-stage test per stage), the sum of its 15 tests' maximum durations.",
  "weights": {
   "AcceptedInputMemoTests": 0.006,
   "AccountPreparationTests": 2.341,
@@ -213,7 +213,7 @@
   "GatewayRootIPCTests": 0.251,
   "GatewayRootRegistrationTests": 0.015,
   "GatewayRuntimeActivationFilesTests": 6.599,
-  "GatewayRuntimeActivationOperationTests": 35.449,
+  "GatewayRuntimeActivationOperationTests": 40.419,
   "GatewayRuntimeActivationPlanTests": 0.807,
   "GatewayRuntimeActivationRootOperationTests": 2.978,
   "GatewayRuntimeActivationStoreTests": 3.418,

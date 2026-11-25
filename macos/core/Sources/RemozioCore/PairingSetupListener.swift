@@ -69,6 +69,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let applicationProtocol: String
     private let intakeClock: AuthorityClock?
     private let registrationLane: PairingSetupV2RegistrationLane
+    private let sourceKey: @Sendable (NWEndpoint) -> PairingSetupV2Source?
     private var v2Admissions = PairingSetupV2Admissions()
     private var expiry: Task<Void, Never>?
     private let proofTime: @Sendable () -> ContinuousClock.Instant
@@ -97,6 +98,7 @@ public final class PairingSetupListener: @unchecked Sendable {
          v2: PairingSetupV2Ingress?, lanRoute: PairingLANRoute? = nil, lanBinding: PairingLANBinding? = nil,
          proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
          registrationLane: PairingSetupV2RegistrationLane = PairingSetupV2RegistrationLane(),
+         sourceKey: @escaping @Sendable (NWEndpoint) -> PairingSetupV2Source? = { PairingSetupV2Source($0) },
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
@@ -120,6 +122,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         self.lanBinding = lanBinding
         advertisement = lanRoute == nil ? nil : PairingLANAdvertisement(queue: queue)
         self.registrationLane = registrationLane
+        self.sourceKey = sourceKey
         intakeClock = try v2.map { _ in try AuthorityClock() }
         let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
         self.applicationProtocol = applicationProtocol
@@ -231,7 +234,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         let acceptedAt: AuthorityMoment?
         do { acceptedAt = try intakeClock?.now() }
         catch { connection.cancel(); return }
-        let source = v2 == nil ? nil : PairingSetupV2Source(connection.endpoint)
+        let source = v2 == nil ? nil : sourceKey(connection.endpoint)
         let applicationProtocol = applicationProtocol
         let registrations = registrationLane
         var evicted: Slot?

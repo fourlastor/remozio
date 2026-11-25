@@ -17,14 +17,14 @@ struct PairingSetupV2Admissions {
     }
 
     static let proofTimeout: Duration = .seconds(3)
-    static let maximumPending = 4
+    static let maximumPending = 16
     private static let maximumDraining = 4
     private static let maximumSourceAttempts = 2
     private static let maximumSources = 64
 
     private var pending: [Pending] = []
     private var sources: [PairingSetupV2Source: (until: ContinuousClock.Instant, attempts: Int)] = [:]
-    private var budget = PairingRegistrationBudget()
+    private var budget = PairingRegistrationBudget.ingress
     private var admissionClosed = false
 
     mutating func admit(_ id: UUID, source: PairingSetupV2Source, accepted: ContinuousClock.Instant,
