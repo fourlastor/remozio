@@ -219,6 +219,12 @@ measurement can read it.
    | End of file, no errno record | Exited with a reserved code, or killed by a signal | `unknown`: K died between the go byte and `execve`, or the command used that code or died by a signal |
    | Nothing before the deadline | Alive | `unknown`; O cannot signal K after the last `setresuid` |
 
+   A K that dies also closes the write end, a short time before its exit status is
+   ready, so "still alive" alone does not prove `execve`. O therefore compares
+   `/proc/<pid>/exe` of K with its own image. A different image means `execve`
+   succeeded. The same image, or none (K is exiting), makes O wait for K's exit
+   status until the deadline and use the other rows.
+
    After the result, O checks C again. If C is gone, O records
    `requesterLostAfterCheck: true` with the result. Then O reports to the
    authority, and only then does the
@@ -302,7 +308,7 @@ outcome, the marker count and O's restart log.
 | Kill O at S1, after the fork, before the go byte | C killed, no command, marker count 0 |
 | Kill O after the go byte, after S6 | C killed; marker count at most 1; after S6 the command keeps running |
 | Kill the authority after S1 | No go byte without a permit; no retry |
-| C forks or execs during S2–S4 | Refusal, no command |
+| `SIGCONT` from the caller's account to C during the stop | C stays in the stop; the command starts once |
 | `SIGKILL` to C from the caller's account just after the S4 check, and just after the go byte | Command starts once; `requesterLostAfterCheck: true` |
 | `SIGSTOP`, `SIGTERM`, `SIGUSR1` from the caller's account to K before the go byte | `notStarted`, no command |
 | The same signals to K between the go byte and `execve` | `unknown` (fatal signal, or `SIGSTOP` at the deadline) |
@@ -316,6 +322,42 @@ outcome, the marker count and O's restart log.
 | Unit stop, unit restart and an out-of-memory kill while a command runs after S6 | The command keeps running |
 | AppArmor: O under the confinement profile with the `ux` rule | The command runs unconfined, and `sudo` works inside it |
 | The fixture's `dispatch-race-limitation` case | No command for every O death before the go byte |
+
+C cannot fork or execute during S2–S4, because it does not run in the stop. The
+`SIGCONT` row replaces the earlier row about a fork or `execve` by C: a
+`SIGCONT` is the one signal from the caller's account that could end a group stop,
+and it must not end O's ptrace stop.
+
+### Cases in PR1
+
+`scripts/run-linux-single-owner-experiment.py` runs these rows with the stub
+authority. It needs Root through `sudo`, but no systemd unit, no AppArmor profile
+and no sysctl change by default. The
+[experiment document](experiments/linux-single-owner.md) lists each case.
+
+- Kill O at S1, after the fork, before the go byte, after the go byte and after S6.
+- Kill the authority after S1.
+- `SIGCONT` from the caller's account to C during the stop.
+- `SIGKILL` to C from the caller's account before the S4 check, just after it, and
+  just after the go byte.
+- `SIGSTOP`, `SIGTERM` and `SIGUSR1` from the caller's account to K, before the go
+  byte and between the go byte and `execve`.
+- Kill K before the go byte, and between the go byte and `execve`.
+- A K that hangs before the go byte.
+- A multi-threaded O.
+- The capability sets, `NoNewPrivs:`, the identity, the umask, `RLIMIT_NOFILE`
+  and the session of the command, with O started through `setpriv` with the three
+  capabilities in its ambient set, as `AmbientCapabilities=` would. The `sudo`
+  child is PR2.
+- Attach to K from the caller's account: only with `--allow-sysctl`, which saves
+  both values, sets `fs.suid_dumpable=1` and `ptrace_scope=0`, and restores them.
+  Without the flag the report says `not-run`.
+- Three more controls: a command that exits before O looks, a command that is still
+  alive at S6, and a command that `execve` cannot find.
+
+PR2 runs the other rows: the descriptor table with two dispatches at the same
+time, the unit stop, restart and out-of-memory kill, AppArmor, the composed
+fixture's `dispatch-race-limitation` case and the `sudo` child.
 
 O's restart log is the evidence that C never left its stop between S0 and the go
 byte: the check requires no restart call for C in that interval. A `/proc` sample
