@@ -200,24 +200,47 @@ class JobSelectionTests(unittest.TestCase):
         _, steps = self.job_steps(text, 'ios')
         self.assertIn("steps.gradle-app.outcome == 'success'", next(step for step in steps if 'Save Gradle' in step))
 
-    def test_each_mac_job_deletes_its_old_generation_only_right_before_it_saves(self):
+    def test_only_the_two_cache_jobs_may_write_actions(self):
         text = WORKFLOW.read_text()
+        jobs = re.findall(r'^  ([a-z-]+):\n((?:(?:    .*)?\n)+?)(?=^  [a-z-]+:\n|\Z)',
+                          text.split('\njobs:\n', 1)[1], re.MULTILINE)
+        writers = {name for name, body in jobs if re.search(r'^\s+actions: write', body, re.MULTILINE)}
+        self.assertEqual(writers, {'cache-prepare', 'cache-cleanup'})
+        self.assertNotRegex(text.split('\njobs:\n', 1)[0], 'actions: write')
+        for name, body in jobs:
+            if name in writers:
+                with self.subTest(job=name):
+                    self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'", body)
+                    self.assertNotRegex(body, r'gradlew|check\.sh|xcodebuild|swift (build|test)')
+
+    def test_cache_prepare_deletes_mac_generations_before_the_mac_jobs_run(self):
+        text = WORKFLOW.read_text()
+        body, steps = self.job_steps(text, 'cache-prepare')
+        self.assertIn('runs-on: ubuntu-latest', body)
+        self.assertIn("    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n", body)
+        self.assertIn('scripts/ci-build-cache.py settings-changed --base "$BEFORE"', body)
+        delete = next(step for step in steps if step.startswith("name: Delete main's superseded Mac cache entries"))
+        self.assertIn("if: steps.settings.outputs.changed == 'true'", delete)
+        self.assertIn('continue-on-error: true', delete)
+        self.assertIn('for scope in mac experiments interop', delete)
+        self.assertIn('--replace "mac-build-v1-$scope-"', delete)
+        self.assertNotIn('--keep', delete)
         condition = ("        if: >-\n          github.event_name == 'push' && github.ref == 'refs/heads/main' &&\n"
                      "          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'\n")
         for job in ('mac', 'mac-experiments', 'mac-interop'):
             with self.subTest(job=job):
                 body, steps = self.job_steps(text, job)
-                self.assertIn('    permissions:\n      actions: write\n      contents: read\n', body)
+                self.assertIn('    needs: [changes, cache-prepare]\n', body)
+                # !cancelled() keeps the job running when cache-prepare is skipped (pull requests) or fails.
+                self.assertRegex(body, r"    if: \$\{\{ !cancelled\(\) && ")
+                self.assertNotIn('prune-ci-caches', body)
                 names = [step.splitlines()[0] for step in steps]
-                delete = next(i for i, name in enumerate(names) if name.startswith('name: Delete the superseded main'))
-                save, report = steps[delete + 1], steps[delete + 2]
-                self.assertIn(condition, steps[delete])
-                self.assertIn('--replace "$FAMILY" --keep "$KEY"', steps[delete])
-                self.assertIn('        id: build-cache-save\n', save)
-                self.assertIn(condition, save)
-                self.assertIn('actions/cache/save@', save)
+                save = next(i for i, name in enumerate(names) if name.startswith('name: Save validated'))
+                self.assertIn('        id: build-cache-save\n', steps[save])
+                self.assertIn(condition, steps[save])
+                report = steps[save + 1]
                 self.assertIn("if: always() && steps.build-cache-save.outcome == 'failure'", report)
-                self.assertIn('main has no', report)
+                self.assertIn('main may have no cache', report)
 
     def test_only_pull_request_runs_cancel_an_older_run_of_their_group(self):
         text = WORKFLOW.read_text()

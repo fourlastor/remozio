@@ -169,16 +169,45 @@ jobs:
           path: ${{ runner.temp }}/remozio-native-tpm-report.json
           if-no-files-found: ignore
           retention-days: 7
-  mac:
-    name: Mac build
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac == 'true') }}
-    runs-on: macos-26
-    timeout-minutes: 120
-    # actions: write lets the step before each cache save delete the superseded main entry.
+  cache-prepare:
+    name: Free the budget for a new Mac cache generation
+    # The only job besides cache-cleanup with actions: write, and it runs no repository build or test code. A Mac job
+    # saves a new generation only when it restored no usable entry, mostly when its identity changed. Two
+    # generations exceed the 10 GB budget, so this deletes main's Mac entries first when this push changed the
+    # settings half of the identity or the file set in a way that forces a cold build (scripts/ci-build-cache.py
+    # settings-changed). The toolchain half is known only on the Mac runner: a runner image or Xcode change is not
+    # seen here, so that push can overflow the budget once before cache-cleanup prunes.
+    # The Mac jobs need this job but still run when it is skipped or fails.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       actions: write
       contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Compare the Mac cache settings with the previous main commit
+        id: settings
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          git fetch --quiet --no-tags --depth=1 origin "$BEFORE" || echo "::warning::Could not fetch $BEFORE; treating the settings as changed."
+          python3 scripts/ci-build-cache.py settings-changed --base "$BEFORE" --github-output "$GITHUB_OUTPUT"
+      - name: Delete main's superseded Mac cache entries
+        if: steps.settings.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for scope in mac experiments interop; do
+            python3 scripts/prune-ci-caches.py --repository "$GITHUB_REPOSITORY" --replace "mac-build-v1-$scope-"
+          done
+  mac:
+    name: Mac build
+    needs: [changes, cache-prepare]
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac == 'true') }}
+    runs-on: macos-26
+    timeout-minutes: 120
     outputs:
       build-key: ${{ steps.build-cache-key.outputs.key }}
     steps:
@@ -212,18 +241,6 @@ jobs:
       - name: Record validated Mac cache inputs
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope mac --github-output "$GITHUB_OUTPUT"
-      - name: Delete the superseded main Mac build cache before saving
-        # scripts/ci-build-cache.py asks for a save only for a new generation. Deleting the old one first keeps
-        # two generations out of the 10 GB budget, where GitHub would evict the Gradle entries instead.
-        if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FAMILY: ${{ steps.build-cache-manifest.outputs.family }}
-          KEY: ${{ steps.build-cache-key.outputs.key }}
-        run: python3 scripts/prune-ci-caches.py --repository "$GITHUB_REPOSITORY" --replace "$FAMILY" --keep "$KEY"
       - name: Save validated Mac compiler outputs
         id: build-cache-save
         timeout-minutes: 5
@@ -240,7 +257,7 @@ jobs:
         if: always() && steps.build-cache-save.outcome == 'failure'
         env:
           KEY: ${{ steps.build-cache-key.outputs.key }}
-        run: echo "::warning::Saving $KEY failed after the superseded entry was deleted, so main has no Mac build cache. Runs build cold until a main run saves one."
+        run: echo "::warning::Saving $KEY failed, so main may have no cache for this scope until a main run saves one. Runs build cold meanwhile."
       - name: Retain cache validation and native build logs
         if: always()
         continue-on-error: true
@@ -276,14 +293,10 @@ jobs:
           PYTHON
   mac-experiments:
     name: Mac experiments
-    needs: changes
+    needs: [changes, cache-prepare]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_experiments == 'true') }}
     runs-on: macos-26
     timeout-minutes: 60
-    # actions: write lets the step before each cache save delete the superseded main entry.
-    permissions:
-      actions: write
-      contents: read
     outputs:
       build-key: ${{ steps.build-cache-key.outputs.key }}
     steps:
@@ -310,18 +323,6 @@ jobs:
       - name: Record validated Mac experiments cache inputs
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope experiments --github-output "$GITHUB_OUTPUT"
-      - name: Delete the superseded main Mac experiments cache before saving
-        # scripts/ci-build-cache.py asks for a save only for a new generation. Deleting the old one first keeps
-        # two generations out of the 10 GB budget, where GitHub would evict the Gradle entries instead.
-        if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FAMILY: ${{ steps.build-cache-manifest.outputs.family }}
-          KEY: ${{ steps.build-cache-key.outputs.key }}
-        run: python3 scripts/prune-ci-caches.py --repository "$GITHUB_REPOSITORY" --replace "$FAMILY" --keep "$KEY"
       - name: Save validated Mac experiments compiler outputs
         id: build-cache-save
         timeout-minutes: 5
@@ -338,7 +339,7 @@ jobs:
         if: always() && steps.build-cache-save.outcome == 'failure'
         env:
           KEY: ${{ steps.build-cache-key.outputs.key }}
-        run: echo "::warning::Saving $KEY failed after the superseded entry was deleted, so main has no Mac experiments cache. Runs build cold until a main run saves one."
+        run: echo "::warning::Saving $KEY failed, so main may have no cache for this scope until a main run saves one. Runs build cold meanwhile."
   mac-core:
     name: Mac core tests (${{ matrix.part }})
     needs: changes
@@ -425,14 +426,10 @@ jobs:
           retention-days: 7
   mac-interop:
     name: Mac interoperability
-    needs: changes
+    needs: [changes, cache-prepare]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_interop == 'true') }}
     runs-on: macos-26
     timeout-minutes: 20
-    # actions: write lets the step before each cache save delete the superseded main entry.
-    permissions:
-      actions: write
-      contents: read
     outputs:
       build-key: ${{ steps.build-cache-key.outputs.key }}
       gradle-key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
@@ -498,18 +495,6 @@ jobs:
       - name: Record validated interoperability cache inputs
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope interop --github-output "$GITHUB_OUTPUT"
-      - name: Delete the superseded main interoperability cache before saving
-        # scripts/ci-build-cache.py asks for a save only for a new generation. Deleting the old one first keeps
-        # two generations out of the 10 GB budget, where GitHub would evict the Gradle entries instead.
-        if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FAMILY: ${{ steps.build-cache-manifest.outputs.family }}
-          KEY: ${{ steps.build-cache-key.outputs.key }}
-        run: python3 scripts/prune-ci-caches.py --repository "$GITHUB_REPOSITORY" --replace "$FAMILY" --keep "$KEY"
       - name: Save validated interoperability compiler outputs
         id: build-cache-save
         if: >-
@@ -524,7 +509,7 @@ jobs:
         if: always() && steps.build-cache-save.outcome == 'failure'
         env:
           KEY: ${{ steps.build-cache-key.outputs.key }}
-        run: echo "::warning::Saving $KEY failed after the superseded entry was deleted, so main has no interoperability cache. Runs build cold until a main run saves one."
+        run: echo "::warning::Saving $KEY failed, so main may have no cache for this scope until a main run saves one. Runs build cold meanwhile."
       - name: Retain cache smoke logs
         if: always()
         continue-on-error: true

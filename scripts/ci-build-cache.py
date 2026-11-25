@@ -254,14 +254,56 @@ def xcode_phase_input(name, entry):
             and entry['mode'] == XCODE_PHASE_INPUT_MODES[name])
 
 
+def settings_input(name, entry):
+    return (not linux_only_input(name, entry) and not xcode_phase_input(name, entry)
+            and (name.startswith(('scripts/', '.github/workflows/'))
+                 or Path(name).name in ('Package.swift', 'Package.resolved')
+                 or '.xcodeproj/' in name or '.xcworkspace/' in name or name.endswith('.xcconfig')))
+
+
 def settings_inventory(inputs):
     # Changed commands, package graphs, lockfiles, Xcode settings, or cache code
     # start a new compatibility namespace, including fallback restores.
-    return content_inventory({name: entry for name, entry in inputs.items()
-        if not linux_only_input(name, entry) and not xcode_phase_input(name, entry)
-        and (name.startswith(('scripts/', '.github/workflows/'))
-        or Path(name).name in ('Package.swift', 'Package.resolved')
-        or '.xcodeproj/' in name or '.xcworkspace/' in name or name.endswith('.xcconfig'))})
+    return content_inventory({name: entry for name, entry in inputs.items() if settings_input(name, entry)})
+
+
+GIT_MODES = {'100644': ('file', 0o644), '100755': ('file', 0o755), '120000': ('symlink', 0o777)}
+
+
+def tree_entries(root, revision):
+    raw = subprocess.check_output(['git', '-C', str(root), 'ls-tree', '-r', '-z', '--full-tree', revision])
+    result = {}
+    for record in raw.split(b'\0'):
+        if record:
+            meta, name = record.split(b'\t', 1)
+            mode, _, object_id = meta.decode().split(' ')
+            result[os.fsdecode(name)] = (mode, object_id)
+    return result
+
+
+def settings_changed(root, base, head='HEAD'):
+    """Whether a Mac job of the head commit may save a new generation: the settings half of every identity
+    differs, or the file set changed in a way that forces a cold build.
+
+    Runs on Linux: the toolchain half of the identity is known only on the Mac runner, so a runner image or Xcode
+    change is not seen here. Any unknown git mode, or a base that cannot be read, counts as changed."""
+    try:
+        old, new = tree_entries(root, base), tree_entries(root, head)
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        return True
+    if any(mode not in GIT_MODES for mode, _ in (*old.values(), *new.values())):
+        return True
+    old_entries = {name: dict(zip(('kind', 'mode'), GIT_MODES[mode])) for name, (mode, _) in old.items()}
+    new_entries = {name: dict(zip(('kind', 'mode'), GIT_MODES[mode])) for name, (mode, _) in new.items()}
+    for name in old.keys() | new.keys():
+        if old.get(name) != new.get(name) and any(
+                settings_input(name, entries[name]) for entries in (old_entries, new_entries) if name in entries):
+            return True
+    # The same file-set rule as restore_inputs: such a change forces a cold build, and that run saves anew.
+    added = discovery_paths(new_entries) - discovery_paths(old_entries)
+    removed = discovery_paths(old_entries) - discovery_paths(new_entries)
+    return (not all(package_source_file(name, new_entries[name]) for name in added)
+            or not all(package_source_file(name, old_entries[name]) for name in removed))
 
 
 def command(*args):
@@ -311,6 +353,12 @@ def clear_outputs(root, scope):
 
 def run(args, root=ROOT):
     started = time.monotonic()
+    if args.operation == 'settings-changed':
+        changed = settings_changed(root, args.base)
+        outputs(args.github_output, {'changed': str(changed).lower()})
+        report = {'operation': 'settings-changed', 'base': args.base, 'changed': changed}
+        print(json.dumps(report, sort_keys=True), flush=True)
+        return report
     scope = args.scope
     context_path = root / f'.build/ci-cache-context/{scope}.json'
     manifest_path = root / f'.build/ci-cache/{scope}.json'
@@ -350,13 +398,14 @@ def run(args, root=ROOT):
             if stable:
                 write_json(manifest_path, {'version': VERSION, 'identity': context['identity'], 'inputs': inputs})
             # The content half of the key hashes every tracked file, so it changes on every commit. Saving each one
-            # put a 4.3 GB Mac generation next to the old one and overflowed the 10 GB budget. A restored entry of
+            # put a 4.3 GB Mac generation next to the old one and overflowed the 10 GB budget. The workflow's
+            # cache-prepare job deletes the old generation when the settings identity changes. A restored entry of
             # the same compatibility identity already serves later runs (its manifest backdates only unchanged
             # inputs), so save only when no usable entry was restored: a new identity, a miss, an invalid manifest,
             # or a file-set change that forced a cold build.
             refresh = context.get('restore_result') != 'restored'
             save = stable and refresh
-            outputs(args.github_output, {'save': str(save).lower(), 'family': f'mac-build-v{VERSION}-{scope}-'})
+            outputs(args.github_output, {'save': str(save).lower()})
             report = {'operation': 'save', 'scope': scope, 'saved_manifest': stable, 'save_entry': save,
                       'reason': ('inputs-changed-during-checks' if not stable else
                                  'new-generation' if refresh else 'compatible-entry-restored')}
@@ -372,10 +421,14 @@ def run(args, root=ROOT):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('key', 'restore', 'save'))
-    parser.add_argument('--scope', choices=tuple(CACHE_PATHS), required=True)
+    parser.add_argument('operation', choices=('key', 'restore', 'save', 'settings-changed'))
+    parser.add_argument('--scope', choices=tuple(CACHE_PATHS))
+    parser.add_argument('--base', help='settings-changed: the commit to compare HEAD with')
     parser.add_argument('--github-output', type=Path)
-    run(parser.parse_args())
+    args = parser.parse_args()
+    if (args.operation == 'settings-changed') != (args.scope is None) or (args.operation == 'settings-changed') != bool(args.base):
+        parser.error('settings-changed takes --base and no --scope; the other operations take --scope')
+    run(args)
 
 
 if __name__ == '__main__':

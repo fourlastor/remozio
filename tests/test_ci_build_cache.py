@@ -583,14 +583,56 @@ class BuildCacheTests(unittest.TestCase):
         self.assertFalse(result['save_entry'])
         self.assertEqual(result['reason'], 'inputs-changed-during-checks')
 
-    def test_the_save_outputs_name_the_family_to_replace(self):
-        self.key()
+    def commit(self):
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q',
+                        '--allow-empty', '-m', 'c'], check=True)
+        return subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+
+    def add(self, name, text='x', mode=0o644):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        path.chmod(mode)
+        self.track(path)
+
+    def test_settings_changed_follows_the_identity_and_the_cold_file_set_rule(self):
+        self.add('scripts/cloudflared_artifact.py', 'first')
+        base = self.commit()
+        self.assertFalse(CACHE.settings_changed(self.root, base))
+        cases = (
+            ('a source edit keeps the generation', lambda: self.source.write_text('print(9)\n'), False),
+            ('a new Swift file in Sources replans without a cold build',
+             lambda: self.add('pkg/Sources/Lib/New.swift'), False),
+            ('top-level docs Markdown is exempt', lambda: self.add('docs/note.md'), False),
+            ('an audited Linux-only script is exempt', lambda: self.add('scripts/check-linux-host.sh', mode=0o755), False),
+            ('an Xcode phase input script edit keeps the identity',
+             lambda: self.add('scripts/cloudflared_artifact.py', 'second'), False),
+            ('a script edit changes the identity', lambda: self.add('scripts/build.py'), True),
+            ('a workflow edit changes the identity', lambda: self.add('.github/workflows/checks.yml'), True),
+            ('a package manifest changes the identity', lambda: self.add('pkg/Package.swift'), True),
+            ('an xcconfig changes the identity', lambda: self.add('app/Base.xcconfig'), True),
+            ('another new file forces a cold build', lambda: self.add('tests/test_new.py'), True),
+            ('a mode change of a Linux-only script is conservative',
+             lambda: self.add('scripts/check-linux-host.sh', mode=0o644), True),
+        )
+        for label, change, expected in cases:
+            with self.subTest(label):
+                before = self.commit()
+                change()
+                self.track(self.source)
+                self.commit()
+                self.assertEqual(CACHE.settings_changed(self.root, before), expected)
+        self.assertTrue(CACHE.settings_changed(self.root, '0' * 40))
+
+    def test_settings_changed_writes_its_output(self):
+        base = self.commit()
+        self.add('scripts/build.py')
+        self.commit()
         github_output = self.root / 'github-output'
-        with patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': ''}), contextlib.redirect_stdout(io.StringIO()):
-            CACHE.run(argparse.Namespace(operation='save', scope='interop', github_output=github_output), root=self.root)
-        text = github_output.read_text()
-        self.assertIn('save<<REMOZIO_CACHE_OUTPUT\ntrue\n', text)
-        self.assertIn('family<<REMOZIO_CACHE_OUTPUT\nmac-build-v1-interop-\n', text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            CACHE.run(argparse.Namespace(operation='settings-changed', base=base, github_output=github_output),
+                      root=self.root)
+        self.assertEqual(github_output.read_text(), 'changed<<REMOZIO_CACHE_OUTPUT\ntrue\nREMOZIO_CACHE_OUTPUT\n')
 
     def test_system_keychain_output_root_is_cached_only_for_experiments(self):
         name = 'experiments/system-keychain/.build'

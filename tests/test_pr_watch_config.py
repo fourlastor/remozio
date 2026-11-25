@@ -98,7 +98,7 @@ class WatcherConfigTests(unittest.TestCase):
         names = set(re.findall(r'^    name: (.+)$', WORKFLOW, re.MULTILINE))
         self.assertTrue(set(config['required_checks']) <= names)
         selective = {name for name in names if name not in config['required_checks']
-                     and name not in ('Prune superseded main caches',)}
+                     and name not in ('Prune superseded main caches', 'Free the budget for a new Mac cache generation')}
         skipped = set(config['expected_skipped_checks'])
         for name in selective:
             with self.subTest(name=name):
