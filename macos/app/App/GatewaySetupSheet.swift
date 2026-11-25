@@ -10,6 +10,7 @@ struct GatewaySetupSheet: View {
     @State private var provider: SetupFCMConfiguration?
     @State private var importing = false
     @State private var importFailed = false
+    @State private var importWork: Task<Void, Never>?
     @State private var selection = GatewaySetupFormSelection()
     @State private var work: Task<Void, Never>?
 
@@ -19,33 +20,48 @@ struct GatewaySetupSheet: View {
             project: provider?.project, importFailed: importFailed, canPrepare: provider.flatMap { try? form.choices(provider: $0) } != nil,
             onImport: { importing = true }, onRefresh: { run { await controls.refresh() } },
             onPrepare: {
-                guard let provider, let choices = try? form.choices(provider: provider) else { return }
+                guard importWork == nil, let provider, let choices = try? form.choices(provider: provider) else { return }
                 run { await controls.prepare(choices) }
             }, onJournal: { run { await controls.initializeJournal() } },
             onActivate: {
                 let settings = controls.settingsProgress == nil ? try? form.activationSettings() : controls.progress?.settings
                 guard let settings else { return }
                 run { await controls.activate(settings: settings) }
-            }, onClose: { work?.cancel(); provider = nil; dismiss() }, settingsProgress: controls.settingsProgress,
+            }, onClose: { work?.cancel(); clearImport(); dismiss() }, importInProgress: importWork != nil,
+            settingsProgress: controls.settingsProgress,
             onApplySettings: {
                 guard let selection = try? form.settingsSelection() else { return }
                 run { await controls.applySettings(selection) }
             })
         .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
-            do {
-                let url = try result.get(), scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                let input = try FileHandle(forReadingFrom: url); defer { try? input.close() }
-                let data = try input.read(upToCount: 65537) ?? Data()
-                provider = try SetupFCMConfiguration(serviceAccountJSON: data); importFailed = false
-            } catch CocoaError.userCancelled { }
+            do { startImport(try result.get()) }
+            catch CocoaError.userCancelled { }
             catch { importFailed = true }
         }
         .task { await controls.refresh(); selectRetainedOnce() }
         .onChange(of: controls.progress?.settings) { _, _ in selectRetainedOnce() }
         .onChange(of: try? controls.settingsProgress?.bytes) { _, _ in selectRetainedOnce() }
         .onChange(of: try? controls.initialSelection?.bytes) { _, _ in selectRetainedOnce() }
-        .onDisappear { work?.cancel(); provider = nil }
+        .onDisappear { work?.cancel(); clearImport() }
+    }
+    private func startImport(_ file: URL) {
+        guard importWork == nil else { return }
+        importWork = Task {
+            defer { if !Task.isCancelled { importWork = nil } }
+            do {
+                let selected = try await SetupFCMConfiguration.importServiceAccount(from: file)
+                guard !Task.isCancelled else { return }
+                provider = selected
+                importFailed = false
+            } catch {
+                if !Task.isCancelled { importFailed = true }
+            }
+        }
+    }
+    private func clearImport() {
+        importWork?.cancel()
+        importWork = nil
+        provider = nil
     }
     private func selectRetainedOnce() {
         selection.update(form: &form, activation: controls.progress, settings: controls.settingsProgress, initial: controls.initialSelection)
@@ -72,6 +88,7 @@ struct GatewaySetupContent: View {
     let onJournal: () -> Void
     let onActivate: () -> Void
     let onClose: () -> Void
+    var importInProgress = false
     var settingsProgress: SetupGatewaySettingsProgress? = nil
     var onApplySettings: () -> Void = {}
     @State var advanced = false
@@ -170,9 +187,12 @@ struct GatewaySetupContent: View {
             Text("Firebase project").font(.headline)
             VStack(alignment: .leading, spacing: 8) {
                 Button(project == nil ? "Choose service account JSON…" : "Replace service account JSON…", action: onImport)
+                    .disabled(importInProgress)
                 if let project { LabeledContent("Project") { Text(verbatim: project).textSelection(.enabled) } }
             }
-            if importFailed {
+            if importInProgress {
+                ProgressView("Reading the service account…")
+            } else if importFailed {
                 Label(project == nil ? "Could not read the service account. Choose a valid Firebase JSON file." :
                     "Could not read that file. The previously selected project is still selected.", systemImage: "exclamationmark.triangle")
             }
@@ -272,7 +292,7 @@ struct GatewaySetupContent: View {
         if loaded, let progress {
             if progress.setup.journalIntentDigest == nil {
                 Button("Prepare configuration…", action: onPrepare)
-                    .disabled(working || !canPrepare)
+                    .disabled(working || importInProgress || !canPrepare)
             } else if !progress.setup.journalInitialized {
                 Button("Prepare push storage…", action: onJournal).disabled(working)
             } else if let settingsProgress {

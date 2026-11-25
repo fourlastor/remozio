@@ -97,9 +97,32 @@ public struct GatewaySetupForm: Sendable {
 }
 
 extension SetupFCMConfiguration {
+    private static let maximumServiceAccountJSONBytes = 65_536
+
+    /// Reads and validates a user-selected credential file off the caller's actor.
+    public static func importServiceAccount(from file: URL) async throws -> Self {
+        try Task.checkCancellation()
+        let reader = Task.detached {
+            try Task.checkCancellation()
+            let scoped = file.startAccessingSecurityScopedResource()
+            defer { if scoped { file.stopAccessingSecurityScopedResource() } }
+            let bytes = try SetupFilePreviewReader.read(file, limit: maximumServiceAccountJSONBytes,
+                                                        followSymbolicLinks: false)
+            try Task.checkCancellation()
+            return try Self(serviceAccountJSON: bytes)
+        }
+        let provider = try await withTaskCancellationHandler {
+            try await reader.value
+        } onCancel: {
+            reader.cancel()
+        }
+        try Task.checkCancellation()
+        return provider
+    }
+
     /// Explicit local import only. This validates credentials without saving them or contacting Firebase.
     public init(serviceAccountJSON data: Data) throws {
-        guard !data.isEmpty, data.count <= 65536,
+        guard !data.isEmpty, data.count <= Self.maximumServiceAccountJSONBytes,
               let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               fields["type"] as? String == "service_account",
               fields["token_uri"] as? String == FCMServiceAccount.tokenEndpoint,
