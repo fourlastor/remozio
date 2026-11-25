@@ -4,11 +4,13 @@ import Network
 import RemozioMach
 
 struct PairingLANAddressSelection {
+    private static func usableIPv4(_ address: Data) -> Bool {
+        guard address.count == 4, let first = address.first else { return false }
+        return (1...223).contains(first) && first != 127 && !address.starts(with: [169, 254])
+    }
+
     static func ipv4(_ addresses: [Data], primary: Data?) -> Data? {
-        let usable = Set(addresses.filter {
-            guard $0.count == 4, let first = $0.first else { return false }
-            return (1...223).contains(first) && first != 127 && !$0.starts(with: [169, 254])
-        })
+        let usable = Set(addresses.filter(usableIPv4))
         if usable.count == 1 { return usable.first }
         guard let primary, usable.contains(primary) else { return nil }
         return primary
@@ -17,17 +19,31 @@ struct PairingLANAddressSelection {
     struct IPv6Candidate {
         let address: Data
         let flags: UInt32?
+
+        var isUsable: Bool {
+            guard address.count == 16, let first = address.first, let flags else { return false }
+            let isGlobal = first & 0xe0 == 0x20
+            let isUniqueLocal = first & 0xfe == 0xfc
+            return (isGlobal || isUniqueLocal) && flags & UInt32(RemozioPairingIPv6Unusable) == 0
+        }
     }
 
     static func ipv6(_ addresses: [IPv6Candidate]) -> Data? {
-        addresses.filter {
-            guard $0.address.count == 16, let first = $0.address.first, let flags = $0.flags else { return false }
-            return first & 0xe0 == 0x20 && flags & UInt32(RemozioPairingIPv6Unusable) == 0
-        }.map(\.address).min { $0.lexicographicallyPrecedes($1) }
+        // The global range sorts before the unique-local range.
+        addresses.filter(\.isUsable).map(\.address).min { $0.lexicographicallyPrecedes($1) }
+    }
+
+    static func contains(_ bound: PairingLANRoute.Address, ipv4: [Data], ipv6: [IPv6Candidate]) -> Bool {
+        switch bound {
+        case .ipv4(let address):
+            return usableIPv4(address.rawValue) && ipv4.contains(address.rawValue)
+        case .ipv6(let address):
+            return ipv6.contains { $0.address == address.rawValue && $0.isUsable }
+        }
     }
 }
 
-/// A window owns one live interface and address. A route change requires a new window.
+/// A window keeps its selected interface and address for as long as both are usable.
 struct PairingLANRoute: Sendable {
     enum Address: Equatable, Sendable {
         case ipv4(IPv4Address)
@@ -81,7 +97,7 @@ struct PairingLANRoute: Sendable {
         }
         try Task.checkCancellation()
         let matches = path.availableInterfaces.filter { $0.name == scope.interfaceName && $0.index == Int(index) && $0.type != .loopback }
-        guard matches.count == 1, let interface = matches.first, let address = currentAddress(scope) else {
+        guard matches.count == 1, let interface = matches.first, let address = selectAddress(scope) else {
             throw TransportPairingControlError.unavailableInterface
         }
         let route = Self(scope: scope, interface: interface, index: index, address: address)
@@ -89,9 +105,31 @@ struct PairingLANRoute: Sendable {
         return route
     }
 
-    var isCurrent: Bool { if_nametoindex(scope.interfaceName) == index && Self.currentAddress(scope) == address }
+    var isCurrent: Bool {
+        guard if_nametoindex(scope.interfaceName) == index, let addresses = Self.readAddresses(scope),
+              if_nametoindex(scope.interfaceName) == index else { return false }
+        return PairingLANAddressSelection.contains(address, ipv4: addresses.ipv4, ipv6: addresses.ipv6)
+    }
 
-    private static func currentAddress(_ scope: PairingLANScope) -> Address? {
+    private static func selectAddress(_ scope: PairingLANScope) -> Address? {
+        guard let addresses = readAddresses(scope) else { return nil }
+        let selected: Data?
+        switch scope.family {
+        case .ipv4:
+            var primary: Data?
+            if Set(addresses.ipv4).count > 1 {
+                var bytes = [UInt8](repeating: 0, count: 4)
+                if remozio_pairing_ipv4_primary(scope.interfaceName, &bytes) == 0 { primary = Data(bytes) }
+            }
+            selected = PairingLANAddressSelection.ipv4(addresses.ipv4, primary: primary)
+        case .ipv6:
+            selected = PairingLANAddressSelection.ipv6(addresses.ipv6)
+        }
+        return selected.flatMap { Address(family: scope.family, bytes: $0) }
+    }
+
+    private static func readAddresses(_ scope: PairingLANScope)
+        -> (ipv4: [Data], ipv6: [PairingLANAddressSelection.IPv6Candidate])? {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let first = list else { return nil }
         defer { freeifaddrs(first) }
@@ -120,18 +158,6 @@ struct PairingLANRoute: Sendable {
             default: break
             }
         }
-        let selected: Data?
-        switch scope.family {
-        case .ipv4:
-            var primary: Data?
-            if Set(ipv4).count > 1 {
-                var bytes = [UInt8](repeating: 0, count: 4)
-                if remozio_pairing_ipv4_primary(scope.interfaceName, &bytes) == 0 { primary = Data(bytes) }
-            }
-            selected = PairingLANAddressSelection.ipv4(ipv4, primary: primary)
-        case .ipv6:
-            selected = PairingLANAddressSelection.ipv6(ipv6)
-        }
-        return selected.flatMap { Address(family: scope.family, bytes: $0) }
+        return (ipv4, ipv6)
     }
 }

@@ -121,7 +121,7 @@ internal class AndroidPairingAttempt(
         val proposal = PairingPhoneProposal(offer, claim(checkNotNull(transportKey)), claim(checkNotNull(decisionKey)),
             claim(checkNotNull(biometricKey)), rePair?.predecessor)
         active()
-        val routes = androidPairingRoutes(application(), selected.macID.copyBytes(), selected.accountID.copyBytes())
+        val routes = androidPairingRoutes(application(), selected, v2)
         val keys = arrayOf<javax.net.ssl.KeyManager>(checkNotNull(identity).identity.keyManager)
         val timeout = LocalNetworkSettings(application()).timeoutSeconds() * 1000L
         val opened = if (v2 == null) authenticatePairingRoutes(scope, routes, keys, selected, proposal, timeout)

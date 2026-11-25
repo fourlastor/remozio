@@ -94,6 +94,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
     private let lookupRendezvous: @Sendable (Data) -> AuthorityPairingRendezvous?
     private let configureListener: @Sendable (NSXPCListener) -> Void
     private let configureConnection: @Sendable (NSXPCConnection) -> Void
+    private let onProofLinkRetired: (@Sendable () -> Void)?
     private var slot: Offer?
     private var closed = false
 
@@ -111,8 +112,10 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
          configureListener: @escaping @Sendable (NSXPCListener) -> Void,
          configureConnection: @escaping @Sendable (NSXPCConnection) -> Void, bindReservations: BindReservations? = nil,
          validateTransport: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in },
-         lookupRendezvous: @escaping @Sendable (Data) -> AuthorityPairingRendezvous? = { _ in nil }) {
+         lookupRendezvous: @escaping @Sendable (Data) -> AuthorityPairingRendezvous? = { _ in nil },
+         onProofLinkRetired: (@Sendable () -> Void)? = nil) {
         self.policy = policy
+        self.onProofLinkRetired = onProofLinkRetired
         self.lookupRendezvous = lookupRendezvous
         self.bindReservations = bindReservations
         self.validateTransport = validateTransport
@@ -315,6 +318,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
                 if slot?.activeWork == 0 { slot = nil }
             }
         }
+        onProofLinkRetired?()
     }
 
     private final class Endpoint: NSObject, AuthorityPairingProofXPCProtocol {

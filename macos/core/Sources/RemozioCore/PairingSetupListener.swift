@@ -64,6 +64,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let invitation: PairingInvitation
     private let lanRoute: PairingLANRoute?
     private let lanBinding: PairingLANBinding?
+    private let lanServiceName: String?
     private let advertisement: PairingLANAdvertisement?
     private let v2: PairingSetupV2Ingress?
     private let applicationProtocol: String
@@ -137,6 +138,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.setupTimeoutMilliseconds = setupTimeoutMilliseconds
         self.handler = handler; self.event = event; self.v2 = v2; self.proofTime = proofTime; self.lanRoute = lanRoute
         self.lanBinding = lanBinding
+        lanServiceName = try lanBinding.map { try Self.serviceName(invitation, windowID: $0.windowID) }
         advertisement = lanRoute == nil ? nil : PairingLANAdvertisement(queue: queue)
         self.registrationLane = registrationLane
         self.sourceKey = sourceKey
@@ -169,7 +171,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         } else if binding == .loopback { parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any) }
         listener = try NWListener(using: parameters)
         if binding == .localNetwork && lanRoute == nil {
-            var service = NWListener.Service(name: Self.serviceName(invitation), type: "_remozio-pairing._tcp.")
+            var service = try NWListener.Service(name: Self.serviceName(invitation), type: "_remozio-pairing._tcp.")
             service.noAutoRename = true; listener.service = service
         }
         listener.stateUpdateHandler = { [weak self] in self?.changed($0) }
@@ -214,7 +216,8 @@ public final class PairingSetupListener: @unchecked Sendable {
         }
     }
 
-    private static func serviceName(_ invitation: PairingInvitation) -> String {
+    static func serviceName(_ invitation: PairingInvitation, windowID: Data? = nil) throws -> String {
+        if let windowID { return try PairingInvitationV2.bonjourInstanceName(windowID: windowID) }
         func id(_ data: Data) -> String {
             data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
                 .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
@@ -239,7 +242,8 @@ public final class PairingSetupListener: @unchecked Sendable {
             guard let port = listener.port else { finish(.failed); return }
             if let lanRoute, let advertisement {
                 guard lock.withLock({ !closed }) else { return }
-                advertisement.start(name: Self.serviceName(invitation), index: lanRoute.index, port: port.rawValue, address: lanRoute.address,
+                guard let lanServiceName else { finish(.failed); return }
+                advertisement.start(name: lanServiceName, index: lanRoute.index, port: port.rawValue, address: lanRoute.address,
                                     isCurrent: { [weak self] in
                     guard let self, self.lanRemainingLifetime() != nil, lanRoute.isCurrent, let current = lanRoute.liveSubnet else { return false }
                     return current == self.peerSubnet

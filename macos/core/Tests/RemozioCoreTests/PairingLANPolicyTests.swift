@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import dnssd
 import Foundation
@@ -197,14 +198,57 @@ final class PairingLANPolicyTests: XCTestCase {
         let candidates: [PairingLANAddressSelection.IPv6Candidate] = [
             .init(address: later, flags: 0), .init(address: earlier, flags: 0),
             .init(address: bytes("20010db8000000000000000000000000"), flags: flags),
-            .init(address: bytes("fe800000000000000000000000000001"), flags: 0),
-            .init(address: bytes("fd000000000000000000000000000001"), flags: 0)
+            .init(address: bytes("fe800000000000000000000000000001"), flags: 0)
         ]
         XCTAssertEqual(PairingLANAddressSelection.ipv6(candidates), earlier)
         XCTAssertEqual(PairingLANAddressSelection.ipv6(Array(candidates.reversed())), earlier)
         XCTAssertNil(PairingLANAddressSelection.ipv6(Array(candidates.dropFirst(2))))
         for flag in [UInt32(0x01), 0x10, 0x80, 0x0200, 0x1000] {
             XCTAssertNil(PairingLANAddressSelection.ipv6([.init(address: earlier, flags: flag)]))
+        }
+    }
+
+    func testIPv6PrefersGlobalAndSupportsBothUniqueLocalPrefixes() {
+        let global = bytes("20010db8000000000000000000000001")
+        let fc = bytes("fc000000000000000000000000000001")
+        let fd = bytes("fd000000000000000000000000000001")
+        let unusable = UInt32(RemozioPairingIPv6Unusable)
+        let local: [PairingLANAddressSelection.IPv6Candidate] = [.init(address: fd, flags: 0), .init(address: fc, flags: 0)]
+
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(local), fc)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(Array(local.reversed())), fc)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6([local[0]]), fd)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(local + [.init(address: global, flags: 0)]), global)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(local + [.init(address: global, flags: unusable)]), fc)
+        XCTAssertNil(PairingLANAddressSelection.ipv6([.init(address: fc, flags: nil), .init(address: fd, flags: unusable)]))
+    }
+
+    func testBoundIPv4SurvivesPrimaryChangeWhileTheAddressRemainsUsable() throws {
+        let before = Data([192, 168, 1, 7]), after = Data([192, 168, 1, 8])
+        let bound = try XCTUnwrap(PairingLANRoute.Address(family: .ipv4, bytes: before))
+        XCTAssertEqual(PairingLANAddressSelection.ipv4([before, after], primary: before), before)
+        XCTAssertEqual(PairingLANAddressSelection.ipv4([before, after], primary: after), after)
+        XCTAssertTrue(PairingLANAddressSelection.contains(bound, ipv4: [before, after], ipv6: []))
+        XCTAssertFalse(PairingLANAddressSelection.contains(bound, ipv4: [after], ipv6: []))
+        let linkLocal = Data([169, 254, 1, 9])
+        let invalid = try XCTUnwrap(PairingLANRoute.Address(family: .ipv4, bytes: linkLocal))
+        XCTAssertFalse(PairingLANAddressSelection.contains(invalid, ipv4: [linkLocal], ipv6: []))
+    }
+
+    func testBoundIPv6SurvivesANewPreferredAddressAndRejectsLossOrUnusableFlags() throws {
+        let preferred = bytes("20010db8000000000000000000000001")
+        let alternative = PairingLANAddressSelection.IPv6Candidate(address: preferred, flags: 0)
+        for previous in [bytes("20010db8000000000000000000000002"), bytes("fd000000000000000000000000000001")] {
+            let bound = try XCTUnwrap(PairingLANRoute.Address(family: .ipv6, bytes: previous))
+            let existing = PairingLANAddressSelection.IPv6Candidate(address: previous, flags: 0)
+            XCTAssertEqual(PairingLANAddressSelection.ipv6([existing]), previous)
+            XCTAssertEqual(PairingLANAddressSelection.ipv6([existing, alternative]), preferred)
+            XCTAssertTrue(PairingLANAddressSelection.contains(bound, ipv4: [], ipv6: [existing, alternative]))
+            XCTAssertFalse(PairingLANAddressSelection.contains(bound, ipv4: [], ipv6: [alternative]))
+            for flags in [nil, UInt32(RemozioPairingIPv6Unusable)] {
+                let unusable = PairingLANAddressSelection.IPv6Candidate(address: previous, flags: flags)
+                XCTAssertFalse(PairingLANAddressSelection.contains(bound, ipv4: [], ipv6: [unusable, alternative]))
+            }
         }
     }
 
@@ -238,9 +282,15 @@ final class PairingLANPolicyTests: XCTestCase {
     func testBonjourWithdrawalDiscardsLateRegistrationForTheClosedWindow() throws {
         let queue = DispatchQueue(label: "pairing-lan-advertisement-fixture")
         let events = AdvertisementEvents()
+        let invitation = try PairingInvitation(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            label: "Mac", authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            transportPublicKey: bytes(point), minimumEnvelopeVersion: 1)
+        let name = try PairingSetupListener.serviceName(invitation, windowID: Data(0..<16))
+        XCTAssertEqual(try PairingSetupListener.serviceName(invitation), "R-AQEBAQEBAQEBAQEBAQEBAQ-AgICAgICAgICAgICAgICAg")
+        XCTAssertEqual(name, "R2-9258385a87e7bf9effea002e90c5eabe")
         let address = try XCTUnwrap(PairingLANRoute.Address(family: .ipv4, bytes: Data([192, 168, 5, 11])))
         let registration = PairingLANAdvertisement(queue: queue, register: { name, index, port, host, _, report in
-            XCTAssertEqual(name, "R-public-scope")
+            XCTAssertEqual(name, "R2-9258385a87e7bf9effea002e90c5eabe")
             XCTAssertEqual(index, 7)
             XCTAssertEqual(port, 4321)
             XCTAssertEqual(host.recordType, UInt16(kDNSServiceType_A))
@@ -249,7 +299,7 @@ final class PairingLANPolicyTests: XCTestCase {
             return { events.stopped.withLock { $0 += 1 } }
         })
         queue.sync {
-            registration.start(name: "R-public-scope", index: 7, port: 4321, address: address, isCurrent: { true }) { event in
+            registration.start(name: name, index: 7, port: 4321, address: address, isCurrent: { true }) { event in
                 switch event {
                 case .ready: events.reports.withLock { $0.append(true) }
                 case .failed, .stopped: events.reports.withLock { $0.append(false) }
