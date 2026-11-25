@@ -15,10 +15,10 @@ Phase 3. It does not approve production activation, change any contract, claim
 hardware key custody, or design the
 [line 67 handoff](linux-host-contract.md#candidate-strict-admission-profile):
 decision 1 selects reading B, and its design is still to come.
-Account, unit and path names are chosen (decision 8). Decision 2 chooses the kind
-of execution identity; its account name is still to be proposed. Every mode and limit below is still a
-reviewable proposal. Nothing has been
-installed, started or provisioned, and no service code exists yet.
+Account, unit and path names are chosen (decision 8). Decision 2 chooses the
+kind of execution identity; its account name is still to be proposed. Every mode
+and limit below is still a reviewable proposal. Nothing has been installed,
+started or provisioned, and no service code exists yet.
 
 The inputs are the [Phase 0 contract](linux-host-contract.md), whose platform table
 (Ubuntu 25.10, x86_64, kernel 6.17, systemd, `SOCK_SEQPACKET`, TPM 2.0 P-256,
@@ -205,7 +205,7 @@ on the target machine:
 | `ProtectHome=yes` | yes | yes | no; commands run in the user's directories |
 | `RestrictAddressFamilies=` | `AF_UNIX` | `AF_UNIX AF_INET AF_INET6` | none (decision 3) |
 | `IPAddressDeny=any` | yes | no | no (decision 3) |
-| Device namespace and TPM exposure | unresolved, open decision 4 | unresolved, open decision 4 | no `PrivateDevices=` (decision 3); not given TPM access |
+| Device namespace and TPM exposure | unresolved, open decision 4 | unresolved, open decision 4 | no `PrivateDevices=` (decision 3); the execution user is not in the TPM device group (`tss` on Ubuntu), so `/dev/tpmrm0` stays closed to the service, and an approved command has only the TPM access its caller already has |
 | `CapabilityBoundingSet=` | empty | empty | `CAP_SETUID CAP_SETGID` (decision 2) |
 | `SystemCallFilter=@system-service` | yes | yes | no (decision 3) |
 
@@ -262,6 +262,16 @@ and 6 stay behind their gates, and this proposal chooses neither.
    Root. Its account name is still to be proposed. The owner accepts the limit
    above: a Root process that runs the installed frontend also gets the frontend
    label, but Root can already bypass every control on the host.
+   The separate identity limits what the service does by mistake or by design. It
+   does not limit an attacker who controls the service: `CAP_SETUID` allows
+   `setuid(0)`, and decision 3 removes `NoNewPrivileges=` and the system call
+   filter, so a compromised execution service is equivalent to Root. Against that
+   case the protection is the authority's one-use dispatch permit, not the
+   identity.
+   The capabilities never reach a command. The unit sets no
+   `AmbientCapabilities=`, and before `exec` the service calls `setgid`,
+   `initgroups` and `setuid` for the caller's identity, so the command starts with
+   the caller's credentials and an empty capability set.
 3. **Execution sandbox inheritance.** A command started directly by
    `remozio-exec.service` inherits the unit's sandbox: `NoNewPrivileges=` would
    break `sudo` inside the command, and `ProtectSystem=` would make system paths
@@ -273,7 +283,10 @@ and 6 stay behind their gates, and this proposal chooses neither.
    keeps only its capability set, with no `NoNewPrivileges=` and no
    `ProtectSystem=`, so `sudo` and system writes work inside approved commands.
    The protection for a command is the approval, not a sandbox. Transient units
-   are not used.
+   are not used. "Unsandboxed" covers every execution row of the hardening table,
+   not only these two settings, because an approved command can need the network,
+   devices and the usual system calls. It also covers `UMask=0077`: commands work
+   in the user's directories and keep the user's normal file modes.
 4. **TPM role isolation.** On Ubuntu `/dev/tpmrm0` is shared by group. Any account
    allowed to open it can use any object whose authorization it holds, so role
    separation would rest on per-role key authorization stored in each role's 0600
