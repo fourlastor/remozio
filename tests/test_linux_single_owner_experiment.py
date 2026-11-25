@@ -10,8 +10,11 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
+import time
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -152,7 +155,7 @@ class CaseTableTests(unittest.TestCase):
     def test_every_case_is_documented(self):
         text = EXPERIMENT_DOC.read_text()
         for case in EXPERIMENT.CASES:
-            self.assertIn(f"`{case}`", text)
+            self.assertTrue(f"`{case}`" in text, case)
 
 
 class ReportTests(unittest.TestCase):
@@ -325,6 +328,224 @@ class MeasureTests(unittest.TestCase):
         self.assertNotIn("someone", stderr.getvalue())
 
 
+LINUX = platform.system() == "Linux"
+
+
+def gone(pid):
+    """True when pid no longer runs (absent, or a zombie that someone else must reap)."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    return text[text.rindex(")") + 2] in "ZX"
+
+
+def processes_mentioning(text):
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                if text.encode() in (entry / "cmdline").read_bytes():
+                    found.append(int(entry.name))
+            except OSError:
+                pass
+    return found
+
+
+@unittest.skipUnless(LINUX, "needs Linux procfs")
+class ProcessHelperTests(unittest.TestCase):
+    def test_reap_waits_for_a_child_that_exits_after_the_first_poll(self):
+        child = subprocess.Popen(["sh", "-c", "sleep 0.3"])
+        started = time.monotonic()
+        self.assertTrue(EXPERIMENT._reap(child.pid, started + 5))
+        self.assertGreaterEqual(time.monotonic() - started, 0.2)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
+        child.wait()  # already reaped: lets Popen record it
+
+    def test_reap_reports_a_child_that_outlives_the_deadline(self):
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            self.assertFalse(EXPERIMENT._reap(child.pid, time.monotonic() + 0.1))
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_retire_all_reaps_a_k_that_exits_late(self):
+        # Not a session leader, so _end_session leaves it alone and only the poll can reap it.
+        k = subprocess.Popen(["sh", "-c", "sleep 0.3"])
+        self.assertTrue(EXPERIMENT._retire_all(None, None, {"c": 0, "k": k.pid}, []))
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(k.pid, os.WNOHANG)
+        k.wait()
+
+    def test_retire_all_kills_live_processes_and_the_command_session(self):
+        owner = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True)
+        frontend = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True)
+        k = subprocess.Popen(["sh", "-c", "sleep 30 & exec sleep 30"], start_new_session=True)
+        time.sleep(0.1)
+        members = EXPERIMENT._session_members(k.pid)
+        self.assertGreaterEqual(len(members), 2)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.assertTrue(EXPERIMENT._retire_all(owner, frontend, {"c": 0, "k": k.pid}, [listener]))
+        self.assertIsNotNone(owner.returncode)
+        self.assertIsNotNone(frontend.returncode)
+        self.assertEqual(listener.fileno(), -1)
+        deadline = time.monotonic() + 3
+        while not all(gone(pid) for pid in members) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(all(gone(pid) for pid in members))
+        k.wait()
+
+    def test_end_session_kills_every_member(self):
+        leader = subprocess.Popen(["sh", "-c", "sleep 30 & exec sleep 30"], start_new_session=True)
+        time.sleep(0.1)
+        members = EXPERIMENT._session_members(leader.pid)
+        EXPERIMENT._end_session(leader.pid)
+        leader.wait(timeout=3)
+        deadline = time.monotonic() + 3
+        while not all(gone(pid) for pid in members) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(all(gone(pid) for pid in members))
+        EXPERIMENT._end_session(0)  # no K: nothing to do
+
+    def test_reap_k_categories(self):
+        deadline = lambda: time.monotonic() + 3
+        for command, expected in ((["sh", "-c", "exit 121"], "reserved"), (["sh", "-c", "exit 3"], "other")):
+            child = subprocess.Popen(command)
+            self.assertEqual(EXPERIMENT._reap_k(child.pid, deadline()), expected)
+            child.wait()
+        child = subprocess.Popen(["sleep", "30"])
+        child.kill()
+        self.assertEqual(EXPERIMENT._reap_k(child.pid, deadline()), "signaled")
+        child.wait()
+        self.assertEqual(EXPERIMENT._reap_k(os.getppid(), deadline()), "not-observed")
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            self.assertEqual(EXPERIMENT._reap_k(child.pid, time.monotonic() + 0.05), "running")
+        finally:
+            child.kill()
+            child.wait()
+
+
+class KillUserTests(unittest.TestCase):
+    def test_matches_real_effective_or_saved_uid_from_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            for pid, uids in (("101", "1000 1000 4242 1000"), ("102", "4242 0 0 0"), ("103", "1000 1000 1000 1000"),
+                              ("104", "1000 4242 1000 1000")):
+                (proc / pid).mkdir()
+                (proc / pid / "status").write_text(f"Name:\towner\nUid:\t{uids.replace(' ', chr(9))}\n")
+            (proc / "105").mkdir()  # exited: no status file
+            (proc / "self").mkdir()
+            with patch.object(EXPERIMENT.os, "kill") as kill:
+                EXPERIMENT._kill_user(4242, proc)
+        self.assertEqual(sorted(call.args for call in kill.call_args_list),
+                         [(101, signal.SIGKILL), (102, signal.SIGKILL), (104, signal.SIGKILL)])
+
+    def test_cleanup_kills_the_service_user_then_removes_files_and_accounts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+            run.base = Path(directory) / "base"
+            run.base.mkdir()
+            run.base_created = run.service_created = True
+            run.service_name, run.saved_sysctls, run.timeout = "rmzsotest", {}, 5
+            removed = []
+            def getpwnam(name):
+                if "userdel" in removed:
+                    raise KeyError(name)
+                return SimpleNamespace(pw_uid=4242)
+            def run_owned(arguments, _timeout):
+                removed.append(arguments[0])
+                return 0, b""
+            with patch.object(EXPERIMENT.pwd, "getpwnam", side_effect=getpwnam), \
+                 patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("absent")), \
+                 patch.object(EXPERIMENT.PL, "run_owned", side_effect=run_owned), \
+                 patch.object(EXPERIMENT, "_kill_user") as kill_user:
+                result = run.cleanup()
+            kill_user.assert_called_once_with(4242)
+            self.assertEqual(removed, ["userdel"])
+            self.assertEqual(result, {"filesRemoved": True, "serviceUserRemoved": True, "sysctlsRestored": True})
+
+
+class SetupLimitTests(unittest.TestCase):
+    def test_group_bound_matches_the_owner(self):
+        owner = EXPERIMENT.OWNER.read_text()
+        self.assertEqual(int(re.search(r"#define MAX_GROUPS ([0-9]+)", owner)[1]), EXPERIMENT.MAX_GROUPS)
+
+    def test_setup_refuses_too_many_groups_before_it_changes_anything(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+            run.operator = SimpleNamespace(pw_name="operator", pw_gid=1000, pw_uid=1000)
+            run.base = Path(directory) / "base"
+            stderr = io.StringIO()
+            with patch.object(EXPERIMENT.os, "getgrouplist", return_value=list(range(1000, 1065))), \
+                 contextlib.redirect_stderr(stderr), self.assertRaisesRegex(RuntimeError, "too many"):
+                run.setup()
+            self.assertFalse(run.base.exists())
+            self.assertIn("65 groups", stderr.getvalue())
+
+    @unittest.skipUnless(LINUX, "needs Linux")
+    def test_frontend_socket_is_group_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "s.sock"
+            listener = EXPERIMENT.Host().listener(path)
+            try:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o660)
+            finally:
+                listener.close()
+
+
+class ScriptedHost(EXPERIMENT.Host):
+    """An "owner" that is a small Python script: it never answers, prints garbage, or misbehaves."""
+
+    def __init__(self, script):
+        self.script = script
+        self.started = []
+
+    def start_owner(self, binary, arguments, pass_fds):
+        process = subprocess.Popen([sys.executable, "-I", "-c", self.script, *arguments], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds,
+                                   start_new_session=True)
+        self.started.append(process)
+        return process
+
+
+@unittest.skipUnless(LINUX, "needs Linux procfs")
+class DriveCaseFailureTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        for name in ("cases", "markers"):
+            (base / name).mkdir()
+        self.paths = {"cases": base / "cases", "markers": base / "markers", "probe": base / "probe"}
+
+    def drive(self, script, timeout=1):
+        host = ScriptedHost(script)
+        result = EXPERIMENT.drive_case("dispatch-normal", host, self.paths, (1000, 1000, []), timeout, 40)
+        self.assertTrue(result["cleanupReapedAllFixtureProcesses"], result)
+        self.assertTrue(all(process.returncode is not None for process in host.started))
+        return result
+
+    def test_an_owner_that_never_answers_times_out_and_is_killed(self):
+        result = self.drive("import time; time.sleep(30)")
+        self.assertEqual(result, {"passed": False, "error_type": "TimeoutError",
+                                  "cleanupReapedAllFixtureProcesses": True})
+
+    def test_an_owner_that_prints_garbage_is_an_invalid_report(self):
+        result = self.drive("print('garbage /home/someone 1234')")
+        self.assertEqual(result["error_type"], "InvalidReport")
+        self.assertNotIn("observed", result)
+
+    def test_an_owner_with_a_bad_barrier_is_a_case_failure(self):
+        script = ("import socket, sys, time\n"
+                  "control = socket.socket(fileno=int(sys.argv[3]))\n"
+                  "control.send(b'BARRIER bogus 0 0 0')\n"
+                  "time.sleep(30)\n")
+        self.assertEqual(self.drive(script)["error_type"], "CaseFailure")
+
+
 def fixture_ready():
     if platform.system() != "Linux" or platform.machine() != "x86_64" or not compiler():
         return False
@@ -402,6 +623,27 @@ class FixtureCaseTests(unittest.TestCase):
                                                    last_cap)
                     self.assertTrue(result["passed"], json.dumps(result, sort_keys=True))
                     self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+
+    def test_cancel_during_a_running_command_leaves_no_process(self):
+        """A KeyboardInterrupt while the command sleeps still kills O, C, K and the command."""
+
+        class CancellingHost(FixtureHost):
+            def caller_signal(self, name, pid):
+                raise KeyboardInterrupt()
+
+        case = "cancel-during-command"
+        spec = EXPERIMENT._case("sleep", [("after-s6", "caller-cont-c")])
+        identity = (os.getuid(), os.getgid(), os.getgroups())
+        with patch.dict(EXPERIMENT.CASES, {case: spec}), EXPERIMENT.PL.subreaper():
+            with self.assertRaises(KeyboardInterrupt):
+                EXPERIMENT.drive_case(case, CancellingHost(self.binaries), self.paths, identity, 15, 40)
+        self.assertEqual((self.paths["markers"] / case).read_text(), "ran\n")  # the command did run
+        self.assertEqual(processes_mentioning(str(self.paths["markers"] / case)), [])
+        self.assertEqual(processes_mentioning(str(self.paths["cases"] / case)), [])
+
+    def test_runner_loss_cases_ran(self):
+        self.assertIn("runner-lost-before-go", EXPERIMENT.CASES)
+        self.assertIn("drop-runner", EXPERIMENT.ACTIONS)
 
 
 if __name__ == "__main__":

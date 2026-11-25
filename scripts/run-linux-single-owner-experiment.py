@@ -48,6 +48,8 @@ BASE_PREFIX = "remozio-single-owner-experiment-"
 CC_FLAGS = PL.CC_FLAGS
 OWNER_CAPS = "+sys_ptrace,+setuid,+setgid"
 MAX_OUTPUT_BYTES = 16384
+# owner.c MAX_GROUPS: the permit carries at most this many supplementary groups.
+MAX_GROUPS = 64
 DEADLINE_MS = 2000
 SYSCTLS = {"suidDumpable": Path("/proc/sys/fs/suid_dumpable"),
            "ptraceScope": Path("/proc/sys/kernel/yama/ptrace_scope")}
@@ -77,7 +79,7 @@ OBSERVED = {
     "frontendExit": frozenset({"closed", "SIGKILL", "other", "not-started", "running"}),
     "markerLines": frozenset({"0", "1", "more"}),
     "authorityBegin": YES_NO, "authorityOutcome": RESULTS | {"missing", "refused-replay"},
-    "restartLogClean": YES_NO | {NA},
+    "restartLogClean": YES_NO | {NA}, "restartLogDetach": YES_NO | {NA},
     "kExit": frozenset({"reserved", "signaled", "other", "running", "not-observed"}),
     "commandAliveAfterOwner": YES_NO | {NA},
     "callerSignal": frozenset({"sent", "failed", NA}),
@@ -172,6 +174,16 @@ CASES = {
                                      expect={**ADMITTED, "result": "dispatched", "goWritten": "yes",
                                              "reported": "no", "authorityOutcome": "missing", "markerLines": "1",
                                              "ownerExit": "ok", "frontendExit": "closed"}),
+    # The runner stops answering O's barriers: before the go byte O kills K and starts nothing;
+    # after it O cannot stop the command, but makes no further restart call. C dies with O.
+    "runner-lost-before-go": _case(actions=[("before-go", "drop-runner")],
+                                   expect={**ADMITTED, "result": "notStarted", "goWritten": "no", "reported": "yes",
+                                           "authorityOutcome": "notStarted", "markerLines": "0",
+                                           "restartLogDetach": "no", "ownerExit": "refused",
+                                           "frontendExit": "SIGKILL"}),
+    "runner-lost-after-go": _case(actions=[("after-go", "drop-runner")],
+                                  expect={**DISPATCHED, "restartLogDetach": "no", "ownerExit": "refused",
+                                          "frontendExit": "SIGKILL"}),
     "owner-thread-refused": _case(owner="owner-thread",
                                   expect={**ADMITTED, "result": "ownerThreads", "goWritten": "no",
                                           "authorityOutcome": "notStarted", "markerLines": "0", "ownerExit": "ok",
@@ -185,10 +197,12 @@ CASES = {
                                   expect={**UNKNOWN, "attachBeforeGo": "EPERM", "attachAfterGo": "EPERM"}),
 }
 MODES = frozenset({"normal", "short", "sleep", "missing", "khang", "kpause"})
-ACTIONS = frozenset({"kill-k", "kill-owner", "kill-authority", "caller-stop-k", "caller-term-k", "caller-usr1-k",
+ACTIONS = frozenset({"kill-k", "kill-owner", "kill-authority", "drop-runner", "caller-stop-k", "caller-term-k",
+                     "caller-usr1-k",
                      "caller-cont-c", "caller-kill-c", "caller-attach-k"})
 BARRIERS = frozenset({"start", "s1", "after-fork", "k-ready", "before-go", "after-check", "after-go", "k-paused",
                       "after-s6", "end"})
+BARRIER_MESSAGE = re.compile(rb"BARRIER ([a-z0-9-]{1,16}) ([0-9]) ([0-9]{1,10}) ([0-9]{1,10})")
 CALLER_SIGNALS = {"caller-stop-k": ("STOP", "k"), "caller-term-k": ("TERM", "k"), "caller-usr1-k": ("USR1", "k"),
                   "caller-cont-c": ("CONT", "c"), "caller-kill-c": ("KILL", "c")}
 
@@ -422,8 +436,12 @@ class Host:
     def listener(self, path):
         """C's way to O: a stream socket that the caller can reach."""
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
-        listener.bind(str(path))
-        os.chmod(path, 0o666)
+        previous = os.umask(0o177)
+        try:
+            listener.bind(str(path))
+        finally:
+            os.umask(previous)
+        os.chmod(path, 0o660)
         listener.listen(4)
         return listener
 
@@ -468,115 +486,129 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
     pids = {"c": 0, "k": 0}
     owner_out, frontend_out = bytearray(), bytearray()
     sockets = []
+    error, clean = None, False
     try:
-        listener = host.listener(listen_path)
-        sockets.append(listener)
-        authority_listener = host.authority_listener(authority_path)
-        sockets.append(authority_listener)
-        control_owner, control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        sockets += [control_owner, control]
-        log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
         try:
-            owner = host.start_owner(spec["owner"], [str(listener.fileno()), str(authority_path),
-                                                    str(control_owner.fileno()), str(log_fd), "1",
-                                                    str(DEADLINE_MS), str(paths["probe"]), str(marker)],
-                                     (listener.fileno(), control_owner.fileno(), log_fd))
-        finally:
-            os.close(log_fd)
-        control_owner.close()
-        with selectors.DefaultSelector() as selector:
-            selector.register(owner.stdout, selectors.EVENT_READ, "owner")
-            selector.register(control, selectors.EVENT_READ, "control")
-            selector.register(authority_listener, selectors.EVENT_READ, "authority-listen")
-            open_streams = {"owner", "control"}
-            while open_streams & {"owner", "control"}:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError()
-                for key, _events in selector.select(min(remaining, 0.5)):
-                    tag = key.data
-                    if tag == "owner" or tag == "frontend":
-                        buffer = owner_out if tag == "owner" else frontend_out
-                        chunk = os.read(key.fd, 4096)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            open_streams.discard(tag)
-                        buffer.extend(chunk)
-                        if len(buffer) > MAX_OUTPUT_BYTES:
-                            raise ValueError("output bound")
-                    elif tag == "authority-listen":
-                        connection, _ = authority_listener.accept()
-                        sockets.append(connection)
-                        selector.register(connection, selectors.EVENT_READ, ("authority", connection))
-                    elif isinstance(tag, tuple):
-                        connection = tag[1]
-                        try:
-                            message = connection.recv(1024)
-                        except ConnectionError:
-                            message = b""
-                        if not message:
-                            selector.unregister(connection)
-                            connection.close()
-                            continue
-                        try:
-                            pidfd = connection.getsockopt(socket.SOL_SOCKET, 77)
-                        except OSError:
-                            pidfd = None
-                        try:
-                            connection.send(authority.handle(connection.fileno(), message, pidfd))
-                        finally:
-                            if pidfd is not None:
-                                os.close(pidfd)
-                    elif tag == "control":
-                        try:
-                            message = control.recv(256)
-                        except ConnectionError:
-                            message = b""
-                        if not message:
-                            selector.unregister(control)
-                            open_streams.discard("control")
-                            continue
-                        match = re.fullmatch(rb"BARRIER ([a-z0-9-]{1,16}) ([0-9]) ([0-9]{1,10}) ([0-9]{1,10})", message)
-                        if not match or match[1].decode() not in BARRIERS:
-                            raise ValueError("bad barrier")
-                        name = match[1].decode()
-                        if int(match[3]):
-                            pids["c"] = int(match[3])
-                        if int(match[4]):
-                            pids["k"] = int(match[4])
-                        resume = True
-                        if name == "start":
-                            frontend = host.start_frontend(listen_path)
-                            selector.register(frontend.stdout, selectors.EVENT_READ, "frontend")
-                            open_streams.add("frontend")
-                        for barrier, action in spec["actions"]:
-                            if barrier != name:
+            listener = host.listener(listen_path)
+            sockets.append(listener)
+            authority_listener = host.authority_listener(authority_path)
+            sockets.append(authority_listener)
+            control_owner, control = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            sockets += [control_owner, control]
+            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
+            try:
+                owner = host.start_owner(spec["owner"], [str(listener.fileno()), str(authority_path),
+                                                        str(control_owner.fileno()), str(log_fd), "1",
+                                                        str(DEADLINE_MS), str(paths["probe"]), str(marker)],
+                                         (listener.fileno(), control_owner.fileno(), log_fd))
+            finally:
+                os.close(log_fd)
+            control_owner.close()
+            with selectors.DefaultSelector() as selector:
+                selector.register(owner.stdout, selectors.EVENT_READ, "owner")
+                selector.register(control, selectors.EVENT_READ, "control")
+                selector.register(authority_listener, selectors.EVENT_READ, "authority-listen")
+                open_streams = {"owner", "control"}
+                while open_streams & {"owner", "control"}:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError()
+                    for key, _events in selector.select(min(remaining, 0.5)):
+                        tag = key.data
+                        if tag == "owner" or tag == "frontend":
+                            buffer = owner_out if tag == "owner" else frontend_out
+                            chunk = os.read(key.fd, 4096)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                open_streams.discard(tag)
+                            buffer.extend(chunk)
+                            if len(buffer) > MAX_OUTPUT_BYTES:
+                                raise ValueError("output bound")
+                        elif tag == "authority-listen":
+                            connection, _ = authority_listener.accept()
+                            sockets.append(connection)
+                            selector.register(connection, selectors.EVENT_READ, ("authority", connection))
+                        elif isinstance(tag, tuple):
+                            connection = tag[1]
+                            try:
+                                message = connection.recv(1024)
+                            except ConnectionError:
+                                message = b""
+                            if not message:
+                                selector.unregister(connection)
+                                connection.close()
                                 continue
-                            resume = _act(action, host, owner, pids, observed, selector, sockets) and resume
-                        if resume:
-                            control.send(b"C")
-            owner.wait(timeout=max(0.1, deadline - time.monotonic()))
-            killed_owner = any(action == "kill-owner" for _barrier, action in spec["actions"])
-            if spec["mode"] == "sleep" and pids["k"]:
-                # The command reports, then sleeps: wait for its line, then record whether it
-                # outlived O, then end it.
-                while frontend is not None and b"\n" not in frontend_out and "frontend" in open_streams:
+                            try:
+                                pidfd = connection.getsockopt(socket.SOL_SOCKET, 77)
+                            except OSError:
+                                pidfd = None
+                            try:
+                                connection.send(authority.handle(connection.fileno(), message, pidfd))
+                            finally:
+                                if pidfd is not None:
+                                    os.close(pidfd)
+                        elif tag == "control":
+                            try:
+                                message = control.recv(256)
+                            except ConnectionError:
+                                message = b""
+                            if not message:
+                                selector.unregister(control)
+                                open_streams.discard("control")
+                                continue
+                            match = BARRIER_MESSAGE.fullmatch(message)
+                            if not match or match[1].decode() not in BARRIERS:
+                                raise ValueError("bad barrier")
+                            name = match[1].decode()
+                            if int(match[3]):
+                                pids["c"] = int(match[3])
+                            if int(match[4]):
+                                pids["k"] = int(match[4])
+                            resume = True
+                            if any(barrier == name and action == "drop-runner" for barrier, action in spec["actions"]):
+                                # The runner goes away without an answer: O sees end of file on its barrier.
+                                selector.unregister(control)
+                                control.close()
+                                open_streams.discard("control")
+                                continue
+                            if name == "start":
+                                frontend = host.start_frontend(listen_path)
+                                selector.register(frontend.stdout, selectors.EVENT_READ, "frontend")
+                                open_streams.add("frontend")
+                            for barrier, action in spec["actions"]:
+                                if barrier != name:
+                                    continue
+                                resume = _act(action, host, owner, pids, observed, selector, sockets) and resume
+                            if resume:
+                                control.send(b"C")
+                owner.wait(timeout=max(0.1, deadline - time.monotonic()))
+                killed_owner = any(action == "kill-owner" for _barrier, action in spec["actions"])
+                if spec["mode"] == "sleep" and pids["k"]:
+                    # The command reports, then sleeps: wait for its line, then record whether it
+                    # outlived O, then end it.
+                    while frontend is not None and b"\n" not in frontend_out and "frontend" in open_streams:
+                        _drain(selector, frontend_out, open_streams, deadline)
+                    if killed_owner:
+                        observed["commandAliveAfterOwner"] = "yes" if _alive(pids["k"]) else "no"
+                if killed_owner and pids["k"]:
+                    observed["kExit"] = _reap_k(pids["k"], min(deadline, time.monotonic() + 3))
+                if spec["mode"] in ("sleep", "kpause", "khang"):
+                    _end_session(pids["k"])
+                while "frontend" in open_streams:
                     _drain(selector, frontend_out, open_streams, deadline)
-                if killed_owner:
-                    observed["commandAliveAfterOwner"] = "yes" if _alive(pids["k"]) else "no"
-            if killed_owner and pids["k"]:
-                observed["kExit"] = _reap_k(pids["k"], min(deadline, time.monotonic() + 3))
-            if spec["mode"] in ("sleep", "kpause", "khang"):
-                _end_session(pids["k"])
-            while "frontend" in open_streams:
-                _drain(selector, frontend_out, open_streams, deadline)
-        if frontend is not None:
-            frontend.wait(timeout=max(0.1, deadline - time.monotonic()))
-    except (TimeoutError, subprocess.TimeoutExpired):
-        return _failed("TimeoutError", host, owner, frontend, pids, sockets)
-    except (ValueError, OSError):
-        return _failed("CaseFailure", host, owner, frontend, pids, sockets)
-    clean = _retire_all(owner, frontend, pids, sockets)
+            if frontend is not None:
+                frontend.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except (TimeoutError, subprocess.TimeoutExpired):
+            error = "TimeoutError"
+        except (ValueError, OSError):
+            error = "CaseFailure"
+    finally:
+        # Also on a cancel: nothing this case started may outlive it. A second SIGINT, SIGTERM or
+        # SIGHUP waits until the removal ends.
+        with PL.deferred_cancel():
+            clean = _retire_all(owner, frontend, pids, sockets)
+    if error:
+        return {"passed": False, "error_type": error, "cleanupReapedAllFixtureProcesses": clean}
     try:
         start, dispatch = owner_lines(bytes(owner_out))
         observed.update(start)
@@ -584,6 +616,7 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
         observed.update(probe_checks(bytes(frontend_out), identity[0], identity[1], last_cap))
         log = log_path.read_bytes()
         observed["restartLogClean"] = restart_log_clean(log) if log else NA
+        observed["restartLogDetach"] = ("yes" if log.endswith(b" DETACH\n") else "no") if log else NA
     except (ValueError, UnicodeDecodeError):
         return {"passed": False, "error_type": "InvalidReport", "cleanupReapedAllFixtureProcesses": clean}
     observed["ownerExit"] = _exit_category(owner.returncode, owner=True)
@@ -628,11 +661,14 @@ def _act(action, host, owner, pids, observed, selector, sockets):
         if pids["k"]:
             os.kill(pids["k"], signal.SIGKILL)
         return True
+    if action == "drop-runner":
+        return False  # handled by drive_case, which owns the control socket
     if action == "kill-authority":
         for item in list(sockets):
             if item.family == socket.AF_UNIX and item.type == socket.SOCK_SEQPACKET and item.fileno() >= 0:
                 with contextlib.suppress(KeyError, ValueError):
-                    if isinstance(selector.get_key(item).data, tuple) or selector.get_key(item).data == "authority-listen":
+                    data = selector.get_key(item).data
+                    if isinstance(data, tuple) or data == "authority-listen":
                         selector.unregister(item)
                         item.close()
         return True
@@ -672,15 +708,35 @@ def _end_session(k_pid):
             os.kill(pid, signal.SIGKILL)
 
 
+def _reap(pid, deadline):
+    """Reaps pid if it is (or becomes) this runner's child; True once it is gone, before the deadline.
+
+    A process that is not this runner's child counts as gone when /proc no longer shows it alive."""
+    while True:
+        try:
+            waited, _status = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                return True
+        except ChildProcessError:
+            if not _alive(pid):
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
 def _retire_all(owner, frontend, pids, sockets):
+    """O first (no new K after it), then the command's session, then C; every process is reaped."""
     clean = True
-    _end_session(pids["k"])
+    for process in (owner, frontend):
+        if process is not None and process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+        if process is owner:
+            _end_session(pids["k"])
     for process in (owner, frontend):
         if process is None:
             continue
-        if process.poll() is None:
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
         try:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
@@ -688,20 +744,11 @@ def _retire_all(owner, frontend, pids, sockets):
         if process.stdout is not None:
             process.stdout.close()
     if pids["k"]:
-        with contextlib.suppress(ChildProcessError):
-            os.waitpid(pids["k"], os.WNOHANG)
-        deadline = time.monotonic() + 3
-        while _alive(pids["k"]) and time.monotonic() < deadline:
-            time.sleep(0.01)
-        clean = clean and not _alive(pids["k"])
+        _end_session(pids["k"])
+        clean = _reap(pids["k"], time.monotonic() + 3) and clean
     for item in sockets:
         item.close()
     return clean
-
-
-def _failed(error, host, owner, frontend, pids, sockets):
-    clean = _retire_all(owner, frontend, pids, sockets)
-    return {"passed": False, "error_type": error, "cleanupReapedAllFixtureProcesses": clean}
 
 
 # --- Root host -------------------------------------------------------------------------------
@@ -731,6 +778,11 @@ class Run(Host):
         self.setpriv = shutil.which("setpriv", path=PL.TOOL_ENV["PATH"]) or "/usr/bin/setpriv"
 
     def setup(self):
+        self.groups = os.getgrouplist(self.operator.pw_name, self.operator.pw_gid)
+        if len(self.groups) > MAX_GROUPS:
+            sys.stderr.write(f"The operator account has {len(self.groups)} groups; the owner fixture takes at most "
+                             f"{MAX_GROUPS}. Run from an account with fewer groups.\n")
+            raise RuntimeError("too many operator groups")
         os.mkdir(self.base, 0o755)
         self.base_created = True
         os.chmod(self.base, 0o755)
@@ -754,7 +806,6 @@ class Run(Host):
         markers = self.base / "markers"
         os.mkdir(markers, 0o700)
         os.chown(markers, self.operator.pw_uid, self.operator.pw_gid)
-        self.groups = os.getgrouplist(self.operator.pw_name, self.operator.pw_gid)
         self.paths = {"cases": self.base / "cases", "markers": markers, "probe": self.base / "run" / "probe"}
         operator_groups = set(self.groups)
         return {"serviceIdentityUnprivileged": True,
@@ -763,6 +814,12 @@ class Run(Host):
 
     def identity(self):
         return self.operator.pw_uid, self.operator.pw_gid, self.groups
+
+    def listener(self, path):
+        """Only the operator's primary group reaches O's socket; C runs with it."""
+        listener = Host.listener(self, path)
+        os.chown(path, 0, self.operator.pw_gid)
+        return listener
 
     def authority_listener(self, path):
         """Only O's service group reaches the authority."""
@@ -859,12 +916,22 @@ class Run(Host):
                 "sysctlsRestored": sysctls}
 
 
-def _kill_user(uid):
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit():
-            with contextlib.suppress(OSError):
-                if entry.stat().st_uid == uid:
-                    os.kill(int(entry.name), signal.SIGKILL)
+def _kill_user(uid, proc=Path("/proc")):
+    """SIGKILL every process whose real, effective or saved UID is uid.
+
+    /proc/<pid> itself belongs to Root for a process that is not dumpable (O after setpriv), so the
+    owner of the directory does not name the account; the Uid: line of the status file does."""
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = (entry / "status").read_text()
+        except OSError:
+            continue
+        match = re.search(r"^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)", text, re.MULTILINE)
+        if match and uid in (int(match[1]), int(match[2]), int(match[3])):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(int(entry.name), signal.SIGKILL)
 
 
 def last_capability():

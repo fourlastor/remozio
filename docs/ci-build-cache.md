@@ -37,7 +37,7 @@ into one of those inputs, or back, still requires a cold build. A future build t
 consumes `docs/` must revisit this policy.
 
 The second narrow exemption is the helper's explicit `LINUX_ONLY_INPUT_MODES`
-table: 68 existing files in the Linux approval-command, composed caller-command,
+table of 84 entries: 69 existing files in the Linux approval-command, composed caller-command,
 OS-capture, pairing-peer, native-TPM/TLS, caller, caller-monitor, storage-lease, placement-validator,
 protected-launch, monitor-confinement, single-owner and TPM/TLS experiments, plus their 15 dedicated Linux
 check/coordinator/runner scripts.

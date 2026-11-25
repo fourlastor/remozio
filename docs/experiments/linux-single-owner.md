@@ -97,9 +97,11 @@ Without the flag the case reports `not-run` and no sysctl changes.
 | `kill-owner-after-go` | Root kills O at `after-go` | C killed, marker at most 1 |
 | `kill-owner-after-s6` | Root kills O at `after-s6` | C killed, the command keeps running |
 | `kill-authority-after-s1` | The runner closes O's authority connection at `s1` | O holds the permit, the command starts once, no report |
+| `runner-lost-before-go` | The runner stops answering at `before-go` | O kills K, `notStarted`, no `PTRACE_DETACH`, O exits and C dies with it |
+| `runner-lost-after-go` | The runner stops answering at `after-go` | `dispatched` once, no `PTRACE_DETACH`, O exits and C dies with it |
 | `owner-thread-refused` | O built with a second thread | `ownerThreads` before the fork, marker 0 |
-| `owner-without-capabilities` | O started with no ambient capabilities (Root run only) | O refuses at start |
-| `caller-attaches-to-k` | `PTRACE_ATTACH` from the caller to K before and after the go byte (`--allow-sysctl`) | `EPERM` both times |
+| `owner-without-capabilities` | O started with no ambient capabilities; Root run only | O refuses at start |
+| `caller-attaches-to-k` | `PTRACE_ATTACH` from the caller to K before and after the go byte; `--allow-sysctl` only | `EPERM` both times |
 
 Every case records O's exit, C's exit, the marker count, the authority's
 `beginDispatch` and outcome, and whether O's restart log shows a restart call
@@ -108,8 +110,20 @@ unit, AppArmor, the `sudo` child and the composed fixture's race case) are PR2.
 
 ## Implementation notes
 
-- O ends its dispatch with `PTRACE_DETACH` after S6 when C is still there. The
-  post-dispatch contract is not part of PR1.
+- O ends its dispatch with `PTRACE_DETACH` after S6 when C is still there and the
+  runner answered the `after-s6` barrier. The post-dispatch contract is not part of
+  PR1.
+- If the runner does not answer a barrier, O is no longer supervised. Before the go
+  byte it kills K and reports `notStarted`. After the go byte it cannot stop the
+  command. In both cases it makes no further restart call and exits, so C dies with
+  it through `PTRACE_O_EXITKILL`.
+- Every path of a dispatch ends at one cleanup step. It sends the outcome once when a
+  permit exists and closes every descriptor that the dispatch opened.
+- O's socket for C is mode `0660` and belongs to the operator's primary group, so
+  only that group can connect. The permit carries at most 64 supplementary groups;
+  the runner refuses an operator account with more before it changes anything.
+- A cancel (Ctrl-C, `SIGTERM`, `SIGHUP`) during a case still kills and reaps O, C,
+  K and the command, also when the command runs as the operator account.
 - The S6 end-of-file row checks `/proc/<pid>/exe` of K before it accepts "still
   alive" as `dispatched`, as the design now states. Without that check a K that
   dies between the go byte and `execve` could be read as `dispatched`.

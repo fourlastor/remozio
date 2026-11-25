@@ -109,6 +109,7 @@ LINUX_ONLY_INPUT_MODES = {
     'experiments/linux-protected-launch/attacker.c': 0o644,
     'experiments/linux-protected-launch/frontend.c': 0o644,
     'experiments/linux-protected-launch/monitor.c': 0o644,
+    'experiments/linux-single-owner/README.md': 0o644,
     'experiments/linux-single-owner/frontend.c': 0o644,
     'experiments/linux-single-owner/owner.c': 0o644,
     'experiments/linux-single-owner/probe.c': 0o644,

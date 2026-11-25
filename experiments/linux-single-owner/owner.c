@@ -188,13 +188,22 @@ static long traced(int dispatch, const char *name, enum __ptrace_request request
     return ptrace(request, pid, 0, data);
 }
 
-/* A named pause. The runner may act (kill, signal, inspect) and then answers 'C'. */
+/* A named pause. The runner may act (kill, signal, inspect) and then answers 'C'.
+ * If the runner does not answer, O is no longer supervised: every later barrier fails at
+ * once, O starts no command, makes no restart call, and exits after the dispatch. */
+static int runner_lost = 0;
+
 static int barrier(const char *name, int dispatch, pid_t c_pid, pid_t k_pid) {
+    if (runner_lost) return -1;
     char message[160];
+    char reply = 0;
     int n = snprintf(message, sizeof message, "BARRIER %s %d %d %d", name, dispatch, (int)c_pid, (int)k_pid);
-    if (n <= 0 || send(control_fd, message, (size_t)n, MSG_NOSIGNAL) != n) return -1;
-    char reply;
-    return recv(control_fd, &reply, 1, 0) == 1 && reply == 'C' ? 0 : -1;
+    if (n <= 0 || send(control_fd, message, (size_t)n, MSG_NOSIGNAL) != n || recv(control_fd, &reply, 1, 0) != 1 ||
+        reply != 'C') {
+        runner_lost = 1;
+        return -1;
+    }
+    return 0;
 }
 
 /* ---------------------------------------------------------------- O's own state */
@@ -556,14 +565,27 @@ static const char *classify(int status_read, int k_pidfd, pid_t k_pid, int deadl
     }
 }
 
+static void close_fd(int *fd) {
+    if (*fd >= 0) close(*fd);
+    *fd = -1;
+}
+
+/* One dispatch. Every path ends at done: the outcome goes to the authority once when a
+ * permit exists, the report goes to the runner, and every descriptor is closed. */
 static void dispatch_one(int dispatch, int listen_fd, int authority, int deadline_ms, const char *command,
                          const char *marker) {
     struct result r = {"no", "no", "no", "refused", "none", "no", "no", "no", "no"};
+    int conn = -1, c_pidfd = -1, cwd = -1, go_write = -1, status_read = -1, k_pidfd = -1;
+    int streams[3] = {-1, -1, -1};
+    pid_t c_pid = 0, k_pid = 0;
+    int have_permit = 0, reached_s6 = 0;
+    struct permit permit;
+    char message_text[256], reply[1024];
+
     struct pollfd ready = {.fd = listen_fd, .events = POLLIN};
-    if (poll(&ready, 1, 30000) != 1) { report(dispatch, &r); return; }
-    int conn = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
-    if (conn < 0) { report(dispatch, &r); return; }
-    int c_pidfd = -1;
+    if (poll(&ready, 1, 30000) != 1) goto done;
+    conn = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+    if (conn < 0) goto done;
     socklen_t length = sizeof c_pidfd;
     struct ucred cred;
     socklen_t cred_length = sizeof cred;
@@ -572,151 +594,170 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
     struct iovec iov = {hello, sizeof hello - 1};
     struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control,
                              .msg_controllen = sizeof control};
-    int streams[3] = {-1, -1, -1};
     ssize_t got = getsockopt(conn, SOL_SOCKET, SO_PEERPIDFD, &c_pidfd, &length) == 0 &&
                           getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred, &cred_length) == 0
                       ? recvmsg(conn, &message, MSG_CMSG_CLOEXEC)
                       : -1;
-    struct cmsghdr *header = got == 7 ? CMSG_FIRSTHDR(&message) : NULL;
-    if (!header || header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS ||
-        header->cmsg_len != CMSG_LEN(3 * sizeof(int)) || memcmp(hello, "RMZSO1\n", 7) ||
-        (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC))) {
-        report(dispatch, &r);
-        close(conn);
-        return;
-    }
-    memcpy(streams, CMSG_DATA(header), sizeof streams);
-    pid_t c_pid = cred.pid;
+    struct cmsghdr *header = got > 0 ? CMSG_FIRSTHDR(&message) : NULL;
+    if (header && header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
+        header->cmsg_len == CMSG_LEN(3 * sizeof(int)))
+        memcpy(streams, CMSG_DATA(header), sizeof streams); /* kept so that done: closes them */
+    if (got != 7 || streams[2] < 0 || memcmp(hello, "RMZSO1\n", 7) ||
+        (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)))
+        goto done;
+    c_pid = cred.pid;
     long options = PTRACE_O_EXITKILL | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK |
                    PTRACE_O_TRACEEXEC;
     int status = 0;
     if (traced(dispatch, "SEIZE", PTRACE_SEIZE, c_pid, options) != 0 ||
         traced(dispatch, "INTERRUPT", PTRACE_INTERRUPT, c_pid, 0) != 0 ||
-        waitpid(c_pid, &status, __WALL) != c_pid || !WIFSTOPPED(status) || (status >> 16) != PTRACE_EVENT_STOP) {
-        report(dispatch, &r);
-        close(conn);
-        return;
-    }
+        waitpid(c_pid, &status, __WALL) != c_pid || !WIFSTOPPED(status) || (status >> 16) != PTRACE_EVENT_STOP)
+        goto done;
     char path[64];
     snprintf(path, sizeof path, "/proc/%d/cwd", (int)c_pid);
-    int cwd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    cwd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
     struct inherited inherited;
-    char nonce[33], message_text[256], reply[1024];
+    char nonce[33];
     int admitted = cwd >= 0 && in_stop(c_pid) && read_inherited(c_pid, &inherited) == 0 && random_hex(nonce) == 0;
     r.admitted = admitted ? "yes" : "no";
-    struct permit permit;
     snprintf(message_text, sizeof message_text, "SUBMIT %s %d", admitted ? nonce : "-", (int)c_pid);
-    if (!admitted || ask(authority, message_text, reply, sizeof reply) || parse_permit(reply, &permit)) {
-        report(dispatch, &r);
-        close(conn); /* C dies with O or stays stopped until O exits */
-        return;
-    }
+    if (!admitted || ask(authority, message_text, reply, sizeof reply) || parse_permit(reply, &permit))
+        goto done; /* C stays stopped until O exits, then dies with it */
+    have_permit = 1;
     r.permit = "yes";
-    barrier("s1", dispatch, c_pid, 0);
+    r.result = "notStarted";
+    if (barrier("s1", dispatch, c_pid, 0) != 0) goto done;
 
     /* S2: the final check, with the stop held. */
-    if (!in_stop(c_pid)) { report(dispatch, &r); close(conn); return; }
+    if (!in_stop(c_pid)) {
+        r.result = "refused";
+        r.lost = "yes";
+        goto done;
+    }
     r.final_check = "yes";
     if (own_threads() != 1) {
         r.result = "ownerThreads";
-        snprintf(message_text, sizeof message_text, "OUTCOME %s notStarted no", permit.token);
-        r.reported = ask(authority, message_text, reply, sizeof reply) == 0 && strcmp(reply, "OK") == 0 ? "yes" : "no";
-        report(dispatch, &r);
-        close(conn);
-        return;
+        goto done;
     }
 
     /* S3: the prepared child. */
-    int go[2], state_pipe[2];
-    if (pipe2(go, O_CLOEXEC) != 0 || pipe2(state_pipe, O_CLOEXEC) != 0) { report(dispatch, &r); return; }
+    int go[2], state_pipe[2] = {-1, -1};
+    if (pipe2(go, O_CLOEXEC) != 0) goto done;
+    if (pipe2(state_pipe, O_CLOEXEC) != 0) {
+        close(go[0]);
+        close(go[1]);
+        goto done;
+    }
     struct child_plan plan = {.streams = {streams[0], streams[1], streams[2]}, .cwd = cwd, .go_read = go[0],
                               .status_write = state_pipe[1], .permit = permit, .inherited = inherited,
                               .owner_uid = getuid(), .command = command, .marker = marker};
-    pid_t k_pid = fork();
+    k_pid = fork();
     if (k_pid == 0) run_child(&plan);
     close(go[0]);
     close(state_pipe[1]);
-    for (int i = 0; i < 3; i++) close(streams[i]);
-    close(cwd);
-    if (k_pid < 0) { report(dispatch, &r); return; }
-    int k_pidfd = (int)syscall(SYS_pidfd_open, k_pid, 0);
-    barrier("after-fork", dispatch, c_pid, k_pid);
+    go_write = go[1];
+    status_read = state_pipe[0];
+    for (int i = 0; i < 3; i++) close_fd(&streams[i]);
+    close_fd(&cwd);
+    if (k_pid < 0) {
+        k_pid = 0;
+        goto done;
+    }
+    k_pidfd = (int)syscall(SYS_pidfd_open, k_pid, 0);
+    if (k_pidfd < 0) goto done; /* K then reads end of file on the go pipe and exits */
+    if (barrier("after-fork", dispatch, c_pid, k_pid) != 0) {
+        kill_k(k_pidfd);
+        goto done;
+    }
 
     long long deadline = now_ms() + deadline_ms;
     int k_ready = 0;
-    struct pollfd watch = {.fd = state_pipe[0], .events = POLLIN};
+    struct pollfd watch = {.fd = status_read, .events = POLLIN};
     while (!k_ready) {
         long long left = deadline - now_ms();
         if (left <= 0) break;
         if (poll(&watch, 1, (int)left) == 1) {
             char byte;
-            k_ready = read(state_pipe[0], &byte, 1) == 1 && byte == 'R';
+            k_ready = read(status_read, &byte, 1) == 1 && byte == 'R';
             if (!k_ready) break; /* K ended before readiness */
         }
     }
-    int not_started = !k_ready;
-    if (k_ready) {
-        barrier("k-ready", dispatch, c_pid, k_pid);
-        /* K must sleep in its read of the go pipe; a stopped K waits for the deadline. */
-        for (;;) {
-            char state = '?';
-            int code;
-            if (k_outcome(k_pidfd, &code) != 0 || k_state(k_pid, &state) != 0) { not_started = 1; break; }
-            if (state == 'S') break;
-            if (now_ms() >= deadline) {
-                kill_k(k_pidfd);
-                r.deadline_kill = "yes";
-                not_started = 1;
-                break;
-            }
-            struct timespec pause_time = {0, 10 * 1000 * 1000};
-            nanosleep(&pause_time, NULL);
+    if (!k_ready) {
+        if (now_ms() >= deadline) {
+            kill_k(k_pidfd);
+            r.deadline_kill = "yes";
         }
-    } else if (now_ms() >= deadline) {
+        reached_s6 = 1;
+        goto done;
+    }
+    if (barrier("k-ready", dispatch, c_pid, k_pid) != 0) {
         kill_k(k_pidfd);
-        r.deadline_kill = "yes";
+        goto done;
     }
-    if (!not_started) {
-        barrier("before-go", dispatch, c_pid, k_pid);
-        /* The last check of C, immediately before the go byte. */
-        if (!in_stop(c_pid)) {
-            kill_k(k_pidfd); /* C left the stop before the go byte: no command */
-            close(go[1]);
-            close(state_pipe[0]);
-            r.result = "refused";
-            r.lost = "yes";
-            snprintf(message_text, sizeof message_text, "OUTCOME %s refused yes", permit.token);
-            r.reported =
-                ask(authority, message_text, reply, sizeof reply) == 0 && strcmp(reply, "OK") == 0 ? "yes" : "no";
-            report(dispatch, &r);
-            close(conn);
-            return;
+    /* K must sleep in its read of the go pipe; a stopped K waits for the deadline. */
+    for (;;) {
+        char state = '?';
+        int code;
+        if (k_outcome(k_pidfd, &code) != 0 || k_state(k_pid, &state) != 0) {
+            reached_s6 = 1;
+            goto done;
         }
-        barrier("after-check", dispatch, c_pid, k_pid);
-        char byte = GO_BYTE;
-        log_event(dispatch, "GO");
-        if (write(go[1], &byte, 1) == 1) r.go = "yes";
-        else not_started = 1; /* EPIPE: K is gone (SIGPIPE is ignored) */
+        if (state == 'S') break;
+        if (now_ms() >= deadline) {
+            kill_k(k_pidfd);
+            r.deadline_kill = "yes";
+            reached_s6 = 1;
+            goto done;
+        }
+        struct timespec pause_time = {0, 10 * 1000 * 1000};
+        nanosleep(&pause_time, NULL);
     }
-    close(go[1]);
+    if (barrier("before-go", dispatch, c_pid, k_pid) != 0) {
+        kill_k(k_pidfd);
+        goto done;
+    }
+    /* The last check of C, immediately before the go byte. */
+    if (!in_stop(c_pid)) {
+        kill_k(k_pidfd); /* C left the stop before the go byte: no command */
+        r.result = "refused";
+        r.lost = "yes";
+        goto done;
+    }
+    if (barrier("after-check", dispatch, c_pid, k_pid) != 0) {
+        kill_k(k_pidfd);
+        goto done;
+    }
+    char byte = GO_BYTE;
+    log_event(dispatch, "GO");
+    int written = write(go_write, &byte, 1) == 1;
+    close_fd(&go_write);
+    reached_s6 = 1;
+    if (!written) goto done; /* EPIPE: K is gone (SIGPIPE is ignored) */
+    r.go = "yes";
+    /* After the go byte O cannot stop the command; a lost runner only skips the pause. */
+    barrier("after-go", dispatch, c_pid, k_pid);
+    r.result = classify(status_read, k_pidfd, k_pid, deadline_ms, dispatch, c_pid, &r.exec_errno);
+    if (!in_stop(c_pid)) r.lost = "yes";
 
-    if (not_started) {
-        r.result = "notStarted";
-    } else {
-        barrier("after-go", dispatch, c_pid, k_pid);
-        r.result = classify(state_pipe[0], k_pidfd, k_pid, deadline_ms, dispatch, c_pid, &r.exec_errno);
-        if (!in_stop(c_pid)) r.lost = "yes";
+done:
+    close_fd(&go_write);
+    close_fd(&status_read);
+    if (have_permit) {
+        /* The authority knows no ownerThreads: for it the dispatch did not start. */
+        const char *outcome = strcmp(r.result, "ownerThreads") == 0 ? "notStarted" : r.result;
+        snprintf(message_text, sizeof message_text, "OUTCOME %s %s %s", permit.token, outcome, r.lost);
+        r.reported = ask(authority, message_text, reply, sizeof reply) == 0 && strcmp(reply, "OK") == 0 ? "yes" : "no";
     }
-    close(state_pipe[0]);
-    snprintf(message_text, sizeof message_text, "OUTCOME %s %s %s", permit.token, r.result, r.lost);
-    r.reported = ask(authority, message_text, reply, sizeof reply) == 0 && strcmp(reply, "OK") == 0 ? "yes" : "no";
     report(dispatch, &r);
-    barrier("after-s6", dispatch, c_pid, k_pid);
-    /* The post-dispatch contract is out of scope: O lets C go and closes its connection. */
-    if (strcmp(r.lost, "no") == 0) traced(dispatch, "DETACH", PTRACE_DETACH, c_pid, 0);
-    close(conn);
-    close(c_pidfd);
-    if (k_pidfd >= 0) close(k_pidfd);
+    /* The post-dispatch contract is out of scope: with the runner present, O lets C go after S6.
+     * Without the runner, or when the dispatch ended early, C stays stopped and dies with O. */
+    if (reached_s6 && barrier("after-s6", dispatch, c_pid, k_pid) == 0 && strcmp(r.lost, "no") == 0)
+        traced(dispatch, "DETACH", PTRACE_DETACH, c_pid, 0);
+    for (int i = 0; i < 3; i++) close_fd(&streams[i]);
+    close_fd(&cwd);
+    close_fd(&conn);
+    close_fd(&c_pidfd);
+    close_fd(&k_pidfd);
 }
 
 #ifdef RMZSO_TEST_THREAD
@@ -759,8 +800,7 @@ int main(int argc, char **argv) {
     out_line(text);
     if (!caps || !accepted) return 3;
     if (barrier("start", 0, 0, 0) != 0) return 3;
-    for (uint32_t d = 1; d <= dispatches; d++)
+    for (uint32_t d = 1; d <= dispatches && !runner_lost; d++)
         dispatch_one((int)d, (int)listen_fd, authority, (int)deadline_ms, argv[7], argv[8]);
-    barrier("end", 0, 0, 0);
-    return 0;
+    return barrier("end", 0, 0, 0) == 0 ? 0 : 3;
 }
