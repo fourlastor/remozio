@@ -17,6 +17,9 @@ public final class PreparationIntentStore {
     enum InitialRuntimeRead: Hashable { case readTransaction, writeTransaction, runtime, frame, activation, policyScan, policyMarker, sharedImport, protectedRows, importInputs }
     // Test-only, never assigned in Sources. The observer carries read kinds, without payload or authority.
     var observeStoreRead: ((InitialRuntimeRead) -> Void)?
+    enum StableFrameCacheEvent: Hashable { case hit, miss }
+    // Test-only, never assigned in Sources. Reports whether a stable frame came from the read-transaction cache.
+    var observeStableFrameCache: ((StableFrameCacheEvent) -> Void)?
     public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
@@ -28,6 +31,17 @@ public final class PreparationIntentStore {
     /// which no other store sees; the store reuses it for every epoch archive it loads, for its whole life.
     private let epochCaches = PreparationEpochDecodeCaches.unshared()
     private var active = false
+    /// Incremented at every successful BEGIN. Part of the stable frame cache key, so no entry survives into another transaction.
+    private var transactionSerial: UInt64 = 0
+    private var transactionWrites = false
+    /// One stable frame for the current read transaction on this connection only. See `cachedStableMachineUpdateFrame`.
+    /// `external` holds every shared-import capture the load made (the installationID passed and the external digest it
+    /// produced). That state lives outside this SQLite file, so the SHARED lock does not cover it; each hit recaptures it.
+    private var stableFrameCache: (serial: UInt64, changes: Int64, candidate: Data, frame: StableMachineUpdateFrame,
+        external: [StableFrameExternalCapture])?
+    private struct StableFrameExternalCapture: Equatable { let installationID: Data?; let digest: Data }
+    /// Non-nil only while `loadStableMachineUpdateFrame` runs an uncached load; `machineEpochSourceDigest` appends to it.
+    private var stableFrameExternalRecorder: [StableFrameExternalCapture]?
     private var unavailable = false
     private var retainedSetupPromotionAuthorization: RetainedSetupPromotionAuthorization?
     private var stableAccountReservationAuthorization: StableAccountReservationAuthorization?
@@ -3672,6 +3686,29 @@ public final class PreparationIntentStore {
         try transaction(write: false) { try loadStableMachineUpdate(candidate: candidate) }
     }
 
+    #if DEBUG
+    /// Test-only, never called in Sources. Runs `body` inside one ordinary read transaction on this connection so tests
+    /// can load the stable frame repeatedly, run a statement on this same connection, and read the journal mode.
+    struct StableFrameCacheProbe {
+        let load: (SignedReleaseEvidence) throws -> MachineUpdateStableReleaseSnapshot
+        let execute: (String) throws -> Void
+        let journalMode: () throws -> String
+    }
+    func withStableFrameCacheProbe<T>(_ body: (StableFrameCacheProbe) throws -> T) throws -> T {
+        try transaction(write: false) {
+            try body(.init(load: { try self.loadStableMachineUpdate(candidate: $0) }, execute: { try self.exec($0) },
+                journalMode: {
+                    try self.statement("PRAGMA journal_mode") { row in
+                        guard try self.step(row) == SQLITE_ROW, let text = sqlite3_column_text(row, 0) else {
+                            throw PreparationStoreError.incompatibleStore
+                        }
+                        return String(cString: text)
+                    }
+                }))
+        }
+    }
+    #endif
+
     /// Captures the exact account rows and sealed release in one read transaction.
     func stableRuntimeSource(candidate: SignedReleaseEvidence) throws -> MachineUpdateStableRuntimeSource {
         try transaction(write: false) { try loadStableRuntimeSource(candidate: candidate) }
@@ -5709,11 +5746,61 @@ public final class PreparationIntentStore {
         try loadStableMachineUpdateFrame(candidate: candidate).snapshot
     }
 
-    private func loadStableMachineUpdateFrame(candidate release: SignedReleaseEvidence)
-        throws -> (snapshot: MachineUpdateStableReleaseSnapshot, completionIntents: [MachineUpdateRetainedSetupCompletionIntentRecord],
-            promotionIntents: [MachineUpdateRetainedSetupPromotionIntentRecord], readyRecords: [MachineUpdateRetainedSetupPromotionReadyRecord],
-            maintenanceWindows: [RuntimeMaintenanceWindowRecord]) {
+    private typealias StableMachineUpdateFrame = (snapshot: MachineUpdateStableReleaseSnapshot,
+        completionIntents: [MachineUpdateRetainedSetupCompletionIntentRecord],
+        promotionIntents: [MachineUpdateRetainedSetupPromotionIntentRecord], readyRecords: [MachineUpdateRetainedSetupPromotionReadyRecord],
+        maintenanceWindows: [RuntimeMaintenanceWindowRecord])
+
+    /// Returns the frame already loaded in this read transaction, or nil.
+    ///
+    /// Invariant: a read transaction holds a SHARED lock under journal_mode=DELETE (or pins one snapshot under WAL), so no
+    /// other connection's commit can appear inside it. Only this connection can change what the frame reads, and every such
+    /// write moves `sqlite3_total_changes64`. A hit therefore requires: a read transaction (`write: false`), the connection
+    /// still inside it (`sqlite3_get_autocommit == 0`), the same transaction serial, unchanged `total_changes64`, and the
+    /// exact candidate key. Every condition is checked again on each hit. Errors are never stored.
+    ///
+    /// The lock does not cover the shared-import journal and relay directory, which the frame's `currentRowsDigest` pins
+    /// through `machineEpochSourceDigest`. So every hit reruns the same `sharedImportCompatibilitySnapshot(installationID:)`
+    /// (lease validation or the read borrow, then a fresh capture) and compares the external digest. A different digest
+    /// is a miss; an error propagates and is never a hit.
+    private func cachedStableMachineUpdateFrame(candidateKey: Data?) throws -> StableMachineUpdateFrame? {
+        guard let candidateKey, let cached = stableFrameCache, active, !transactionWrites, let db,
+              sqlite3_get_autocommit(db) == 0, sqlite3_txn_state(db, nil) == SQLITE_TXN_READ, cached.serial == transactionSerial,
+              cached.changes == sqlite3_total_changes64(db), cached.candidate == candidateKey else { return nil }
+        do {
+            for capture in cached.external {
+                let sharedImport = try sharedImportCompatibilitySnapshot(installationID: capture.installationID)
+                guard try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport) == capture.digest else {
+                    stableFrameCache = nil; return nil
+                }
+            }
+        } catch { stableFrameCache = nil; throw error }
+        return cached.frame
+    }
+
+    private func loadStableMachineUpdateFrame(candidate release: SignedReleaseEvidence) throws -> StableMachineUpdateFrame {
+        let key = try? PreparationEpochDecodeCaches.candidateKey(release)
+        if let cached = try cachedStableMachineUpdateFrame(candidateKey: key) {
+            observeStableFrameCache?(.hit)
+            return cached
+        }
+        // Read-count hook: counts only real loads. A cache hit returns above without calling it.
+        // To count hits too, move this line back above the cache check (and restore `.frame == 6` / `12` in the tests).
         observeStoreRead?(.frame)
+        observeStableFrameCache?(.miss)
+        let outer = stableFrameExternalRecorder
+        stableFrameExternalRecorder = []
+        defer { stableFrameExternalRecorder = outer }
+        let frame = try loadUncachedStableMachineUpdateFrame(candidate: release)
+        let external = stableFrameExternalRecorder ?? []
+        if let key, !external.isEmpty, active, !transactionWrites, let db, sqlite3_get_autocommit(db) == 0,
+           sqlite3_txn_state(db, nil) == SQLITE_TXN_READ {
+            stableFrameCache = (transactionSerial, sqlite3_total_changes64(db), key, frame, external)
+        }
+        return frame
+    }
+
+    private func loadUncachedStableMachineUpdateFrame(candidate release: SignedReleaseEvidence) throws -> StableMachineUpdateFrame {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
         guard (24...RuntimeMaintenanceWindowStorage.schemaVersion).contains(schema) else {
@@ -6987,7 +7074,9 @@ public final class PreparationIntentStore {
         var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochSource/v1\0".utf8))
         hash.update(data: candidateGeneration(UInt64(digestSchema)))
         let sharedImport = try sharedImportCompatibilitySnapshot(installationID: installationID)
-        hash.update(data: try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport))
+        let external = try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport)
+        stableFrameExternalRecorder?.append(.init(installationID: installationID, digest: external))
+        hash.update(data: external)
         for table in tables where table != "machine_update_configuration_epoch_v1" &&
             table != "machine_update_activation_v1" && table != "machine_update_backend_epoch_v1" &&
             table != "machine_update_completion_intent_v1" && table != "machine_update_completion_publication_v1" &&
@@ -7375,7 +7464,9 @@ public final class PreparationIntentStore {
             if Self.isSQLiteCorruption(error) { unavailable = true; shutdown() }
             throw error
         }
-        active = true; defer { active = false }
+        transactionSerial &+= 1; transactionWrites = write; stableFrameCache = nil
+        // Clears the frame cache after COMMIT, ROLLBACK or a thrown error.
+        active = true; defer { active = false; stableFrameCache = nil }
         observeStoreRead?(write ? .writeTransaction : .readTransaction)
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
@@ -7528,6 +7619,7 @@ public final class PreparationIntentStore {
         return try body(row)
     }
     private func shutdown() {
+        stableFrameCache = nil
         if let db { _ = sqlite3_close_v2(db) }
         db = nil; lease.close()
     }
