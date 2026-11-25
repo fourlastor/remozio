@@ -541,6 +541,57 @@ class BuildCacheTests(unittest.TestCase):
         self.assertEqual(self.source.read_text(), 'print(2)\n')
         self.assertEqual(self.source.stat().st_mtime_ns, stamp)
 
+    def test_a_restored_compatible_entry_is_not_saved_again(self):
+        self.key()
+        self.output()
+        first = self.operation('save')
+        self.assertTrue(first['save_entry'])
+        self.assertEqual(first['reason'], 'new-generation')
+        # A later commit changes a source file: the content key differs, but the identity does not.
+        self.source.write_text('print(2)\n')
+        self.key()
+        self.assertEqual(self.operation('restore')['result'], 'restored')
+        second = self.operation('save')
+        self.assertTrue(second['saved_manifest'])
+        self.assertFalse(second['save_entry'])
+        self.assertEqual(second['reason'], 'compatible-entry-restored')
+
+    def test_a_miss_invalid_manifest_or_cold_rebuild_saves_a_new_generation(self):
+        manifest = self.root / '.build/ci-cache/interop.json'
+        self.key()
+        self.assertEqual(self.operation('restore')['result'], 'cold-missing-or-invalid-manifest')
+        self.assertTrue(self.operation('save')['save_entry'])
+        # A file-set change outside package sources forces a cold build, so the restored entry is no use.
+        added = self.root / 'config.json'
+        added.write_text('{}')
+        self.track(added)
+        self.key()
+        self.assertEqual(self.operation('restore')['result'], 'cold-input-change')
+        self.assertTrue(self.operation('save')['save_entry'])
+        manifest.write_text('{')
+        self.key()
+        self.operation('restore')
+        self.assertTrue(self.operation('save')['save_entry'])
+
+    def test_a_save_without_a_recorded_restore_saves_and_mutation_never_saves(self):
+        self.key()
+        self.assertTrue(self.operation('save')['save_entry'])
+        self.key()
+        self.operation('restore')
+        self.source.write_text('print(3)\n')
+        result = self.operation('save')
+        self.assertFalse(result['save_entry'])
+        self.assertEqual(result['reason'], 'inputs-changed-during-checks')
+
+    def test_the_save_outputs_name_the_family_to_replace(self):
+        self.key()
+        github_output = self.root / 'github-output'
+        with patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': ''}), contextlib.redirect_stdout(io.StringIO()):
+            CACHE.run(argparse.Namespace(operation='save', scope='interop', github_output=github_output), root=self.root)
+        text = github_output.read_text()
+        self.assertIn('save<<REMOZIO_CACHE_OUTPUT\ntrue\n', text)
+        self.assertIn('family<<REMOZIO_CACHE_OUTPUT\nmac-build-v1-interop-\n', text)
+
     def test_system_keychain_output_root_is_cached_only_for_experiments(self):
         name = 'experiments/system-keychain/.build'
         self.assertIn(name, CACHE.CACHE_PATHS['experiments'])

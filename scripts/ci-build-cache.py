@@ -341,14 +341,25 @@ def run(args, root=ROOT):
             except (OSError, ValueError, KeyError, TypeError, OverflowError):
                 clear_outputs(root, scope)
                 report['result'] = 'cold-missing-or-invalid-manifest'
+            # The save step reads this to decide whether the entry needs a new generation.
+            context['restore_result'] = report['result']
+            write_json(context_path, context)
         else:
             inputs = capture_inputs(root)
             stable = content_inventory(inputs) == content_inventory(context['inputs'])
             if stable:
                 write_json(manifest_path, {'version': VERSION, 'identity': context['identity'], 'inputs': inputs})
-            outputs(args.github_output, {'save': str(stable).lower()})
-            report = {'operation': 'save', 'scope': scope, 'saved_manifest': stable,
-                      'reason': 'stable-inputs' if stable else 'inputs-changed-during-checks'}
+            # The content half of the key hashes every tracked file, so it changes on every commit. Saving each one
+            # put a 4.3 GB Mac generation next to the old one and overflowed the 10 GB budget. A restored entry of
+            # the same compatibility identity already serves later runs (its manifest backdates only unchanged
+            # inputs), so save only when no usable entry was restored: a new identity, a miss, an invalid manifest,
+            # or a file-set change that forced a cold build.
+            refresh = context.get('restore_result') != 'restored'
+            save = stable and refresh
+            outputs(args.github_output, {'save': str(save).lower(), 'family': f'mac-build-v{VERSION}-{scope}-'})
+            report = {'operation': 'save', 'scope': scope, 'saved_manifest': stable, 'save_entry': save,
+                      'reason': ('inputs-changed-during-checks' if not stable else
+                                 'new-generation' if refresh else 'compatible-entry-restored')}
             report['output_bytes'] = sum(path.stat().st_size for name in CACHE_PATHS[scope]
                 for path in (root / name).rglob('*') if path.is_file() and not path.is_symlink())
     report['seconds'] = round(time.monotonic() - started, 3)

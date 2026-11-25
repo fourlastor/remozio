@@ -8,6 +8,8 @@ downloads Gradle again. This keeps one entry per key family:
 - Only entries on refs/heads/main are considered; pull request caches are never touched.
 - Only known families are pruned: `mac-build-v<N>-<scope>-` and `gradle-downloads-v<N>-<job>-<os>-`.
 - In each family the newest entry stays, and so does every key this run saved (`--keep`).
+- `--replace FAMILY` instead deletes every main entry of that one family except kept keys. A Mac job runs it just
+  before it saves a new generation, so the old and new generations never share the budget.
 
 API errors become workflow warnings; the script never fails the run.
 """
@@ -37,16 +39,21 @@ def created(entry):
     return datetime.fromisoformat(entry['created_at'].replace('Z', '+00:00'))
 
 
-def plan(entries, keep):
-    """Return the main entries to delete: everything in a known family except its newest entry and kept keys."""
+def plan(entries, keep, replace=None):
+    """Return the main entries to delete: everything in a known family except its newest entry and kept keys.
+
+    With `replace`, only that family is considered and its newest entry is deleted too."""
     families = {}
     for entry in entries:
         name = family(entry['key'])
-        if entry.get('ref') == MAIN and name is not None:
+        if entry.get('ref') == MAIN and name is not None and replace in (None, name):
             families.setdefault(name, []).append(entry)
     delete = []
     for name in sorted(families):
         group = families[name]
+        if replace is not None:
+            delete.extend(entry for entry in sorted(group, key=created) if entry['key'] not in keep)
+            continue
         newest = max(group, key=lambda entry: (created(entry), entry['id']))
         delete.extend(entry for entry in sorted(group, key=created)
                       if entry['id'] != newest['id'] and entry['key'] not in keep)
@@ -65,7 +72,7 @@ def megabytes(size):
     return f'{size / 1048576:.0f} MB'
 
 
-def run(repository, keep, dry_run=False, api=gh):
+def run(repository, keep, dry_run=False, api=gh, replace=None):
     try:
         lines = api('--paginate', f'repos/{repository}/actions/caches?ref={MAIN}&per_page=100',
                     '--jq', '.actions_caches[]')
@@ -73,7 +80,7 @@ def run(repository, keep, dry_run=False, api=gh):
     except (subprocess.CalledProcessError, OSError, ValueError) as error:
         warn(f'Could not list the main caches, so none were deleted: {error}')
         return 0
-    doomed = plan(entries, keep)
+    doomed = plan(entries, keep, replace)
     deleted = 0
     for entry in doomed:
         label = f"{entry['key']} ({megabytes(entry['size_in_bytes'])}, created {entry['created_at']})"
@@ -105,9 +112,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--repository', required=True, help='owner/name')
     parser.add_argument('--keep', action='append', default=[], help='a key this run saved; repeatable')
+    parser.add_argument('--replace', metavar='FAMILY', help='delete every main entry of this family except kept keys')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
-    return run(args.repository, {key for key in args.keep if key}, args.dry_run)
+    if args.replace is not None and family(args.replace + '0-0') != args.replace:
+        parser.error('--replace needs a known family prefix, such as mac-build-v1-mac-')
+    return run(args.repository, {key for key in args.keep if key}, args.dry_run, replace=args.replace)
 
 
 if __name__ == '__main__':
