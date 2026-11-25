@@ -34,7 +34,8 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
 
         init(timeout: Duration = .seconds(5), peerPIDOffset: pid_t = 0, enableProofs: Bool = true,
              rejectProofSignature: Bool = false, bindReservations: AuthorityPairingProofLinks.BindReservations? = nil,
-             lookupRendezvous: @escaping @Sendable (Data) -> AuthorityPairingRendezvous? = { _ in nil }) throws {
+             lookupRendezvous: @escaping @Sendable (Data) -> AuthorityPairingRendezvous? = { _ in nil },
+             onProofLinkRetired: (@Sendable () -> Void)? = nil) throws {
             self.peerPIDOffset = peerPIDOffset
             self.enableProofs = enableProofs
             var code: SecCode?, staticCode: SecStaticCode?, info: CFDictionary?
@@ -60,7 +61,8 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                configureConnection: {
                    $0.setCodeSigningRequirement(proofRequirement)
                    events.acceptedProofLinks.withLock { $0 += 1 }
-               }, bindReservations: bindReservations, lookupRendezvous: lookupRendezvous)
+               }, bindReservations: bindReservations, lookupRendezvous: lookupRendezvous,
+               onProofLinkRetired: onProofLinkRetired)
             super.init()
             try registry.start()
             listener.setConnectionCodeSigningRequirement(requirement)
@@ -470,6 +472,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let frozenTime = Mutex<AuthorityMoment?>(nil)
         let sampled = Mutex(0)
         let bound = Mutex<AuthorityPairingProofReservations?>(nil)
+        let authorityRetired = expectation(description: "Authority retired the proof link")
         let fixture = try Fixture(bindReservations: { id, link in
             guard id == full.windowID else { throw FixtureError.retiredRole }
             let reservations = try AuthorityPairingProofReservations(window: window, authorityOwner: owner, link: link,
@@ -480,7 +483,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                 }, makeChallenge: { try AuthorityPairingSetupAccess.secureRandom(32) }, verifyWindow: {})
             bound.withLock { $0 = reservations }
             return reservations
-        })
+        }, onProofLinkRetired: { authorityRetired.fulfill() })
         let primary = try await bootstrap(fixture)
         defer { primary.invalidate() }
         let offered = await offer(on: primary)
@@ -559,8 +562,12 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         }
         await listener.closeAndWait()
         XCTAssertEqual(served.withLock { $0 }, 1)
-        XCTAssertThrowsError(try window.export(at: clock.now()))
-        XCTAssertThrowsError(try window.requireStaging(clock.now()))
+        let drainedAt = try clock.now()
+        XCTAssertLessThan(drainedAt.milliseconds, window.deadline)
+        XCTAssertThrowsError(try window.export(at: drainedAt))
+        // The listener joins its tasks. The Authority receives XPC invalidation asynchronously.
+        await fulfillment(of: [authorityRetired], timeout: 3)
+        XCTAssertThrowsError(try window.requireStaging(drainedAt))
     }
 
     private func pairOnlyOneOfSixteenNativePeers(port: UInt16, invitation: PairingInvitationV2,
