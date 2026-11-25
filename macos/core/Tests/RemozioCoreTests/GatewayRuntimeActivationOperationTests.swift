@@ -84,14 +84,43 @@ final class GatewayRuntimeActivationOperationTests: XCTestCase {
         XCTAssertEqual(f.prepareModes, [.publishPending])
         _ = try f.run(); XCTAssertEqual(f.prepareModes, [.publishPending, .validateRetained]); XCTAssertEqual(try f.inventory(), enrolled)
     }
-    func testEveryInterruptedStageResumesTheSameIntentAndArtifacts() throws {
-        for interrupted in GatewayRuntimeActivationOperation.Stage.allCases {
-            let f = try Fixture()
-            XCTAssertThrowsError(try f.run(stage: { if $0 == interrupted { throw Interrupted() } })) { XCTAssertTrue($0 is Interrupted) }
-            XCTAssertFalse(f.activeMachine)
-            let retained = try f.state(); XCTAssertEqual(try retained.plan?.encoded, try f.plan.encoded)
-            let state = try f.run(); XCTAssertTrue(state.jobRegistered); XCTAssertTrue(state.filesPublished)
+    // One test per stage, so each builds one fixture and the shards can spread them. The stages are the same
+    // ones the earlier single loop covered; the coverage test below fails when a stage is added without its own test.
+    private static let interruptedStageTests: [GatewayRuntimeActivationOperation.Stage] =
+        [.intentRetained, .artifactsPublished, .publicationRetained, .inventoryEnrolled, .jobRegistered, .completed]
+
+    private func assertInterruptedStageResumesTheSameIntentAndArtifacts(_ interrupted: GatewayRuntimeActivationOperation.Stage,
+                                                                         file: StaticString = #filePath, line: UInt = #line) throws {
+        let f = try Fixture()
+        XCTAssertThrowsError(try f.run(stage: { if $0 == interrupted { throw Interrupted() } }), file: file, line: line) {
+            XCTAssertTrue($0 is Interrupted, file: file, line: line)
         }
+        XCTAssertFalse(f.activeMachine, file: file, line: line)
+        let retained = try f.state(); XCTAssertEqual(try retained.plan?.encoded, try f.plan.encoded, file: file, line: line)
+        let state = try f.run()
+        XCTAssertTrue(state.jobRegistered, file: file, line: line); XCTAssertTrue(state.filesPublished, file: file, line: line)
+    }
+
+    func testEveryStageHasItsOwnInterruptedResumeTest() {
+        XCTAssertEqual(Self.interruptedStageTests, GatewayRuntimeActivationOperation.Stage.allCases)
+    }
+    func testInterruptedIntentRetainedResumesTheSameIntentAndArtifacts() throws {
+        try assertInterruptedStageResumesTheSameIntentAndArtifacts(.intentRetained)
+    }
+    func testInterruptedArtifactsPublishedResumesTheSameIntentAndArtifacts() throws {
+        try assertInterruptedStageResumesTheSameIntentAndArtifacts(.artifactsPublished)
+    }
+    func testInterruptedPublicationRetainedResumesTheSameIntentAndArtifacts() throws {
+        try assertInterruptedStageResumesTheSameIntentAndArtifacts(.publicationRetained)
+    }
+    func testInterruptedInventoryEnrolledResumesTheSameIntentAndArtifacts() throws {
+        try assertInterruptedStageResumesTheSameIntentAndArtifacts(.inventoryEnrolled)
+    }
+    func testInterruptedJobRegisteredResumesTheSameIntentAndArtifacts() throws {
+        try assertInterruptedStageResumesTheSameIntentAndArtifacts(.jobRegistered)
+    }
+    func testInterruptedCompletedResumesTheSameIntentAndArtifacts() throws {
+        try assertInterruptedStageResumesTheSameIntentAndArtifacts(.completed)
     }
     func testLostRegistrationReplyLeavesPublicationAndEnrollmentForMatchingRetry() throws {
         let f = try Fixture(); f.loseRegistrationReply = true
