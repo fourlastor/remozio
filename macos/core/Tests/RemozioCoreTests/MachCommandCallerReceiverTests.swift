@@ -7700,15 +7700,109 @@ extension MachCommandCallerReceiverTests {
         consumed.signal()
         XCTAssertEqual(completed.wait(timeout: .now() + 5), .success); try result.withLock { try XCTUnwrap($0).get() }
     }
+    private func receiveNativeJobEvent<Event>(
+        until deadline: ContinuousClock.Instant, now: () -> ContinuousClock.Instant = { .now },
+        observeTimeout: (MachCommandReceiveTimeoutStage) -> Void,
+        receive: (UInt32, @escaping @Sendable (MachCommandReceiveTimeoutStage) -> Void) throws -> Event
+    ) throws -> Event {
+        var previewTimedOut = false
+        while true {
+            let remaining = now().duration(to: deadline)
+            guard remaining > .zero else { break }
+            let parts = min(remaining, .seconds(1)).components
+            let milliseconds = UInt32(parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000)
+            guard milliseconds > 0 else { break }
+            let stage = Mutex<MachCommandReceiveTimeoutStage?>(nil)
+            do {
+                return try receive(milliseconds) { value in stage.withLock { $0 = value } }
+            } catch {
+                let failureStage = stage.withLock { $0 }
+                if error as? MachCommandCallerError == .timeout, failureStage == .previewWait {
+                    previewTimedOut = true
+                    continue
+                }
+                if let failureStage { observeTimeout(failureStage) }
+                throw error
+            }
+        }
+        if previewTimedOut { observeTimeout(.previewWait) }
+        throw MachCommandCallerError.timeout
+    }
+    private func receiveNativeJobStream(_ terminal: Endpoint, until deadline: ContinuousClock.Instant,
+                                        observeTimeout: @escaping @Sendable (MachCommandReceiveTimeoutStage) -> Void)
+        throws -> ReceivedMachCommandExecutionEvent {
+        try receiveNativeJobEvent(until: deadline, observeTimeout: observeTimeout) { milliseconds, observeAttempt in
+            try receiver(terminal, maximum: 8192, observeTimeout: observeAttempt)
+                .receiveExecutionEvent(timeoutMilliseconds: milliseconds)
+        }
+    }
+    func testNativeJobWaitAcceptsEventAfterEmptyPreview() throws {
+        let start = ContinuousClock.now
+        var clock = start + .milliseconds(3_750)
+        var budgets: [UInt32] = []
+        let event: CommandExecutionJobState = try receiveNativeJobEvent(until: start + .seconds(5), now: { clock },
+                                                               observeTimeout: { _ in XCTFail("Unexpected timeout") }) { budget, observe in
+            budgets.append(budget)
+            if budgets.count == 1 {
+                clock = clock + .milliseconds(budget)
+                observe(.previewWait)
+                throw MachCommandCallerError.timeout
+            }
+            return .continued
+        }
+        XCTAssertEqual(event, .continued)
+        XCTAssertEqual(budgets, [1_000, 250])
+    }
+    func testNativeJobWaitReportsMissingEventAtDeadline() {
+        let start = ContinuousClock.now
+        var clock = start
+        var stages: [MachCommandReceiveTimeoutStage] = []
+        var budgets: [UInt32] = []
+        XCTAssertThrowsError(try receiveNativeJobEvent(until: start + .seconds(5), now: { clock },
+                                                       observeTimeout: { stages.append($0) }) { budget, observe in
+            budgets.append(budget)
+            clock = clock + .milliseconds(budget)
+            observe(.previewWait)
+            throw MachCommandCallerError.timeout
+        } as Void) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        XCTAssertEqual(budgets, Array(repeating: 1_000, count: 5))
+        XCTAssertEqual(stages, [.previewWait])
+        XCTAssertEqual(clock, start + .seconds(5))
+    }
+    func testNativeJobWaitDoesNotRetryAfterPreviewOrOtherErrors() {
+        let start = ContinuousClock.now
+        let failures: [(MachCommandReceiveTimeoutStage?, MachCommandCallerError)] = [
+            (.authenticatedPreview, .timeout), (.packetReceive, .timeout), (nil, .timeout), (.previewWait, .malformed),
+        ]
+        for (stage, error) in failures {
+            var clock = start
+            var attempts = 0
+            var stages: [MachCommandReceiveTimeoutStage] = []
+            XCTAssertThrowsError(try receiveNativeJobEvent(until: start + .seconds(5), now: { clock },
+                                                           observeTimeout: { stages.append($0) }) { budget, observe in
+                attempts += 1
+                clock = clock + .milliseconds(budget)
+                if attempts == 1 {
+                    observe(.previewWait)
+                    throw MachCommandCallerError.timeout
+                }
+                if let stage { observe(stage) }
+                throw error
+            } as Void) { XCTAssertEqual($0 as? MachCommandCallerError, error) }
+            XCTAssertEqual(attempts, 2)
+            XCTAssertEqual(stages, stage.map { [$0] } ?? [])
+            XCTAssertEqual(clock, start + .seconds(2))
+        }
+    }
     private func waitForNativeJob(_ terminal: Endpoint, profile: CommandHandshakeProfile, submission: CommandSubmission,
                                   admission: VerifiedCommandAdmissionResult, stopped: Bool,
                                   observeTimeout: @escaping @Sendable (MachCommandReceiveTimeoutStage) -> Void) throws -> CommandJobStatePayload {
         guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
         let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: request)
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
-            guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192, observeTimeout: observeTimeout)
-                .receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            guard case .stream(let reply, let right) = try receiveNativeJobStream(terminal, until: deadline,
+                                                                                 observeTimeout: observeTimeout) else {
                 throw CommandStreamError.closed
             }
             defer { reply.caller.close(); right?.close() }
@@ -7720,7 +7814,6 @@ extension MachCommandCallerReceiverTests {
             default: throw CommandStreamError.closed
             }
         }
-        throw MachCommandCallerError.timeout
     }
     func testNativeJobEventsReportOwnedTargetStopContinueAndActualCancellationForBothModes() throws {
         for wire: UInt64 in [6, 7] {
@@ -7776,10 +7869,10 @@ extension MachCommandCallerReceiverTests {
                     guard case .admitted(let retained) = admission.outcome else { throw CommandStreamError.binding }
                     let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: retained)
                     var ended = false
-                    let deadline = Date().addingTimeInterval(5)
+                    let deadline = ContinuousClock.now + .seconds(5)
                     while !ended {
-                        guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192, observeTimeout: observeTimeout)
-                            .receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+                        guard case .stream(let reply, let right) = try receiveNativeJobStream(terminal, until: deadline,
+                                                                                             observeTimeout: observeTimeout) else {
                             throw CommandStreamError.closed
                         }
                         defer { reply.caller.close(); right?.close() }
@@ -7787,7 +7880,6 @@ extension MachCommandCallerReceiverTests {
                         if body == .outputEnd { ended = true }
                         else if case .output = body { }
                         else { throw CommandStreamError.closed }
-                        guard Date() < deadline else { throw MachCommandCallerError.timeout }
                     }
                     beginPhase("acknowledge PTY drain")
                     try pipeSend(.outputDrained, control: control, profile: profile, submission: submission, admission: admission, sequence: 3)
