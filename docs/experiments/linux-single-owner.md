@@ -8,8 +8,9 @@ approve a real decision, change the [contract](../linux-host-contract.md), or tu
 on production execution. Its report keeps `strictAdmission` and
 `productionAdmission` false.
 
-**Recorded result: none yet.** The supervised Root run waits for the Linux host
-owner's session. CI compiles the fixtures and runs the tests that need no Root.
+**Recorded result: passed on one host, 2026-11-25** (see
+[Recorded result](#recorded-result)). CI compiles the fixtures and runs the tests
+that need no Root.
 
 ## Fixtures
 
@@ -143,6 +144,40 @@ at or before the last check, and `requesterLostAfterCheck` when C was gone after
 the go byte. The design's other rows (two dispatches at the same time, the
 unit, AppArmor, the `sudo` child and the composed fixture's race case) are PR2.
 
+## Recorded result
+
+**Passed on one host, 2026-11-25**
+([evidence](linux-single-owner-evidence.json)): Ubuntu 25.10, kernel `6.17.0-41`,
+x86_64, `ptrace_scope` 1, `suid_dumpable` 2, AppArmor enabled with its unprivileged
+user namespace restriction on. The Linux host owner was present, and the runner ran
+as Root through classic sudo with `--allow-sysctl`. Every setup check, all 29
+cases and every cleanup check passed, and both sysctls were restored
+(`sysctlsRestored`). The source, binary and script hashes in the evidence match the
+fixtures and the runner in this change. `strictAdmission` and `productionAdmission`
+are false.
+
+- **Dispatch:** `dispatch-normal`, `dispatch-short-command`,
+  `dispatch-command-alive-at-s6` and `caller-sigcont-c-during-stop` gave
+  `dispatched`; `exec-fails` gave `execFailed`. In every case that wrote the go
+  byte, C's run time, context switches and `TracerPid` were unchanged between `s1`
+  and `after-go`, and the restart log was clean and complete.
+- **Refusals before the go byte:** the K signal and kill cases, `k-hangs-before-go`,
+  `runner-lost-before-go` and `caller-limit-above-owner` gave `notStarted` with no
+  go byte written. `owner-thread-refused` gave `ownerThreads`, and
+  `owner-without-capabilities` refused at start.
+- **After the go byte:** each K signal case ended K with that signal (`SIGSTOP`
+  left K stopped), and the owner, authority and runner loss cases reported as
+  required.
+- **Attach (`caller-attaches-to-k`):** with `ptrace_scope` 0 and `suid_dumpable` 1
+  set for the case, the caller's attach failed with `EPERM` before and after the go
+  byte, and K was not dumpable at both attempts.
+
+A first run on the same day measured every case as required except the attach
+case's dumpable sample, which read 1 while both attach attempts failed with `EPERM`.
+The runner read the owner of the `/proc/<pid>` directory, which always shows the
+task's effective UID. It now reads `/proc/<pid>/stat`, which belongs to root when
+the task is not dumpable. The recorded evidence is the second run.
+
 ## Implementation notes
 
 - O ends its dispatch with `PTRACE_DETACH` after S6 when C is still there and the
@@ -200,7 +235,8 @@ unit, AppArmor, the `sudo` child and the composed fixture's race case) are PR2.
 
 - Every item that the design lists for PR2: the Swift authority, the systemd unit,
   AppArmor, `sudo` and the controlling terminal.
-- No Root run is recorded yet. One host and one kernel will not cover others.
+- One Root run on one host and one kernel. Other kernels and distributions are not
+  measured.
 - Cleanup also kills by session ID (K's and O's), after a pidfd kill of K. If the
   session leader was reaped first, a kill by that session ID could reach a new
   session only after a PID wrap. This risk is accepted.
