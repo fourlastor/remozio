@@ -518,18 +518,20 @@ static void run_child(const struct child_plan *plan) {
 /* ---------------------------------------------------------------- one dispatch */
 
 struct result {
-    const char *admitted, *permit, *final_check, *result, *exec_errno, *lost, *go, *deadline_kill, *reported,
-        *k_setup;
+    const char *admitted, *permit, *final_check, *result, *exec_errno, *lost_before, *lost, *go, *deadline_kill,
+        *reported, *k_setup, *k_end;
 };
 
 static void report(int dispatch, const struct result *r) {
-    char line[768];
+    char line[1024];
     snprintf(line, sizeof line,
              "{\"dispatch\":\"%d\",\"admitted\":\"%s\",\"permit\":\"%s\",\"finalCheck\":\"%s\",\"result\":\"%s\","
-             "\"execErrno\":\"%s\",\"requesterLostAfterCheck\":\"%s\",\"goWritten\":\"%s\","
-             "\"killedAtDeadline\":\"%s\",\"reported\":\"%s\",\"kSetup\":\"%s\",\"restartLogComplete\":\"%s\"}",
-             dispatch, r->admitted, r->permit, r->final_check, r->result, r->exec_errno, r->lost, r->go,
-             r->deadline_kill, r->reported, r->k_setup, log_failed ? "no" : "yes");
+             "\"execErrno\":\"%s\",\"requesterLostBeforeCheck\":\"%s\",\"requesterLostAfterCheck\":\"%s\","
+             "\"goWritten\":\"%s\","
+             "\"killedAtDeadline\":\"%s\",\"reported\":\"%s\",\"kSetup\":\"%s\",\"kEnd\":\"%s\","
+             "\"restartLogComplete\":\"%s\"}",
+             dispatch, r->admitted, r->permit, r->final_check, r->result, r->exec_errno, r->lost_before, r->lost,
+             r->go, r->deadline_kill, r->reported, r->k_setup, r->k_end, log_failed ? "no" : "yes");
     out_line(line);
 }
 
@@ -619,7 +621,7 @@ static void close_fd(int *fd) {
  * permit exists, the report goes to the runner, and every descriptor is closed. */
 static void dispatch_one(int dispatch, int listen_fd, int authority, int deadline_ms, const char *command,
                          const char *marker) {
-    struct result r = {"no", "no", "no", "refused", "none", "no", "no", "no", "no", "n/a"};
+    struct result r = {"no", "no", "no", "refused", "none", "no", "no", "no", "no", "no", "n/a", "n/a"};
     int conn = -1, c_pidfd = -1, cwd = -1, go_write = -1, status_read = -1, k_pidfd = -1;
     int streams[3] = {-1, -1, -1};
     pid_t c_pid = 0, k_pid = 0;
@@ -663,6 +665,10 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
         traced(dispatch, "INTERRUPT", PTRACE_INTERRUPT, c_pid, 0) != 0 ||
         waitpid(c_pid, &status, __WALL) != c_pid || !WIFSTOPPED(status) || (status >> 16) != PTRACE_EVENT_STOP)
         goto done;
+    /* O seized by PID number. The pidfd still names the connected process only if that
+     * process still lives, and then it still holds the PID: no reuse between the check
+     * and the seize. Signal 0 only checks; EPERM (no CAP_KILL over C) also proves it lives. */
+    if (syscall(SYS_pidfd_send_signal, c_pidfd, 0, NULL, 0) != 0 && errno != EPERM) goto done;
     char path[64];
     snprintf(path, sizeof path, "/proc/%d/cwd", (int)c_pid);
     cwd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
@@ -681,7 +687,7 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
     /* S2: the final check, with the stop held. */
     if (!in_stop(c_pid)) {
         r.result = "refused";
-        r.lost = "yes";
+        r.lost_before = "yes";
         goto done;
     }
     r.final_check = "yes";
@@ -778,7 +784,7 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
     if (!in_stop(c_pid)) {
         kill_k(k_pidfd); /* C left the stop before the go byte: no command */
         r.result = "refused";
-        r.lost = "yes";
+        r.lost_before = "yes"; /* lost at the last check, so before it passed */
         goto done;
     }
     if (barrier("after-check", dispatch, c_pid, k_pid) != 0) {
@@ -800,16 +806,30 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
 done:
     close_fd(&go_write);
     close_fd(&status_read);
+    if (k_pidfd >= 0) {
+        /* How K ended, as far as O sees it now, so a signal case can fail when the signal
+         * had no effect. K stays unreaped (WNOWAIT) until O exits. */
+        int code = 0, outcome = k_outcome(k_pidfd, &code);
+        r.k_end = outcome == 0          ? "running"
+                  : outcome == 1        ? "exited"
+                  : outcome != 2        ? "unknown"
+                  : code == SIGKILL     ? "SIGKILL"
+                  : code == SIGTERM     ? "SIGTERM"
+                  : code == SIGUSR1     ? "SIGUSR1"
+                                        : "signal";
+    }
     if (have_permit) {
         /* The authority knows no ownerThreads: for it the dispatch did not start. */
         const char *outcome = strcmp(r.result, "ownerThreads") == 0 ? "notStarted" : r.result;
-        snprintf(message_text, sizeof message_text, "OUTCOME %s %s %s", permit.token, outcome, r.lost);
+        const char *lost = strcmp(r.lost_before, "yes") == 0 || strcmp(r.lost, "yes") == 0 ? "yes" : "no";
+        snprintf(message_text, sizeof message_text, "OUTCOME %s %s %s", permit.token, outcome, lost);
         r.reported = ask(authority, message_text, reply, sizeof reply) == 0 && strcmp(reply, "OK") == 0 ? "yes" : "no";
     }
     report(dispatch, &r);
     /* The post-dispatch contract is out of scope: with the runner present, O lets C go after S6.
      * Without the runner, or when the dispatch ended early, C stays stopped and dies with O. */
-    if (reached_s6 && barrier("after-s6", dispatch, c_pid, k_pid) == 0 && strcmp(r.lost, "no") == 0)
+    if (reached_s6 && barrier("after-s6", dispatch, c_pid, k_pid) == 0 && strcmp(r.lost, "no") == 0 &&
+        strcmp(r.lost_before, "no") == 0)
         traced(dispatch, "DETACH", PTRACE_DETACH, c_pid, 0);
     for (int i = 0; i < 3; i++) close_fd(&streams[i]);
     close_fd(&cwd);

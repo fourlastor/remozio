@@ -345,6 +345,8 @@ and no sysctl change by default. The
 - Kill K before the go byte, and between the go byte and `execve`.
 - A K that hangs before the go byte.
 - A multi-threaded O.
+- Independent of O's log: C's run time, context switches and `TracerPid:` read by
+  the runner at `s1` and after the go byte.
 - A caller hard limit above O's own: K reports the limit step and nothing starts.
 - The capability sets, `NoNewPrivs:`, the identity, the supplementary groups, the
   umask, every limit and the session of the command, with O started through `setpriv` with the three

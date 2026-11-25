@@ -99,12 +99,12 @@ Without the flag the case reports `not-run` and no sysctl changes.
 | `caller-sigstop-k-before-go` | `SIGSTOP` from the caller to K at `k-ready` | Killed at the deadline, `notStarted` |
 | `caller-sigterm-k-before-go` | `SIGTERM` from the caller to K at `k-ready` | `notStarted` |
 | `caller-sigusr1-k-before-go` | `SIGUSR1` from the caller to K at `k-ready` | `notStarted` |
-| `kill-k-after-go` | Root kills K at `k-paused` | `unknown`, marker 0 |
-| `caller-sigstop-k-after-go` | `SIGSTOP` from the caller to K at `k-paused` | `unknown` at the deadline |
-| `caller-sigterm-k-after-go` | `SIGTERM` from the caller to K at `k-paused` | `unknown` |
-| `caller-sigusr1-k-after-go` | `SIGUSR1` from the caller to K at `k-paused` | `unknown` |
+| `kill-k-after-go` | Root kills K at `k-paused` | `unknown`, marker 0, K ended by `SIGKILL` |
+| `caller-sigstop-k-after-go` | `SIGSTOP` from the caller to K at `k-paused` | `unknown` at the deadline, K stopped |
+| `caller-sigterm-k-after-go` | `SIGTERM` from the caller to K at `k-paused` | `unknown`, K ended by `SIGTERM` |
+| `caller-sigusr1-k-after-go` | `SIGUSR1` from the caller to K at `k-paused` | `unknown`, K ended by `SIGUSR1` |
 | `caller-sigcont-c-during-stop` | `SIGCONT` from the caller to C at `s1` and `before-go` | C stays in the stop, `dispatched` once |
-| `caller-kills-c-before-check` | `SIGKILL` from the caller to C at `before-go` | Refusal, `requesterLostAfterCheck`, marker 0 |
+| `caller-kills-c-before-check` | `SIGKILL` from the caller to C at `before-go` | Refusal, `requesterLostBeforeCheck`, marker 0 |
 | `caller-kills-c-after-check` | `SIGKILL` from the caller to C at `after-check` | `dispatched` once, `requesterLostAfterCheck` |
 | `caller-kills-c-after-go` | `SIGKILL` from the caller to C at `after-go` | `dispatched` once, `requesterLostAfterCheck` |
 | `kill-owner-at-s1` | Root kills O at `s1` | C killed, no outcome, marker 0 |
@@ -122,7 +122,25 @@ Without the flag the case reports `not-run` and no sysctl changes.
 
 Every case records O's exit, C's exit, the marker count, the authority's
 `beginDispatch` and outcome, and whether O's restart log shows a restart call
-before the go byte. The design's other rows (two dispatches at the same time, the
+before the go byte.
+
+In `kpause` mode K pauses after the go byte, so `unknown` and marker 0 hold whether
+or not a signal acted. Two values make those four cases able to fail: `kEnd`, how
+K ended as O sees it at the end of the dispatch, and `kStateAfterSignal`, which the
+runner reads from `/proc` just after the signal (`stopped` for `SIGSTOP`, `gone` for
+a fatal signal). A test sends no signal and checks that each case then fails.
+
+"C never left the stop" does not rest on O's log only. At `s1` and at `after-go` the
+runner reads C's run time (`/proc/<pid>/schedstat`), its context-switch counts and
+its `TracerPid:` from `/proc/<pid>/status`. Every case that writes the go byte
+requires the counters to be unchanged and O to be the tracer at both reads
+(`cRunUnchanged`, `cTracerOwner`). The `SIGCONT` case passes this check. When O is
+killed it cannot report its log writes, so the runner checks that every log line is
+whole and well formed (`restartLogComplete`); the cases that kill O require it.
+
+The report splits the loss of C: `requesterLostBeforeCheck` when C left the stop
+at or before the last check, and `requesterLostAfterCheck` when C was gone after
+the go byte. The design's other rows (two dispatches at the same time, the
 unit, AppArmor, the `sudo` child and the composed fixture's race case) are PR2.
 
 ## Implementation notes
@@ -150,6 +168,22 @@ unit, AppArmor, the `sudo` child and the composed fixture's race case) are PR2.
   `TracerPid` and one thread.
 - O also checks that the pidfd from `SO_PEERPIDFD` names the PID from
   `SO_PEERCRED`, as the protected launch does, and refuses the connection if not.
+  O seizes by PID number, so after the interrupt stop it sends signal 0 through the
+  pidfd. Success, or `EPERM` (O has no `CAP_KILL` over C), proves that the connected
+  process still lives and so still holds the PID. `ESRCH` means the PID could have
+  been reused, and O refuses. No test makes a PID reuse happen.
+- Right after `useradd`, the runner refuses to continue when a process already runs
+  with the new UID (for example a container without a user namespace). Cleanup then
+  kills nothing by UID.
+- The runner reads files in directories that the operator or the caller can write
+  (the markers, and also the restart log) with `O_NOFOLLOW|O_NONBLOCK`, accepts only
+  a regular file, and reads at most 64 KiB.
+- If the attach sysctls cannot be set (no Yama, `ptrace_scope` 3, a refused write),
+  the runner restores what it wrote, records the attach case as `not-run` with the
+  reason, and keeps every other result.
+- The runner compiles a private copy of each source and reports the SHA-256 of that
+  copy and of each built binary (`builds`), plus the hashes of the two runner
+  scripts at start (`scripts`).
 - When O reports `dispatched` for a command that is still running, the runner waits
   until the command ends before it reads the marker.
 - Cleanup kills K through a pidfd that the runner opens when K's PID first reaches
@@ -167,3 +201,6 @@ unit, AppArmor, the `sudo` child and the composed fixture's race case) are PR2.
 - Every item that the design lists for PR2: the Swift authority, the systemd unit,
   AppArmor, `sudo` and the controlling terminal.
 - No Root run is recorded yet. One host and one kernel will not cover others.
+- Cleanup also kills by session ID (K's and O's), after a pidfd kill of K. If the
+  session leader was reaped first, a kill by that session ID could reach a new
+  session only after a PID wrap. This risk is accepted.

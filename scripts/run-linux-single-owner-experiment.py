@@ -74,9 +74,12 @@ ERRNO = frozenset({"none", "ok", "EPERM", "EACCES", "ENOENT", "ENOEXEC", "ESRCH"
 # The owner's reports: the start line, then one line per dispatch, in this vocabulary.
 OWNER_START_KEYS = {"ownerCapabilitiesExact": YES_NO, "generation": YES_NO, "authorityAccepted": YES_NO}
 OWNER_DISPATCH_KEYS = {"dispatch": frozenset({"1"}), "admitted": YES_NO, "permit": YES_NO, "finalCheck": YES_NO,
-                       "result": RESULTS, "execErrno": ERRNO, "requesterLostAfterCheck": YES_NO,
+                       "result": RESULTS, "execErrno": ERRNO, "requesterLostBeforeCheck": YES_NO,
+                       "requesterLostAfterCheck": YES_NO,
                        "goWritten": YES_NO, "killedAtDeadline": YES_NO | {"failed"}, "reported": YES_NO,
                        "kSetup": frozenset({"ok", "limits", "credentials", "capabilities", "other", "unknown", NA}),
+                       "kEnd": frozenset({"running", "exited", "SIGKILL", "SIGTERM", "SIGUSR1", "signal", "unknown",
+                                          NA}),
                        "restartLogComplete": YES_NO}
 # Every case publishes exactly these keys; NA where the case does not reach the step.
 OBSERVED = {
@@ -89,6 +92,12 @@ OBSERVED = {
     "restartLogClean": YES_NO | {NA}, "restartLogDetach": YES_NO | {NA},
     "kExit": frozenset({"reserved", "signaled", "other", "running", "not-observed"}),
     "commandAliveAfterOwner": YES_NO | {NA},
+    # Read by the runner, not by O: C's run time and context switches did not change between
+    # s1 and after-go, and C's TracerPid was O at both. "gone" when C had ended by after-go.
+    "cRunUnchanged": YES_NO | {"gone", NA}, "cTracerOwner": YES_NO | {"gone", NA},
+    # K's state right after a signal or kill from the runner's actions: a SIGSTOP must stop it,
+    # a fatal signal must end it.
+    "kStateAfterSignal": frozenset({"stopped", "running", "gone", NA}),
     # O's hard limits, read at S1, are at least the caller's: K can then set every caller limit.
     "ownerLimitsCoverCaller": YES_NO | {NA},
     "callerSignal": frozenset({"sent", "failed", NA}),
@@ -114,15 +123,17 @@ PROBE_OK = {"capsEmpty": "yes", "noNewPrivsClear": "yes", "uidsExact": "yes", "g
 STARTED = {"ownerCapabilitiesExact": "yes", "generation": "yes", "authorityAccepted": "yes"}
 ADMITTED = {**STARTED, "admitted": "yes", "permit": "yes", "finalCheck": "yes", "restartLogClean": "yes",
             "restartLogComplete": "yes", "authorityBegin": "yes", "ownerLimitsCoverCaller": "yes"}
-DISPATCHED = {**ADMITTED, "kSetup": "ok", "result": "dispatched", "goWritten": "yes", "requesterLostAfterCheck": "no",
-              "killedAtDeadline": "no", "reported": "yes", "authorityOutcome": "dispatched", "markerLines": "1",
+DISPATCHED = {**ADMITTED, "kSetup": "ok", "result": "dispatched", "goWritten": "yes",
+              "requesterLostBeforeCheck": "no", "requesterLostAfterCheck": "no", "cRunUnchanged": "yes",
+              "cTracerOwner": "yes", "killedAtDeadline": "no", "reported": "yes", "authorityOutcome": "dispatched", "markerLines": "1",
               "ownerExit": "ok", "frontendExit": "closed"}
 NOT_STARTED = {**ADMITTED, "result": "notStarted", "goWritten": "no", "reported": "yes",
                "authorityOutcome": "notStarted", "markerLines": "0", "ownerExit": "ok", "frontendExit": "closed"}
 UNKNOWN = {**ADMITTED, "result": "unknown", "goWritten": "yes", "reported": "yes", "authorityOutcome": "unknown",
-           "markerLines": "0", "ownerExit": "ok", "frontendExit": "closed"}
+           "markerLines": "0", "ownerExit": "ok", "frontendExit": "closed", "cRunUnchanged": "yes",
+           "cTracerOwner": "yes"}
 # O dies: C dies with it (PTRACE_O_EXITKILL) and the authority never gets an outcome.
-OWNER_KILLED = {**STARTED, "ownerExit": "SIGKILL", "frontendExit": "SIGKILL", "authorityOutcome": "missing",
+OWNER_KILLED = {**STARTED, "restartLogComplete": "yes", "ownerExit": "SIGKILL", "frontendExit": "SIGKILL", "authorityOutcome": "missing",
                 "restartLogClean": "yes"}
 
 
@@ -147,26 +158,35 @@ CASES = {
                                         expect={**NOT_STARTED, "callerSignal": "sent"}),
     "caller-sigusr1-k-before-go": _case(actions=[("k-ready", "caller-usr1-k")],
                                         expect={**NOT_STARTED, "callerSignal": "sent"}),
-    "kill-k-after-go": _case("kpause", [("k-paused", "kill-k")], UNKNOWN),
+    # K pauses after the go byte, so "unknown" alone holds whether or not the signal acted.
+    # kEnd (from O) and kStateAfterSignal (from the runner) make each case able to fail.
+    "kill-k-after-go": _case("kpause", [("k-paused", "kill-k")],
+                             {**UNKNOWN, "kEnd": "SIGKILL", "kStateAfterSignal": "gone"}),
     "caller-sigstop-k-after-go": _case("kpause", [("k-paused", "caller-stop-k")],
-                                       {**UNKNOWN, "callerSignal": "sent"}),
+                                       {**UNKNOWN, "callerSignal": "sent", "kEnd": "running",
+                                        "kStateAfterSignal": "stopped"}),
     "caller-sigterm-k-after-go": _case("kpause", [("k-paused", "caller-term-k")],
-                                       {**UNKNOWN, "callerSignal": "sent"}),
+                                       {**UNKNOWN, "callerSignal": "sent", "kEnd": "SIGTERM",
+                                        "kStateAfterSignal": "gone"}),
     "caller-sigusr1-k-after-go": _case("kpause", [("k-paused", "caller-usr1-k")],
-                                       {**UNKNOWN, "callerSignal": "sent"}),
+                                       {**UNKNOWN, "callerSignal": "sent", "kEnd": "SIGUSR1",
+                                        "kStateAfterSignal": "gone"}),
     # The row that replaces "C forks or execs during S2-S4": C cannot run in the stop, so it
     # cannot fork; a SIGCONT from the caller's account must not end the stop either.
     "caller-sigcont-c-during-stop": _case(actions=[("s1", "caller-cont-c"), ("before-go", "caller-cont-c")],
                                           expect={**DISPATCHED, "callerSignal": "sent"}),
     "caller-kills-c-before-check": _case(actions=[("before-go", "caller-kill-c")],
                                          expect={**ADMITTED, "result": "refused", "goWritten": "no",
-                                                 "requesterLostAfterCheck": "yes", "reported": "yes",
+                                                 "requesterLostBeforeCheck": "yes",
+                                                 "requesterLostAfterCheck": "no", "reported": "yes",
                                                  "authorityOutcome": "refused", "markerLines": "0",
                                                  "ownerExit": "ok", "frontendExit": "SIGKILL",
                                                  "callerSignal": "sent"}),
     "caller-kills-c-after-check": _case(actions=[("after-check", "caller-kill-c")],
                                         expect={**DISPATCHED, "requesterLostAfterCheck": "yes",
-                                                "frontendExit": "SIGKILL", "callerSignal": "sent"}),
+                                                "frontendExit": "SIGKILL", "callerSignal": "sent",
+                                                # The SIGKILL wakes C to exit: it runs, then ends.
+                                                "cRunUnchanged": ("no", "gone"), "cTracerOwner": ("yes", "gone")}),
     "caller-kills-c-after-go": _case(actions=[("after-go", "caller-kill-c")],
                                      expect={**DISPATCHED, "requesterLostAfterCheck": "yes",
                                              "frontendExit": "SIGKILL", "callerSignal": "sent"}),
@@ -212,7 +232,7 @@ CASES = {
     "caller-attaches-to-k": _case("kpause", [("k-ready", "caller-attach-k"), ("k-paused", "caller-attach-k"),
                                              ("k-paused", "kill-k")], sysctl=True, root_only=True,
                                   expect={**UNKNOWN, "attachBeforeGo": "EPERM", "attachAfterGo": "EPERM",
-                                          "kDumpableAtAttach": "0"}),
+                                          "kDumpableAtAttach": "0", "kEnd": "SIGKILL"}),
 }
 MODES = frozenset({"normal", "short", "sleep", "missing", "khang", "kpause"})
 ACTIONS = frozenset({"kill-k", "kill-owner", "kill-authority", "drop-runner", "caller-stop-k", "caller-term-k",
@@ -316,6 +336,92 @@ def limits_cover(owner, caller):
     as_number = lambda value: math.inf if value == "inf" else int(value)
     return all(as_number(o.split("/")[1]) >= as_number(c.split("/")[1])
                for o, c in zip(owner.split(","), caller.split(",")))
+
+
+MAX_FILE_BYTES = 65536
+
+
+def read_bounded(path, limit=MAX_FILE_BYTES):
+    """Reads a file in a directory that the operator or the caller can write, as Root, safely.
+
+    No symlink is followed, a FIFO or device does not block or stream (O_NONBLOCK, then a
+    regular-file check on the open descriptor), and at most limit bytes are read: more is an
+    error. A missing file raises FileNotFoundError."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("not a regular file")
+        data = bytearray()
+        while len(data) <= limit:
+            chunk = os.read(fd, limit + 1 - len(data))
+            if not chunk:
+                return bytes(data)
+            data.extend(chunk)
+        raise ValueError("file too large")
+    finally:
+        os.close(fd)
+
+
+def restart_log_complete(raw):
+    """Every line of the log is whole and well formed, and the log ends with a newline.
+
+    O reports its own write errors; when O is killed it cannot, so this check of the file
+    is the one that the runner can make on its own."""
+    if not raw or not raw.endswith(b"\n"):
+        return "no"
+    return "yes" if all(re.fullmatch(rb"[0-9]{1,20} [0-9]{1,3} [A-Z]{1,16}", line)
+                        for line in raw[:-1].split(b"\n")) else "no"
+
+
+def stop_sample(pid):
+    """C's scheduler counters and tracer, read from /proc without O: None once C has ended.
+
+    schedstat's first field is the time C ran (ns); status has the context-switch counts and
+    TracerPid. C in a ptrace stop does not run, so none of the counters may move."""
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+        if stat_text[stat_text.rindex(")") + 2] in "ZX":
+            return None
+        run_time = int(Path(f"/proc/{pid}/schedstat").read_text().split()[0])
+        status = Path(f"/proc/{pid}/status").read_text()
+    except (OSError, ValueError, IndexError):
+        return None
+    fields = {}
+    for key in ("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches", "TracerPid"):
+        match = re.search(rf"^{key}:\s+([0-9]+)$", status, re.MULTILINE)
+        if not match:
+            return None
+        fields[key] = int(match[1])
+    return (run_time, fields["voluntary_ctxt_switches"], fields["nonvoluntary_ctxt_switches"]), fields["TracerPid"]
+
+
+def compare_stop(first, second, owner_pid):
+    """(cRunUnchanged, cTracerOwner) from the samples at s1 and after-go."""
+    if first is None:
+        return NA, NA
+    if second is None:
+        return "gone", "gone"
+    unchanged = "yes" if first[0] == second[0] else "no"
+    tracer = "yes" if first[1] == owner_pid and second[1] == owner_pid else "no"
+    return unchanged, tracer
+
+
+def k_state_after_signal(pid, want_stop, timeout=1.0):
+    """K's state shortly after a signal: "stopped" (T), "gone" (exited or zombie) or "running"."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            text = Path(f"/proc/{pid}/stat").read_text()
+            state = text[text.rindex(")") + 2]
+        except (OSError, ValueError, IndexError):
+            return "gone"
+        if state in "ZX":
+            return "gone"
+        if state == "T" and want_stop:
+            return "stopped"
+        if time.monotonic() >= deadline:
+            return "stopped" if state in "Tt" else "running"
+        time.sleep(0.01)
 
 
 def restart_log_clean(raw):
@@ -538,7 +644,7 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
     deadline = time.monotonic() + timeout
     owner = frontend = None
     pids = {"c": 0, "k": 0, "kfd": -1}
-    caller_limits = None
+    caller_limits = stop_first = None
     owner_out, frontend_out = bytearray(), bytearray()
     sockets = []
     error, clean = None, False
@@ -623,6 +729,11 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
                                 with contextlib.suppress(OSError):
                                     pids["kfd"] = os.pidfd_open(pids["k"])
                             if name == "s1" and pids["c"]:
+                                stop_first = stop_sample(pids["c"])
+                            if name == "after-go" and pids["c"]:
+                                observed["cRunUnchanged"], observed["cTracerOwner"] = compare_stop(
+                                    stop_first, stop_sample(pids["c"]), owner.pid)
+                            if name == "s1" and pids["c"]:
                                 with contextlib.suppress(OSError, ValueError):
                                     caller_limits = read_limits(pids["c"])
                                     observed["ownerLimitsCoverCaller"] = (
@@ -685,17 +796,24 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
         observed.update(dispatch)
         observed.update(probe_checks(bytes(frontend_out), identity[0], identity[1], last_cap, identity[2],
                                      caller_limits))
-        log = log_path.read_bytes()
+        log = read_bounded(log_path)
         observed["restartLogClean"] = restart_log_clean(log) if log else NA
+        if log:
+            # O's own report of its writes (when O lived to report) and the file's structure.
+            reported = observed["restartLogComplete"]
+            observed["restartLogComplete"] = ("yes" if restart_log_complete(log) == "yes" and reported in ("yes", NA)
+                                              else "no")
         observed["restartLogDetach"] = ("yes" if b" DETACH\n" in log else "no") if log else NA
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, OSError):
         return {"passed": False, "error_type": "InvalidReport", "cleanupReapedAllFixtureProcesses": clean}
     observed["ownerExit"] = _exit_category(owner.returncode, owner=True)
     observed["frontendExit"] = _exit_category(frontend.returncode) if frontend is not None else "not-started"
     try:
-        lines = marker.read_bytes().count(b"\n")
+        lines = read_bounded(marker).count(b"\n")  # the marker directory belongs to the caller
     except FileNotFoundError:
         lines = 0
+    except (OSError, ValueError):
+        return {"passed": False, "error_type": "InvalidMarker", "cleanupReapedAllFixtureProcesses": clean}
     observed["markerLines"] = "0" if lines == 0 else "1" if lines == 1 else "more"
     observed["authorityBegin"] = "yes" if authority.begun else "no"
     observed["authorityOutcome"] = authority.outcome or "missing"
@@ -730,7 +848,11 @@ def _act(action, host, owner, pids, observed, selector, sockets):
         return False
     if action == "kill-k":
         if pids["k"]:
-            os.kill(pids["k"], signal.SIGKILL)
+            if pids.get("kfd", -1) >= 0:
+                signal.pidfd_send_signal(pids["kfd"], signal.SIGKILL)
+            else:
+                os.kill(pids["k"], signal.SIGKILL)
+            observed["kStateAfterSignal"] = k_state_after_signal(pids["k"], want_stop=False)
         return True
     if action == "kill-authority":
         for item in list(sockets):
@@ -745,6 +867,8 @@ def _act(action, host, owner, pids, observed, selector, sockets):
         name, target = CALLER_SIGNALS[action]
         sent = bool(pids[target]) and host.caller_signal(name, pids[target])
         observed["callerSignal"] = "sent" if sent and observed["callerSignal"] in (NA, "sent") else "failed"
+        if target == "k" and pids["k"]:
+            observed["kStateAfterSignal"] = k_state_after_signal(pids["k"], want_stop=name == "STOP")
         return True
     if action == "caller-attach-k":
         key = "attachBeforeGo" if observed["attachBeforeGo"] == NA else "attachAfterGo"
@@ -857,7 +981,7 @@ class Run(Host):
         self.tag = secrets.token_hex(4)
         self.base = BASE_PARENT / (BASE_PREFIX + self.tag)
         self.service_name = f"rmzso{self.tag}"
-        self.base_created = self.service_created = False
+        self.base_created = self.service_created = self.uid_shared = False
         self.saved_sysctls = {}
         self.setpriv = shutil.which("setpriv", path=PL.TOOL_ENV["PATH"]) or "/usr/bin/setpriv"
 
@@ -874,11 +998,18 @@ class Run(Host):
             os.mkdir(self.base / name, mode)
             os.chmod(self.base / name, mode)
         compiler = shutil.which("cc", path=PL.TOOL_ENV["PATH"]) or "/usr/bin/cc"
+        self.build_hashes = {"sources": {}, "binaries": {}}
         for name, (source, extra) in BUILDS.items():
-            output = self.base / "build" / name
-            if _run_tool([compiler, *CC_FLAGS, *extra, "-o", str(output), str(source)], min(60, 4 * self.timeout)) != 0:
+            # The compiler reads a private copy, and the hash is of that copy: it is what was built.
+            copy, output = self.base / "build" / f"{name}.c", self.base / "build" / name
+            data = source.read_bytes()
+            PL.write_root_file(copy, data, 0o600)
+            self.build_hashes["sources"][name] = hashlib.sha256(data).hexdigest()
+            if _run_tool([compiler, *CC_FLAGS, *extra, "-o", str(output), str(copy)], min(60, 4 * self.timeout)) != 0:
                 raise RuntimeError("fixture build failed")
-            PL.write_root_file(self.base / "run" / name, output.read_bytes(), 0o755)
+            binary = output.read_bytes()
+            self.build_hashes["binaries"][name] = hashlib.sha256(binary).hexdigest()
+            PL.write_root_file(self.base / "run" / name, binary, 0o755)
         PL.Run._create(self, "service_created", ["useradd", "--system", "--no-create-home", "--home-dir", "/",
                                                  "--shell", "/usr/sbin/nologin", "--user-group", self.service_name],
                        (self.service_name,))
@@ -886,6 +1017,13 @@ class Run(Host):
         self.service_uid, self.service_gid = account.pw_uid, account.pw_gid
         if 0 in (self.service_uid, self.service_gid):
             raise RuntimeError("disposable identity is privileged")
+        # useradd reads /etc/passwd only. A container without a user namespace may already run
+        # processes under this UID; cleanup kills by UID, so it must never start from there.
+        if _user_processes(self.service_uid, Path("/proc")):
+            self.uid_shared = True
+            sys.stderr.write("The new disposable UID already has running processes (for example a container "
+                             "without a user namespace). The run stops and kills nothing by UID.\n")
+            raise RuntimeError("disposable UID already in use")
         # The markers belong to the caller: the command writes them as the caller.
         markers = self.base / "markers"
         os.mkdir(markers, 0o700)
@@ -969,8 +1107,16 @@ class Run(Host):
     def run_case(self, case, last_cap):
         if CASES[case]["sysctl"]:
             if not self.allow_sysctl:
-                return {"passed": True, "status": "not-run"}
-            self.enable_attach_sysctls()
+                return {"passed": True, "status": "not-run", "reason": "flag-not-given"}
+            try:
+                self.enable_attach_sysctls()
+            except (RuntimeError, OSError) as error:
+                # No Yama, ptrace_scope 3 or a refused write: the attach case does not run, and
+                # every other result stays. Whatever was written is restored now.
+                if self.saved_sysctls and not self.restore_sysctls():
+                    raise RuntimeError("sysctl restore failed") from error
+                reason = "sysctl-unavailable" if isinstance(error, RuntimeError) else "sysctl-write-refused"
+                return {"passed": True, "status": "not-run", "reason": reason}
             try:
                 return drive_case(case, self, self.paths, self.identity(), self.timeout, last_cap)
             finally:
@@ -982,8 +1128,8 @@ class Run(Host):
         """Ends every process of the service user, removes files, then the user; restores sysctls.
         Each step runs even when an earlier one fails; only state this run created is touched."""
         sysctls = self.restore_sysctls() if self.saved_sysctls else True
-        gone = True
-        if self.service_created:
+        gone = not self.uid_shared  # a shared UID is never killed by UID: nothing is proved gone
+        if self.service_created and not self.uid_shared:
             with contextlib.suppress(KeyError):
                 uid = pwd.getpwnam(self.service_name).pw_uid
                 try:
@@ -1067,11 +1213,6 @@ def last_capability():
     return int(value)
 
 
-def source_hashes():
-    paths = (Path(__file__).resolve(), OWNER, FRONTEND, PROBE, PROTECTED_RUNNER)
-    return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-
-
 def measure(timeout=15, allow_sysctl=False, run_factory=Run):
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("requires Linux x86_64")
@@ -1086,6 +1227,8 @@ def measure(timeout=15, allow_sysctl=False, run_factory=Run):
         raise RuntimeError("experiment parent must be root-owned")
     host = PL.host_metadata()
     last_cap = last_capability()
+    scripts = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+               for path in (Path(__file__).resolve(), PROTECTED_RUNNER)}
     run = run_factory(operator, timeout, allow_sysctl)
     setup, cases = {}, {}
     with PL.subreaper():
@@ -1105,8 +1248,9 @@ def measure(timeout=15, allow_sysctl=False, run_factory=Run):
     return {"experiment": "linux-single-owner-v1",
             "measuredAtUTC": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "supervised": True, "trustedCode": False, "strictAdmission": False, "productionAdmission": False,
-            "sysctlCase": "run" if allow_sysctl else "not-run",
-            "host": host, "sources": source_hashes(), "setup": setup, "cases": cases, "cleanup": cleanup,
+            "sysctlCase": next((item.get("status", "run") for case, item in cases.items() if CASES[case]["sysctl"]),
+                               "not-run"),
+            "host": host, "scripts": scripts, "builds": getattr(run, "build_hashes", {}), "setup": setup, "cases": cases, "cleanup": cleanup,
             "passed": passed,
             "limits": ["C measurement fixture with a stub authority, not the Swift authority (PR2)",
                        "AmbientCapabilities= emulated with setpriv; no systemd unit, AppArmor or cgroup options",

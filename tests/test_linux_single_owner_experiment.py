@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -27,8 +28,8 @@ EXPERIMENT_DOC = SCRIPT.parents[1] / "docs/experiments/linux-single-owner.md"
 
 START = b'{"ownerCapabilitiesExact":"yes","generation":"yes","authorityAccepted":"yes"}'
 DISPATCH = (b'{"dispatch":"1","admitted":"yes","permit":"yes","finalCheck":"yes","result":"dispatched",'
-            b'"execErrno":"none","requesterLostAfterCheck":"no","goWritten":"yes","killedAtDeadline":"no",'
-            b'"reported":"yes","kSetup":"ok","restartLogComplete":"yes"}')
+            b'"execErrno":"none","requesterLostBeforeCheck":"no","requesterLostAfterCheck":"no","goWritten":"yes",'
+            b'"killedAtDeadline":"no","reported":"yes","kSetup":"ok","kEnd":"exited","restartLogComplete":"yes"}')
 PROBE = (b'{"capPrm":"0000000000000000","capEff":"0000000000000000","capInh":"0000000000000000",'
          b'"capAmb":"0000000000000000","capBnd":"000001ffffffffff","noNewPrivs":"0","uid":"1000 1000 1000 1000",'
          b'"gid":"1000 1000 1000 1000","umask":"0027","nofileSoft":"777","sessionLeader":"yes","dumpable":"1",'
@@ -111,6 +112,8 @@ class FakeRun:
         self.calls.append(case)
         if self.fail_in == "case":
             raise RuntimeError("case runner failed")
+        if EXPERIMENT.CASES[case]["sysctl"] and not self.allow_sysctl:
+            return {"passed": True, "status": "not-run", "reason": "flag-not-given"}
         return {"passed": True}
 
     def cleanup(self):
@@ -250,6 +253,70 @@ class ReportTests(unittest.TestCase):
                                   text=True, check=True).stdout
             self.assertEqual(len(live.splitlines()), 16)
 
+    def test_restart_log_complete_needs_whole_lines(self):
+        complete = EXPERIMENT.restart_log_complete
+        self.assertEqual(complete(b"1 1 SEIZE\n2 1 INTERRUPT\n"), "yes")
+        for raw in (b"", b"1 1 SEIZE\n2 1 INTER", b"1 1 SEIZE\n\n", b"1 1 SEIZE\n2 1 inter\n"):
+            self.assertEqual(complete(raw), "no", raw)
+
+    def test_stop_comparison(self):
+        compare = EXPERIMENT.compare_stop
+        first = ((500, 3, 1), 77)
+        self.assertEqual(compare(first, ((500, 3, 1), 77), 77), ("yes", "yes"))
+        self.assertEqual(compare(first, ((501, 3, 1), 77), 77), ("no", "yes"))
+        self.assertEqual(compare(first, ((500, 4, 1), 77), 77), ("no", "yes"))
+        self.assertEqual(compare(first, ((500, 3, 1), 78), 77), ("yes", "no"))
+        self.assertEqual(compare(first, None, 77), ("gone", "gone"))
+        self.assertEqual(compare(None, None, 77), ("n/a", "n/a"))
+
+    @unittest.skipUnless(LINUX, "needs Linux procfs")
+    def test_stop_sample_of_a_stopped_process_does_not_move(self):
+        child = subprocess.Popen(["sh", "-c", "while :; do :; done"])
+        try:
+            time.sleep(0.05)
+            os.kill(child.pid, signal.SIGSTOP)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and EXPERIMENT.k_state_after_signal(child.pid, True, 0) != "stopped":
+                time.sleep(0.01)
+            first = EXPERIMENT.stop_sample(child.pid)
+            time.sleep(0.05)
+            self.assertEqual(EXPERIMENT.compare_stop(first, EXPERIMENT.stop_sample(child.pid), 0), ("yes", "yes"))
+            os.kill(child.pid, signal.SIGCONT)
+            time.sleep(0.05)
+            self.assertEqual(EXPERIMENT.compare_stop(first, EXPERIMENT.stop_sample(child.pid), 0)[0], "no")
+            child.kill()
+            child.wait()
+            self.assertIsNone(EXPERIMENT.stop_sample(child.pid))
+            self.assertEqual(EXPERIMENT.k_state_after_signal(child.pid, False, 0), "gone")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
+    @unittest.skipUnless(LINUX, "needs Linux")
+    def test_read_bounded_refuses_links_fifos_devices_and_large_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            regular = base / "marker"
+            regular.write_bytes(b"ran\n")
+            self.assertEqual(EXPERIMENT.read_bounded(regular), b"ran\n")
+            (base / "link").symlink_to("/dev/zero")
+            with self.assertRaises(OSError):
+                EXPERIMENT.read_bounded(base / "link")
+            os.mkfifo(base / "fifo")
+            started = time.monotonic()
+            with self.assertRaises(ValueError):
+                EXPERIMENT.read_bounded(base / "fifo")  # no writer: must not block
+            self.assertLess(time.monotonic() - started, 1)
+            with self.assertRaises(ValueError):
+                EXPERIMENT.read_bounded(Path("/dev/zero"))
+            (base / "big").write_bytes(b"x" * 11)
+            with self.assertRaisesRegex(ValueError, "too large"):
+                EXPERIMENT.read_bounded(base / "big", limit=10)
+            self.assertEqual(EXPERIMENT.read_bounded(base / "big", limit=11), b"x" * 11)
+            with self.assertRaises(FileNotFoundError):
+                EXPERIMENT.read_bounded(base / "absent")
+
     def test_restart_log_allows_no_restart_before_the_go_byte(self):
         clean = EXPERIMENT.restart_log_clean
         self.assertEqual(clean(b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 GO\n4 1 DETACH\n"), "yes")
@@ -366,7 +433,8 @@ class MeasureTests(unittest.TestCase):
         run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
         run.allow_sysctl, run.saved_sysctls = False, {}
         with patch.object(EXPERIMENT.Run, "enable_attach_sysctls", side_effect=AssertionError("sysctl written")):
-            self.assertEqual(run.run_case("caller-attaches-to-k", 40), {"passed": True, "status": "not-run"})
+            self.assertEqual(run.run_case("caller-attaches-to-k", 40),
+                             {"passed": True, "status": "not-run", "reason": "flag-not-given"})
 
     def test_sysctls_are_restored_when_the_attach_case_raises(self):
         run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
@@ -436,6 +504,41 @@ class MeasureTests(unittest.TestCase):
                 files["ptraceScope"].unlink()
                 files["ptraceScope"].mkdir()  # the restore cannot write it
                 self.assertFalse(run.restore_sysctls())
+
+    def test_a_sysctl_failure_records_the_attach_case_as_not_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            files["ptraceScope"].unlink()  # no Yama
+            with patch.dict(EXPERIMENT.SYSCTLS, files), \
+                 patch.object(EXPERIMENT, "drive_case", side_effect=AssertionError("must not run")):
+                self.assertEqual(run.run_case("caller-attaches-to-k", 40),
+                                 {"passed": True, "status": "not-run", "reason": "sysctl-unavailable"})
+            run, files = self.sysctl_run(directory)
+            real_write = Path.write_text
+            def write(path, value, *arguments, **options):
+                if path == files["ptraceScope"] and value == "0":
+                    raise OSError("EINVAL")  # ptrace_scope 3 cannot go down
+                return real_write(path, value, *arguments, **options)
+            with patch.dict(EXPERIMENT.SYSCTLS, files), \
+                 patch.object(EXPERIMENT, "drive_case", side_effect=AssertionError("must not run")):
+                with patch.object(Path, "write_text", write):
+                    result = run.run_case("caller-attaches-to-k", 40)
+            self.assertEqual(result, {"passed": True, "status": "not-run", "reason": "sysctl-write-refused"})
+            self.assertEqual(files["suidDumpable"].read_text().strip(), "2")  # the first write is undone
+            self.assertFalse(run.attach_enabled)
+
+    def test_measure_keeps_other_results_when_the_attach_case_cannot_run(self):
+        class SysctlFailRun(FakeRun):
+            def run_case(self, case, last_cap):
+                self.calls.append(case)
+                if EXPERIMENT.CASES[case]["sysctl"]:
+                    return {"passed": True, "status": "not-run", "reason": "sysctl-unavailable"}
+                return {"passed": True}
+        with linux_root():
+            report = EXPERIMENT.measure(allow_sysctl=True, run_factory=SysctlFailRun)
+        self.assertEqual(report["sysctlCase"], "not-run")
+        self.assertEqual(set(report["cases"]), set(EXPERIMENT.CASES))
+        self.assertTrue(report["passed"])
 
     def test_allow_sysctl_runs_the_attach_case_and_restores(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -652,6 +755,7 @@ class KillUserTests(unittest.TestCase):
             run.base = Path(directory) / "base"
             run.base.mkdir()
             run.base_created = run.service_created = True
+            run.uid_shared = False
             run.service_name, run.saved_sysctls, run.timeout = "rmzsotest", {}, 5
             removed = []
             def getpwnam(name):
@@ -688,6 +792,57 @@ class SetupLimitTests(unittest.TestCase):
                 run.setup()
             self.assertFalse(run.base.exists())
             self.assertIn("65 groups", stderr.getvalue())
+
+    def setup_run(self, directory):
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.operator = SimpleNamespace(pw_name="operator", pw_gid=1000, pw_uid=1000)
+        run.base = Path(directory) / "base"
+        run.timeout, run.service_name = 5, "rmzsotest"
+        run.base_created = run.service_created = run.uid_shared = False
+        run.saved_sysctls = {}
+        return run
+
+    def test_setup_stops_when_the_new_uid_already_runs_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.setup_run(directory)
+            create = lambda self, flag, *_arguments: setattr(self, flag, True)
+            with patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000]), \
+                 patch.dict(EXPERIMENT.BUILDS, clear=True), \
+                 patch.object(EXPERIMENT.PL.Run, "_create", create), \
+                 patch.object(EXPERIMENT.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=999, pw_gid=999)), \
+                 patch.object(EXPERIMENT, "_user_processes", return_value=[4321]) as processes, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "already in use"):
+                run.setup()
+            processes.assert_called_once_with(999, Path("/proc"))
+            self.assertTrue(run.uid_shared)
+            with patch.object(EXPERIMENT, "_kill_user") as kill_user, \
+                 patch.object(EXPERIMENT.pwd, "getpwnam", side_effect=KeyError("gone")), \
+                 patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("gone")), \
+                 patch.object(EXPERIMENT.PL, "run_owned", return_value=(0, b"")):
+                result = run.cleanup()
+            kill_user.assert_not_called()  # nothing is killed by a UID that others use
+            self.assertFalse(result["serviceProcessesGone"])
+
+    @unittest.skipUnless(LINUX and compiler(), "needs Linux and a C compiler")
+    def test_setup_hashes_the_built_sources_and_binaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.setup_run(directory)
+            def write(path, data, mode, gid=0):
+                Path(path).write_bytes(data)
+                os.chmod(path, mode)
+            def create(self, flag, *_arguments):
+                raise RuntimeError("stop after the builds")
+            builds = {"probe": EXPERIMENT.BUILDS["probe"]}
+            with patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000]), \
+                 patch.dict(EXPERIMENT.BUILDS, builds, clear=True), \
+                 patch.object(EXPERIMENT.PL, "write_root_file", write), \
+                 patch.object(EXPERIMENT, "_run_tool", lambda arguments, _timeout: subprocess.run(
+                     [compiler(), *arguments[1:]], capture_output=True).returncode), \
+                 patch.object(EXPERIMENT.PL.Run, "_create", create), self.assertRaisesRegex(RuntimeError, "stop"):
+                run.setup()
+            digest = lambda data: hashlib.sha256(data).hexdigest()
+            self.assertEqual(run.build_hashes["sources"], {"probe": digest(EXPERIMENT.PROBE.read_bytes())})
+            self.assertEqual(run.build_hashes["binaries"], {"probe": digest((run.base / "run/probe").read_bytes())})
 
     @unittest.skipUnless(LINUX, "needs Linux")
     def test_run_listeners_bind_private_then_chown_then_open_to_the_group(self):
@@ -919,6 +1074,32 @@ class FixtureCaseTests(unittest.TestCase):
                 self.assertEqual(result["observed"]["restartLogClean"], "n/a")  # an empty log
                 self.assertEqual(result["observed"]["markerLines"], "1")
                 self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+
+    def test_after_go_signal_cases_fail_when_the_signal_does_nothing(self):
+        """K pauses after the go byte: a signal that never arrives must fail the case."""
+
+        class SilentHost(FixtureHost):
+            def caller_signal(self, name, pid):
+                return True  # claims to send, sends nothing
+
+        for case in ("caller-sigstop-k-after-go", "caller-sigterm-k-after-go", "caller-sigusr1-k-after-go"):
+            with self.subTest(case=case):
+                result = self.drive(case, SilentHost(self.binaries))
+                self.assertFalse(result["passed"], case)
+                self.assertIn("kStateAfterSignal", result["mismatches"])
+                self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+
+    def test_kill_k_after_go_fails_when_k_survives(self):
+        real_act = EXPERIMENT._act
+        def act(action, host, owner, pids, observed, *rest):
+            if action == "kill-k":  # the kill is lost: K keeps pausing
+                observed["kStateAfterSignal"] = EXPERIMENT.k_state_after_signal(pids["k"], False, 0.05)
+                return True
+            return real_act(action, host, owner, pids, observed, *rest)
+        with patch.object(EXPERIMENT, "_act", act):
+            result = self.drive("kill-k-after-go", FixtureHost(self.binaries))
+        self.assertFalse(result["passed"])
+        self.assertIn("kEnd", result["mismatches"])
 
     def test_a_limit_above_the_owner_is_a_reported_setup_failure(self):
         result = self.drive("caller-limit-above-owner", FixtureHost(self.binaries))
