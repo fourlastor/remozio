@@ -459,6 +459,7 @@
     <string name="macs_abandon_repair_failed">Could not finish local re-pair cleanup. Check the current list and try again.</string>
     <string name="pairing_setup_phone">Phone ID: %1$s</string>
     <string name="pairing_setup_compare">Compare all four groups with the code on your Mac. Continue only if every character matches.</string>
+    <string name="pairing_setup_clock_advisory">Check that automatic date and time are on for your phone and Mac.</string>
     <plurals name="pairing_setup_remaining">
         <item quantity="one">Estimated time left: %1$d second</item>
         <item quantity="other">Estimated time left: %1$d seconds</item>

@@ -1,6 +1,8 @@
 package dev.sebastiano.remozio.android.biometrics
 
 import androidx.annotation.WorkerThread
+import dev.sebastiano.remozio.android.enrollment.PairingDeadline
+import dev.sebastiano.remozio.android.enrollment.PairingDeadlineExpired
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.protocol.*
@@ -13,21 +15,18 @@ class AndroidPairingBiometrics internal constructor(
     private val record: StoredPhoneEnrollment,
     private var key: PrivateKey?,
     private val publicKey: PublicKey,
-    private val started: ElapsedInstant,
-    startedAtUnixMillis: ULong,
+    private val deadline: PairingDeadline,
     private val now: () -> ElapsedInstant,
     private val isCurrent: () -> Boolean,
 ) : AutoCloseable {
     private val transcript = requireNotNull(record.pairing).transcript
-    private val lifetime: ULong
     private var attempt: Any? = null
     private var current: PairingBiometricOperation? = null
     init {
         require(record.phase == EnrollmentPhase.PREPARED)
-        require(startedAtUnixMillis >= transcript.issuedAtUnixMillis && startedAtUnixMillis < transcript.expiresAtUnixMillis)
+        require(deadline.matches(transcript))
         require(transcript.biometricKey.keyID == record.enrollment.biometricKey.keyID &&
             transcript.biometricKey.publicKey == record.enrollment.biometricKey.publicKey)
-        lifetime = transcript.expiresAtUnixMillis - startedAtUnixMillis
     }
 
     @Synchronized internal fun beginAttempt(): Any {
@@ -48,9 +47,7 @@ class AndroidPairingBiometrics internal constructor(
         } catch (_: Exception) { throw BiometricAuthorizationUnavailable() }
     }
     @Synchronized internal fun available(): Boolean = try {
-        val time = now()
-        key != null && time.epoch == started.epoch && time.milliseconds >= started.milliseconds &&
-            time.milliseconds - started.milliseconds < lifetime && isCurrent()
+        key != null && deadline.isOpen(now()) && isCurrent()
     } catch (_: Exception) { false }
 
     @Synchronized internal fun complete(operation: PairingBiometricOperation, returned: Signature): ByteArray {
@@ -74,13 +71,19 @@ class AndroidPairingBiometrics internal constructor(
     companion object {
         /** The host supplies a local current-record check; network input cannot supply setup authorization. */
         @WorkerThread
-        fun load(record: StoredPhoneEnrollment, started: ElapsedInstant, startedAtUnixMillis: ULong,
+        internal fun load(record: StoredPhoneEnrollment, deadline: PairingDeadline,
             now: () -> ElapsedInstant, isCurrent: () -> Boolean): AndroidPairingBiometrics {
-            try {
+            deadline.requireOpen(now())
+            val signer = try {
                 require(record.phase == EnrollmentPhase.PREPARED && record.pairing != null)
                 val material = loadBiometricKey(record.enrollment.biometricKey)
-                return AndroidPairingBiometrics(record, material.key, material.publicKey, started, startedAtUnixMillis, now, isCurrent)
+                AndroidPairingBiometrics(record, material.key, material.publicKey, deadline, now, isCurrent)
             } catch (_: Exception) { throw BiometricAuthorizationUnavailable() }
+            if (!deadline.isOpen(now())) {
+                signer.close()
+                throw PairingDeadlineExpired()
+            }
+            return signer
         }
     }
 }
