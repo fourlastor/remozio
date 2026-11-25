@@ -14,14 +14,16 @@ final class RoutingJournalTests: XCTestCase {
     private func id(_ n: UInt8) -> Data { Data(repeating: n, count: 16) }
     private var limits: CBORLimits { get throws { try .init(maxBytes: 16384, maxDepth: 12, maxItems: 1024) } }
     private func now(_ n: UInt64 = 100) -> AuthorityMoment { .init(epoch: clock, milliseconds: n) }
-    private func open(_ f: Fixture, initialize: Bool = false, migrate: Int64? = nil, maximum: Int = 20) throws -> JournalDatabase {
+    private func open(_ f: Fixture, initialize: Bool = false, migrate: Int64? = nil, maximum: Int = 20,
+                      step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws -> JournalDatabase {
         try JournalDatabase(lease: f.lease(), macID: id(1), accountID: id(2), recordLimits: limits, descriptorLimits: limits,
             decisionLimits: limits, maximumConsumptions: 20, busyMilliseconds: 100, initialize: initialize, migrateFromVersion: migrate,
             routingPolicy: RoutingJournalPolicy(clockEpoch: clock, challengeLifetimeMillis: 1000, maximumOperations: maximum,
-                payloadLimits: limits, signingLimits: limits))
+                payloadLimits: limits, signingLimits: limits), journalStep: step)
     }
-    private func setup(_ f: Fixture, maximum: Int = 20) throws -> (JournalDatabase, AuditEpochWriter, UUID) {
-        let db = try open(f, initialize: true, maximum: maximum)
+    private func setup(_ f: Fixture, maximum: Int = 20,
+                       step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws -> (JournalDatabase, AuditEpochWriter, UUID) {
+        let db = try open(f, initialize: true, maximum: maximum, step: step)
         let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
         let capabilities = ContractCapabilities(contracts: [contract: []])
         let empty = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
@@ -310,6 +312,55 @@ final class RoutingJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.routingState() }, .init(mode: .automatic, revision: 0))
         XCTAssertEqual(try db.read { try $0.epoch(writer.epoch)?.head }, 1)
         XCTAssertTrue(try db.write { try apply($0, last, trust: trust, writer: writer, moment: 1_024_101) }.inserted)
+    }
+
+    func testStepFailuresAbortWithoutRetiringTheRoutingOwner() throws {
+        let fixture = try Fixture(), fault = JournalStepFault()
+        let (db, _, trust) = try setup(fixture, step: fault.step)
+        defer { try? db.close() }
+        let ioRead = SQLITE_IOERR | (1 << 8)
+
+        fault.arm("SELECT mode,revision FROM main.routing_state_v1", code: ioRead)
+        XCTAssertThrowsError(try db.read { tx in
+            XCTAssertThrowsError(try tx.routingState()) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .storage(ioRead))
+            }
+        }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionFailed) }
+        XCTAssertFalse(db.retired)
+        fault.arm("SELECT count(*) FROM main.routing_operations_v1", code: SQLITE_BUSY)
+        XCTAssertThrowsError(try issue(db, trust: trust)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_BUSY))
+        }
+        XCTAssertFalse(db.retired)
+        XCTAssertEqual(try db.read { try $0.routingState().revision }, 0)
+        _ = try issue(db, trust: trust)
+    }
+
+    func testDatabaseIntegrityFailureRetiresTheRoutingOwnerEvenWhenCaught() throws {
+        let fixture = try Fixture(), fault = JournalStepFault()
+        let db = try open(fixture, initialize: true, step: fault.step)
+        defer { try? db.close() }
+        let corruptIndex = SQLITE_CORRUPT | (3 << 8)
+        fault.arm("SELECT mode,revision FROM main.routing_state_v1", code: corruptIndex)
+        XCTAssertThrowsError(try db.read { tx in
+            XCTAssertThrowsError(try tx.routingState()) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .databaseIntegrity(corruptIndex))
+            }
+        }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionFailed) }
+        XCTAssertTrue(db.retired)
+        XCTAssertThrowsError(try db.read { try $0.routingState() }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+        }
+    }
+
+    func testMissingRequiredRoutingRowStillFailsTheRecordInvariant() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        defer { try? db.close() }
+        try fixture.sql("DELETE FROM routing_state_v1 WHERE id=1")
+        XCTAssertThrowsError(try db.read { try $0.routingState() }) {
+            XCTAssertEqual($0 as? RoutingJournalError, .corruptData)
+        }
+        XCTAssertTrue(db.retired)
     }
 
     func testFullLiveRoutingStoreKeepsReceiptsUntilTheirDeadline() throws {

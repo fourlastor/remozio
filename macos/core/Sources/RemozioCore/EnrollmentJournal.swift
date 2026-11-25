@@ -135,10 +135,13 @@ private enum EnrollmentEncoding {
 /// Private owner. Enrollment, revocation, decision consumption and audit writes share the journal transaction.
 final class EnrollmentJournal {
     private let db: OpaquePointer
+    private let step: (OpaquePointer) -> Int32
     private let mac: Data
     private let account: Data
     static let maximumRows = 1024
-    init(connection: OpaquePointer, macID: Data, accountID: Data) { db = connection; mac = macID; account = accountID }
+    init(connection: OpaquePointer, macID: Data, accountID: Data, step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) {
+        db = connection; mac = macID; account = accountID; self.step = step
+    }
 
     static func createSchema(_ db: OpaquePointer) throws {
         let result = sqlite3_exec(db, """
@@ -180,9 +183,9 @@ final class EnrollmentJournal {
     private func pairing(_ enrollment: StoredApprovalEnrollment, expectedSetupID: Data? = nil) throws -> PairingTranscript? {
         try statement("SELECT setup,transcript,proof FROM main.pairing_commits_v1 WHERE phone=? AND epoch=?",
                       [enrollment.approval.phoneID, enrollment.epoch]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             do {
                 let setupID = try blob($0, 0, maximum: 16)
                 guard setupID.count == 16 else { throw EnrollmentJournalError.corruptData }
@@ -267,9 +270,9 @@ final class EnrollmentJournal {
 
     func snapshot() throws -> ApprovalTrustSnapshot {
         try statement("SELECT policy,revision FROM main.approval_authority_v1 WHERE id=1", []) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { throw EnrollmentJournalError.unconfigured }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let policy = try EnrollmentEncoding.decode(EnrollmentEncoding.Policy.self, blob($0, 0))
             let revision = try uuid(blob($0, 1))
             do {
@@ -280,6 +283,8 @@ final class EnrollmentJournal {
                 let restricted = try restrictedPhones()
                 return try ApprovalTrustSnapshot(macID: mac, accountID: account, revision: revision,
                     authorityCapabilities: capabilities, allowedContracts: allowed, enrollments: all().filter { $0.approval.active && !restricted.contains($0.approval.phoneID) }.map(\.approval))
+            } catch let error as JournalDatabaseError {
+                throw error
             } catch { throw EnrollmentJournalError.corruptData }
         }
     }
@@ -288,9 +293,10 @@ final class EnrollmentJournal {
         try statement("SELECT phone FROM main.gateway_trust_restrictions_v1 LIMIT 1025", []) {
             var phones: Set<Data> = []
             while true {
-                let result = sqlite3_step($0)
+                let result = step($0)
                 if result == SQLITE_DONE { return phones }
-                guard result == SQLITE_ROW, phones.count < Self.maximumRows else { throw EnrollmentJournalError.corruptData }
+                guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
+                guard phones.count < Self.maximumRows else { throw EnrollmentJournalError.corruptData }
                 let phone = try blob($0, 0)
                 guard phone.count == 16, phones.insert(phone).inserted else { throw EnrollmentJournalError.corruptData }
             }
@@ -302,9 +308,9 @@ final class EnrollmentJournal {
         try statement("SELECT phone,epoch,active,body FROM main.approval_enrollments_v1 ORDER BY phone,epoch LIMIT 1025", []) {
             var values: [StoredApprovalEnrollment] = []
             while true {
-                let result = sqlite3_step($0)
+                let result = step($0)
                 if result == SQLITE_DONE { return values }
-                guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+                guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
                 guard values.count < Self.maximumRows else { throw EnrollmentJournalError.corruptData }
                 let active = sqlite3_column_int64($0, 2)
                 guard active == 0 || active == 1 else { throw EnrollmentJournalError.corruptData }
@@ -372,7 +378,8 @@ final class EnrollmentJournal {
             }
         }
         try statement("SELECT (SELECT count(*) FROM main.gateway_revocations_v1 WHERE phone=? AND enrollment=?)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1 WHERE phone=? AND enrollment=?)", [enrollment.approval.phoneID, enrollment.epoch, enrollment.approval.phoneID, enrollment.epoch]) {
-            guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw EnrollmentJournalError.reusedIdentity }
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: EnrollmentJournalError.corruptData)
+            guard sqlite3_column_int64($0, 0) == 0 else { throw EnrollmentJournalError.reusedIdentity }
         }
         try statement("INSERT INTO main.approval_enrollments_v1 VALUES(?,?,1,?)",
             [enrollment.approval.phoneID, enrollment.epoch, try EnrollmentEncoding.encode(enrollment)]) { try done($0) }
@@ -396,9 +403,9 @@ final class EnrollmentJournal {
 
     func gatewayRegistration() throws -> GatewayRegistrationIdentity? {
         try statement("SELECT identity FROM main.gateway_authority_v1 WHERE id=1", []) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let identity = try GatewayRegistrationIdentity.decode(blob($0, 0))
             guard identity.macID == mac, identity.accountID == account else { throw EnrollmentJournalError.corruptData }
             return identity
@@ -441,21 +448,27 @@ final class EnrollmentJournal {
         return next
     }
     private func scalar(_ sql: String) throws -> Int64 {
-        try statement(sql, []) { guard sqlite3_step($0) == SQLITE_ROW else { throw EnrollmentJournalError.corruptData }; return sqlite3_column_int64($0, 0) }
+        try statement(sql, []) {
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: EnrollmentJournalError.corruptData)
+            return sqlite3_column_int64($0, 0)
+        }
     }
     private func statement<T>(_ sql: String, _ values: [Data], _ body: (OpaquePointer) throws -> T) throws -> T {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
         var value: OpaquePointer?
         let result = sqlite3_prepare_v2(db, sql, -1, &value, nil)
-        guard result == SQLITE_OK, let value else { throw JournalDatabaseError.storage(result) }
+        guard result == SQLITE_OK, let value else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
         defer { sqlite3_finalize(value) }
         for (index, data) in values.enumerated() {
             let bound = data.withUnsafeBytes { sqlite3_bind_blob(value, Int32(index + 1), $0.baseAddress, Int32(data.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
-            guard bound == SQLITE_OK else { throw JournalDatabaseError.storage(bound) }
+            guard bound == SQLITE_OK else { throw JournalDatabaseError.sqliteFailure(bound, on: db) }
         }
         return try body(value)
     }
-    private func done(_ stmt: OpaquePointer) throws { guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) } }
+    private func done(_ stmt: OpaquePointer) throws {
+        let result = step(stmt)
+        guard result == SQLITE_DONE else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
+    }
     private func blob(_ stmt: OpaquePointer, _ index: Int32, maximum: Int = EnrollmentEncoding.maximumBytes) throws -> Data {
         let count = Int(sqlite3_column_bytes(stmt, index))
         guard sqlite3_column_type(stmt, index) == SQLITE_BLOB, count > 0, count <= maximum,

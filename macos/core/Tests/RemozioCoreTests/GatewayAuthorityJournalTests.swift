@@ -37,15 +37,17 @@ final class GatewayAuthorityJournalTests: XCTestCase {
             nowUnixMillis: wall, now: moment(now), sign: sign) }
     }
     private func open(_ fixture: Fixture, initialize: Bool = false, maximum: Int = 20, enabled: Bool = true,
-                      migrate: Int64? = nil, epoch: UUID? = nil) throws -> JournalDatabase {
+                      migrate: Int64? = nil, epoch: UUID? = nil,
+                      step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws -> JournalDatabase {
         try JournalDatabase(lease: fixture.lease(), macID: id(2), accountID: id(3), recordLimits: limits,
             descriptorLimits: limits, decisionLimits: limits, maximumConsumptions: 20, busyMilliseconds: 100,
             initialize: initialize, migrateFromVersion: migrate,
             gatewayPolicy: enabled ? GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits,
-                maximumControls: maximum, candidateLifetimeMillis: 1000, clockEpoch: epoch ?? clockEpoch) : nil)
+                maximumControls: maximum, candidateLifetimeMillis: 1000, clockEpoch: epoch ?? clockEpoch) : nil, journalStep: step)
     }
-    private func setup(_ fixture: Fixture, maximum: Int = 20) throws -> JournalDatabase {
-        let db = try open(fixture, initialize: true, maximum: maximum)
+    private func setup(_ fixture: Fixture, maximum: Int = 20,
+                       step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws -> JournalDatabase {
+        let db = try open(fixture, initialize: true, maximum: maximum, step: step)
         try db.write { try $0.configureGatewayAuthority(trust().registration) }
         return db
     }
@@ -129,6 +131,71 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertThrowsError(try consume(db, first, head: 2)) { XCTAssertEqual($0 as? GatewayAuthorityError, .alreadyConsumed) }
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
         XCTAssertEqual(String(reflecting: activation), "GatewayAuthorityEnvelope(redacted)")
+    }
+
+    func testRegistrationAbsenceAndReadFailureStayDistinct() throws {
+        let fixture = try Fixture(), fault = JournalStepFault()
+        let db = try open(fixture, initialize: true, step: fault.step)
+        defer { try? db.close() }
+        let registration = try trust().registration
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(registration) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .unconfigured)
+        }
+        fault.arm("SELECT identity,head FROM main.gateway_authority_v1", code: SQLITE_BUSY)
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(registration) }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_BUSY))
+        }
+        XCTAssertFalse(db.retired)
+        try db.write { try $0.configureGatewayAuthority(registration) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, 0)
+        let other = try GatewayRegistrationIdentity(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(44),
+            lifecycleEpoch: id(5), rootPublicKey: key.publicKey.x963Representation)
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(other) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .wrongScope)
+        }
+        XCTAssertFalse(db.retired)
+        fault.arm("SELECT identity,head FROM main.gateway_authority_v1", code: SQLITE_NOTADB)
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(registration) }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .databaseIntegrity(SQLITE_NOTADB))
+        }
+        XCTAssertTrue(db.retired)
+    }
+
+    func testCandidateAndTrailingActivationStepFailuresPreserveDurableHead() throws {
+        let fixture = try Fixture(), fault = JournalStepFault()
+        let db = try setup(fixture, step: fault.step)
+        defer { try? db.close() }
+        let first = try prepare(db), activation = try consume(db, first)
+        let fsyncFailure = SQLITE_IOERR | (4 << 8)
+        for (sql, precedingSteps, code) in [
+            ("FROM main.gateway_root_candidates_v1 c LEFT JOIN", 0, SQLITE_LOCKED),
+            ("SELECT operation FROM main.gateway_outbox_v1 WHERE candidate=? AND kind=2", 0, fsyncFailure),
+            ("SELECT operation FROM main.gateway_outbox_v1 WHERE candidate=? AND kind=2", 1, fsyncFailure),
+        ] {
+            fault.arm(sql, code: code, after: precedingSteps)
+            XCTAssertThrowsError(try db.read {
+                try $0.pendingGatewayControl(operationID: activation.operationID, trust: trust(), nowUnixMillis: 1010, now: moment(110))
+            }) { XCTAssertEqual($0 as? JournalDatabaseError, .storage(code)) }
+            XCTAssertFalse(db.retired)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+        }
+        XCTAssertEqual(try db.read {
+            try $0.pendingGatewayControl(operationID: activation.operationID, trust: trust(), nowUnixMillis: 1010, now: moment(110))
+        }?.operationID, activation.operationID)
+    }
+
+    func testCapacityReadFailureLeavesTheGatewayHeadUnchanged() throws {
+        let fixture = try Fixture(), fault = JournalStepFault()
+        let db = try setup(fixture, step: fault.step)
+        defer { try? db.close() }
+        fault.arm("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)",
+            code: SQLITE_FULL)
+        XCTAssertThrowsError(try prepare(db)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_FULL))
+        }
+        XCTAssertFalse(db.retired)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+        XCTAssertEqual(try prepare(db).revision, 1)
     }
 
     func testWrongPeerWrongProofAndRevokedTrustNeverCallSigner() throws {

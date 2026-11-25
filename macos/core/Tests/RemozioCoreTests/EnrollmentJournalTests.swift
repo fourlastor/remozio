@@ -30,16 +30,18 @@ final class EnrollmentJournalTests: XCTestCase {
             4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
         ]), limits: limits), limits: limits)
     }
-    private func open(_ fixture: Fixture, initialize: Bool = false, migrate: Int64? = nil, maximum: Int = 50) throws -> JournalDatabase {
+    private func open(_ fixture: Fixture, initialize: Bool = false, migrate: Int64? = nil, maximum: Int = 50,
+                      step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws -> JournalDatabase {
         try JournalDatabase(lease: fixture.lease(), macID: id(1), accountID: id(2), recordLimits: limits, descriptorLimits: limits,
             decisionLimits: limits, maximumConsumptions: 20, busyMilliseconds: 100, initialize: initialize, migrateFromVersion: migrate,
             gatewayPolicy: GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits, maximumControls: maximum,
                 candidateLifetimeMillis: 1000, clockEpoch: clock),
             routingPolicy: RoutingJournalPolicy(clockEpoch: clock, challengeLifetimeMillis: 1000, maximumOperations: 20,
-                payloadLimits: limits, signingLimits: limits))
+                payloadLimits: limits, signingLimits: limits), journalStep: step)
     }
-    private func setup(_ fixture: Fixture, maximum: Int = 50) throws -> (JournalDatabase, AuditEpochWriter, UUID) {
-        let db = try open(fixture, initialize: true, maximum: maximum)
+    private func setup(_ fixture: Fixture, maximum: Int = 50,
+                       step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws -> (JournalDatabase, AuditEpochWriter, UUID) {
+        let db = try open(fixture, initialize: true, maximum: maximum, step: step)
         let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
         let writer = try db.write { try $0.createEpoch(descriptor()) }
         return (db, writer, revision)
@@ -106,6 +108,43 @@ final class EnrollmentJournalTests: XCTestCase {
             authorityPublicKey: rootKey.publicKey.x963Representation, transportPublicKey: transport, minimumEnvelopeVersion: minimum,
             started: .init(epoch: clock, milliseconds: 100), startedAtUnixMillis: 1000, deadlineMilliseconds: 1100)
         return (attempt, try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation)
+    }
+
+    func testStorageFailuresSurviveNestedEnrollmentSnapshotReads() throws {
+        let fixture = try Fixture(), fault = JournalStepFault()
+        let (db, writer, revision) = try setup(fixture, step: fault.step)
+        defer { try? db.close() }
+        let current = try add(db, writer: writer, revision: revision)
+        for (fragment, earlierRows, code) in [
+            ("SELECT phone FROM main.gateway_trust_restrictions_v1", 0, SQLITE_BUSY),
+            ("SELECT phone,epoch,active,body FROM main.approval_enrollments_v1", 1, SQLITE_IOERR | (1 << 8)),
+        ] {
+            fault.arm(fragment, code: code, after: earlierRows)
+            XCTAssertThrowsError(try db.read { try $0.approvalTrustSnapshot() }) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .storage(code))
+            }
+            XCTAssertFalse(db.retired)
+        }
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, current)
+        XCTAssertEqual(try db.read { try $0.approvalEnrollments().count }, 1)
+    }
+
+    func testFailedEnrollmentCountsAreStorageFailures() throws {
+        let fixture = try Fixture(), fault = JournalStepFault()
+        let (db, writer, revision) = try setup(fixture, step: fault.step)
+        defer { try? db.close() }
+        fault.arm("SELECT count(*) FROM main.gateway_authority_v1", code: SQLITE_FULL)
+        XCTAssertThrowsError(try db.read { try $0.hasApprovalGateway() }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_FULL))
+        }
+        fault.arm("SELECT (SELECT count(*) FROM main.gateway_revocations_v1 WHERE phone=", code: SQLITE_LOCKED)
+        XCTAssertThrowsError(try add(db, writer: writer, revision: revision)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_LOCKED))
+        }
+        XCTAssertFalse(db.retired)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+        XCTAssertTrue(try db.read { try $0.approvalEnrollments().isEmpty })
+        _ = try add(db, writer: writer, revision: revision)
     }
 
     func testDirectTrustUsesCurrentJournalBindingsAndRejectsStaleOrForgedPeers() throws {
