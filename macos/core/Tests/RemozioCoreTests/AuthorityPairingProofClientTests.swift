@@ -23,6 +23,8 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
         let confirmed = Mutex<(@Sendable (Bool) -> Void)?>(nil)
         let holdRegistration = Mutex(true)
         let holdConfirmation = Mutex(false)
+        let holdHandoff: Bool
+        let handoff = Mutex<(@Sendable (Bool) -> Void)?>(nil)
         let holdVerification = Mutex(false)
         let verified = Mutex<(@Sendable (Bool) -> Void)?>(nil)
         let live = Mutex<Set<Data>>([])
@@ -33,8 +35,9 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
         let policy: XPCPeerPolicy
         let requirement: String
 
-        init(holdConfirm: Bool = false, advanceBeforeVerifyReply: @escaping @Sendable () -> Void = {},
+        init(holdConfirm: Bool = false, holdHandoff: Bool = false, advanceBeforeVerifyReply: @escaping @Sendable () -> Void = {},
              advanceBeforeConfirmReply: @escaping @Sendable () -> Void = {}) throws {
+            self.holdHandoff = holdHandoff
             self.advanceBeforeVerifyReply = advanceBeforeVerifyReply
             self.advanceBeforeConfirmReply = advanceBeforeConfirmReply
             var dynamic: SecCode?, fixed: SecStaticCode?, info: CFDictionary?
@@ -63,8 +66,12 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
             return true
         }
 
-        func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(2) }
+        func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AuthorityPairingProofWire.handoffVersion) }
         func bindWindow(_ windowID: Data, reply: @escaping @Sendable (Bool) -> Void) { reply(true) }
+        func finishBootstrap(reply: @escaping @Sendable (Bool) -> Void) {
+            if holdHandoff { handoff.withLock { $0 = reply } }
+            else { reply(true) }
+        }
 
         func registerCandidate(_ connectionID: Data, acceptedAt: UInt64, peerPoint: Data, exporter: Data,
                                reply: @escaping RegistrationReply) {
@@ -310,6 +317,17 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
         var ports = ready.stream.makeAsyncIterator()
         let port = await ports.next()
         return try (listener, XCTUnwrap(port))
+    }
+
+    func testMissingBootstrapHandoffReplyRetiresTheDedicatedClient() async throws {
+        let replies = try Replies(holdHandoff: true)
+        let closes = CloseCount()
+        do {
+            _ = try await replies.client(closes: closes)
+            XCTFail("The proof link became usable without a handoff reply")
+        } catch AuthorityXPCError.timedOut {}
+        replies.handoff.withLock { callback in callback?(true); callback = nil }
+        XCTAssertEqual(closes.value.withLock { $0 }, 1)
     }
 
     func testLostConfirmationRetiresTheLinkAndIgnoresALateReply() async throws {
