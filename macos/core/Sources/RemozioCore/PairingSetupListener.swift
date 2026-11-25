@@ -49,10 +49,10 @@ struct PairingSetupV2Ingress: Sendable {
 public final class PairingSetupListener: @unchecked Sendable {
     private final class Slot: @unchecked Sendable {
         let channel: NetworkByteChannel
-        let source: String?
+        let source: PairingSetupV2Source?
         var task: Task<Void, Never>?
         var proofTimer: Task<Void, Never>?
-        init(_ channel: NetworkByteChannel, source: String?) {
+        init(_ channel: NetworkByteChannel, source: PairingSetupV2Source?) {
             self.channel = channel
             self.source = source
         }
@@ -64,7 +64,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let v2: PairingSetupV2Ingress?
     private let applicationProtocol: String
     private let intakeClock: AuthorityClock?
-    private let registrationLane = PairingSetupV2RegistrationLane()
+    private let registrationLane: PairingSetupV2RegistrationLane
     private var v2Admissions = PairingSetupV2Admissions()
     private var expiry: Task<Void, Never>?
     private let proofTime: @Sendable () -> ContinuousClock.Instant
@@ -91,6 +91,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     init(identity: SecIdentity, invitation: PairingInvitation, binding: DirectApprovalListener.Binding,
          maximumConnections: Int, handshakeTimeoutMilliseconds: UInt64, setupTimeoutMilliseconds: UInt64,
          v2: PairingSetupV2Ingress?, proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+         registrationLane: PairingSetupV2RegistrationLane = PairingSetupV2RegistrationLane(),
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
@@ -107,6 +108,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         self.invitation = invitation; self.maximumConnections = maximumConnections
         self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.setupTimeoutMilliseconds = setupTimeoutMilliseconds
         self.handler = handler; self.event = event; self.v2 = v2; self.proofTime = proofTime
+        self.registrationLane = registrationLane
         intakeClock = try v2.map { _ in try AuthorityClock() }
         let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
         self.applicationProtocol = applicationProtocol
@@ -181,9 +183,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         let acceptedAt: AuthorityMoment?
         do { acceptedAt = try intakeClock?.now() }
         catch { connection.cancel(); return }
-        let source: String?
-        if v2 != nil, case .hostPort(let host, _) = connection.endpoint { source = String(describing: host) }
-        else { source = nil }
+        let source = v2 == nil ? nil : PairingSetupV2Source(connection.endpoint)
         let applicationProtocol = applicationProtocol
         let registrations = registrationLane
         var evicted: Slot?

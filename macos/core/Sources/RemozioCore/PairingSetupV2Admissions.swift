@@ -11,7 +11,7 @@ struct PairingSetupV2Admissions {
 
     private struct Pending {
         let id: UUID
-        let source: String
+        let source: PairingSetupV2Source
         let deadline: ContinuousClock.Instant
         var phase: Phase = .unproved
     }
@@ -23,11 +23,11 @@ struct PairingSetupV2Admissions {
     private static let maximumSources = 64
 
     private var pending: [Pending] = []
-    private var sources: [String: (until: ContinuousClock.Instant, attempts: Int)] = [:]
+    private var sources: [PairingSetupV2Source: (until: ContinuousClock.Instant, attempts: Int)] = [:]
     private var budget = PairingRegistrationBudget()
 
-    mutating func admit(_ id: UUID, source: String, accepted: ContinuousClock.Instant,
-                        clock: AuthorityMoment, draining: [String]) -> Admission {
+    mutating func admit(_ id: UUID, source: PairingSetupV2Source, accepted: ContinuousClock.Instant,
+                        clock: AuthorityMoment, draining: [PairingSetupV2Source]) -> Admission {
         // Keep one pending turn per source. A repeat can replace its own unproved slot only.
         guard draining.lazy.filter({ $0 == source }).count < 2,
               pending.count + draining.count < Self.maximumPending + Self.maximumDraining else { return .rejected }
@@ -37,25 +37,22 @@ struct PairingSetupV2Admissions {
             guard draining.count < Self.maximumDraining, pending[sameSource].phase == .unproved else { return .rejected }
             victim = sameSource
         } else if pending.count == Self.maximumPending {
-            guard draining.count < Self.maximumDraining,
-                  let index = pending.firstIndex(where: { $0.phase == .unproved }) else { return .rejected }
-            victim = index
+            return .rejected
         }
-        guard chargeSource(source, at: accepted), budget.spend(at: clock) else { return .rejected }
+        guard chargeAdmission(source, at: accepted, clock: clock) else { return .rejected }
         let evicted = victim.map { pending.remove(at: $0).id }
         pending.append(.init(id: id, source: source, deadline: accepted.advanced(by: Self.proofTimeout)))
         return .admitted(evicting: evicted)
     }
 
-    private mutating func chargeSource(_ source: String, at now: ContinuousClock.Instant) -> Bool {
+    private mutating func chargeAdmission(_ source: PairingSetupV2Source, at now: ContinuousClock.Instant,
+                                          clock: AuthorityMoment) -> Bool {
         sources = sources.filter { $0.value.until > now }
-        if let current = sources[source] {
-            guard current.attempts < Self.maximumSourceAttempts else { return false }
-            sources[source] = (current.until, current.attempts + 1)
-        } else {
-            guard sources.count < Self.maximumSources else { return false }
-            sources[source] = (now.advanced(by: .seconds(1)), 1)
-        }
+        let current = sources[source]
+        guard current != nil || sources.count < Self.maximumSources,
+              (current?.attempts ?? 0) < Self.maximumSourceAttempts,
+              budget.spend(at: clock) else { return false }
+        sources[source] = (current?.until ?? now.advanced(by: .seconds(1)), (current?.attempts ?? 0) + 1)
         return true
     }
 
