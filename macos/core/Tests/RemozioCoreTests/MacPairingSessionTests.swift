@@ -12,6 +12,7 @@ private actor MacPairingRootFixture: MacPairingRootControl {
     var stages = 0
     var commits = 0
     var loseCommitReply = false
+    var rejectBeforeSend = false
     var remainingRePairChecks: Int?
     var heldCommit: AsyncStream<Void>?
     func canRePair(_ selection: PairedPhoneSelection) -> Bool {
@@ -32,7 +33,10 @@ private actor MacPairingRootFixture: MacPairingRootControl {
         XCTAssertTrue(started); XCTAssertEqual(authorization.count, MemoryLayout<AuthorizationExternalForm>.size)
         try proposal.validate(fixture.transcript); stages += 1; return fixture.transcript
     }
-    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data) async throws -> Data {
+    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data {
+        if rejectBeforeSend { throw AuthorityPairingChannelError.closed }
+        onSend()
         XCTAssertEqual(try fixture.transcript.digest(), confirmedDigest)
         XCTAssertTrue(try fixture.transcript.verify(signature: biometricProof, publicKey: fixture.transcript.biometricKey.publicKey, purpose: .phoneBiometric))
         commits += 1
@@ -41,6 +45,7 @@ private actor MacPairingRootFixture: MacPairingRootControl {
         return try fixture.receipt()
     }
     func loseReply() { loseCommitReply = true }
+    func rejectCommitBeforeSend() { rejectBeforeSend = true }
     nonisolated func abort() {}
     func close() {}
 }
@@ -258,6 +263,25 @@ final class MacPairingSessionTests: XCTestCase {
         do { _ = try await o.session.commit(); XCTFail("Received an unavailable receipt") } catch {}
         let known = await o.session.closeForRePair()
         XCTAssertFalse(known)
+    }
+
+    func testUnsentCommitAllowsNewRePairAfterTheSessionCloses() async throws {
+        let o = try Owner(rePair: true)
+        try await o.start()
+        try await o.prepareProof()
+        await o.root.rejectCommitBeforeSend()
+        do { _ = try await o.session.commit(); XCTFail("Confirmed an unsent commit") }
+        catch AuthorityPairingChannelError.closed {}
+
+        let state = await o.session.snapshot()
+        XCTAssertEqual(state.phase, .unavailable)
+        let known = await o.session.closeForRePair()
+        XCTAssertTrue(known)
+        do { _ = try await o.session.commit(); XCTFail("Retried a closed session") }
+        catch MacPairingSessionError.closed {}
+        let commits = await o.root.commits, receipts = await o.transport.receipts
+        XCTAssertEqual(commits, 0)
+        XCTAssertEqual(receipts, 0)
     }
 
     func testProofDoesNotReplaceExplicitHumanConfirmation() async throws {

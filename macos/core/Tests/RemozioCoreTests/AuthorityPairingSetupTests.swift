@@ -200,6 +200,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let endpoint: AuthorityPairingXPCEndpoint
         let sends = Box(0), stageSends = Box(0), commitSends = Box(0), revocationSends = Box(0)
         let discardSends = Box(0)
+        let rejectCommitBeforeSend = Box(false)
         let hold = Box(Hold.none)
         let late = Box<(@Sendable () -> Void)?>(nil)
         private let transform: @Sendable (PairingClientCall, PairingClientReply) throws -> PairingClientReply
@@ -208,6 +209,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         }
         func start(closed: @escaping @Sendable () -> Void) {}
         func invoke(_ call: PairingClientCall, onSend: () -> Void, reply: @escaping @Sendable (PairingClientReply) -> Void) {
+            if case .commit = call, rejectCommitBeforeSend.value {
+                reply(.failed)
+                return
+            }
             onSend()
             sends.value += 1
             let complete: @Sendable (PairingClientReply) -> Void = { [self] value in
@@ -1657,15 +1662,35 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         } catch {}
         XCTAssertEqual(driver.commitSends.value, 1); XCTAssertEqual(try f.records(), 1)
     }
+    func testClientCommitDoesNotMarkDispatchWhenDriverRejectsBeforeSend() async throws {
+        let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver)
+        _ = try await channel.start()
+        let value = try await channel.stage(f.proposal(), authorization: authorization)
+        let dispatched = Box(false)
+        driver.rejectCommitBeforeSend.value = true
+        do {
+            _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f),
+                authorization: authorization, onSend: { dispatched.value = true })
+            XCTFail("Confirmed a commit without sending it")
+        } catch AuthorityPairingChannelError.closed {}
+        XCTAssertFalse(dispatched.value)
+        XCTAssertEqual(driver.commitSends.value, 0)
+        XCTAssertEqual(try f.records(), 0)
+        try f.assertCheckpoint()
+    }
+
     func testClientLostCommitReplyRemainsAmbiguousAndNeverRetries() async throws {
         let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver, timeout: 20)
         _ = try await channel.start()
         let value = try await channel.stage(f.proposal(), authorization: authorization)
         driver.hold.value = .commit
+        let dispatched = Box(false)
         do {
-            _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f), authorization: authorization)
+            _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f),
+                authorization: authorization, onSend: { dispatched.value = true })
             XCTFail("Confirmed lost reply")
         } catch { XCTAssertEqual(error as? AuthorityPairingChannelError, .timedOut) }
+        XCTAssertTrue(dispatched.value)
         driver.late.value?()
         do {
             _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f), authorization: authorization)

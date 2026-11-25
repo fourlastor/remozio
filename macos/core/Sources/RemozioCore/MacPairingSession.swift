@@ -27,7 +27,9 @@ protocol MacPairingRootControl: Sendable {
     func start() async throws -> AuthorityPairingContext
     func canRePair(_ selection: PairedPhoneSelection) async throws -> Bool
     func stage(_ proposal: PairingPhoneProposal, authorization: Data) async throws -> PairingTranscript
-    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data) async throws -> Data
+    /// Call onSend immediately before submitting the commit to Root.
+    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data
     nonisolated func abort()
     func close() async
 }
@@ -302,6 +304,7 @@ public actor MacPairingSession {
         try active()
         guard !busy, phase == .waitingForBiometric, humanConfirmed, !commitAttempted,
               let transcript, let selected, let proof else { throw MacPairingSessionError.invalidState }
+        let submitted = Mutex(false)
         busy = true
         defer {
             busy = false
@@ -323,7 +326,8 @@ public actor MacPairingSession {
             let digest = try transcript.digest()
             try checkDeadline()
             phase = .committing; commitAttempted = true
-            let receipt = try await root.commit(confirmedDigest: digest, biometricProof: proof, authorization: authorization)
+            let receipt = try await root.commit(confirmedDigest: digest, biometricProof: proof, authorization: authorization,
+                onSend: { submitted.withLock { $0 = true } })
             guard try transcript.verify(signature: receipt, publicKey: transcript.macAuthorityKey, purpose: .macCommit) else {
                 throw MacPairingSessionError.invalidState
             }
@@ -335,7 +339,12 @@ public actor MacPairingSession {
             } catch { /* Root returned a verified durable receipt; phone delivery remains uncertain. */ }
             await releaseChannels()
             return snapshot()
-        } catch { await fail(error); throw error }
+        } catch {
+            // Keep the attempted flag during the call so re-pair waits for it to drain.
+            if !submitted.withLock({ $0 }) { commitAttempted = false }
+            await fail(error)
+            throw error
+        }
     }
     private func matchesSession(_ proposal: PairingPhoneProposal) -> Bool {
         if let rePairInvitation { return rePairInvitation.matches(proposal) }
