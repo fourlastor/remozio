@@ -112,13 +112,21 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
             try await wait(observation, seconds: 5) { $0.port != nil }
             let port = try XCTUnwrap(observation.value.withLock { $0.port })
             if subnet != nil {
-                for _ in 0..<(2 * PairingRegistrationBudget.ingressBurst) {
-                    do {
-                        try await Self.pairNativeClient(port: port, invitation: invitation)
-                        XCTFail("An off-link candidate completed pairing")
-                    } catch {}
+                let offLinkAttempts = 2 * PairingRegistrationBudget.ingressBurst
+                await withTaskGroup(of: Bool.self) { group in
+                    for _ in 0..<offLinkAttempts {
+                        group.addTask {
+                            do {
+                                try await Self.pairNativeClient(port: port, invitation: invitation)
+                                return true
+                            } catch { return false }
+                        }
+                    }
+                    for await paired in group {
+                        XCTAssertFalse(paired, "An off-link candidate completed pairing")
+                    }
                 }
-                XCTAssertEqual(offLinkSources.withLock { $0 }, UInt32(2 * PairingRegistrationBudget.ingressBurst))
+                XCTAssertEqual(offLinkSources.withLock { $0 }, UInt32(offLinkAttempts))
                 XCTAssertEqual(channels.withLock { $0 }, 0)
                 XCTAssertEqual(observation.value.withLock { $0.reservations }, 0)
                 allowPeer.withLock { $0 = true }
