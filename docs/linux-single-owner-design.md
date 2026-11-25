@@ -1,7 +1,8 @@
 # Linux single owner for the caller stop and the spawn
 
-Status: **design for review**, revision 2, 25 November 2026. Issue #988. No code
-yet. Revision 2 answers the review on #988 of revision 1 (`dd8288eb`).
+Status: **approved design**, revision 3, 25 November 2026. Issue #988. Revision 2
+answers the review of revision 1 (`dd8288eb`). Revision 3 adds the five items of
+the approval of revision 2 (`44fb61bf`) and the split of the measurement.
 
 [Decision 1](linux-activation-proposal.md#decisions) chose reading B: one owner
 holds the caller's ptrace stop and spawns the command, so the stop cannot be lost
@@ -85,6 +86,65 @@ decision. K makes no user or group lookup and calls no function that is not
 async-signal-safe. K uses only `setgroups`, `setresgid` and `setresuid` with the
 values that O computed.
 
+### Generation of O
+
+The permit binds one O instance through its generation:
+
+- the boot ID from `/proc/sys/kernel/random/boot_id`;
+- O's PID and its start time (field 22 of `/proc/self/stat`);
+- a 128-bit random value that O draws at start and never writes to disk.
+
+The authority receives O's pidfd through `SO_PEERPIDFD` on O's connection and
+checks that it names the PID and start time of the generation. It issues a permit
+only while that pidfd is live. A restarted O has a new PID, start time and random
+value, so no permit of an earlier generation is valid for it.
+
+### Inherited state of the command
+
+K does not pass the unit's state to the command:
+
+- **Environment.** K calls `execve` with the environment from the approved capture,
+  and nothing from O's environment. The PR1 fixture uses a fixed `LANG=C` and a
+  fixed `PATH`.
+- **umask.** O reads C's `Umask:` from `/proc/<pid>/status` while C is in its stop,
+  and K sets that value. Commands keep the caller's file modes, as decision 3
+  requires.
+- **Resource limits.** O reads C's limits from `/proc/<pid>/limits` while C is in
+  its stop, and K sets each soft and hard limit to the caller's value with
+  `setrlimit` before the credential change. If a caller's hard limit is above O's
+  own hard limit, K cannot raise it without `CAP_SYS_RESOURCE`: K then exits with a
+  reserved code and O reports `notStarted`. The unit therefore sets
+  `LimitNOFILE=` and the other `Limit*=` settings to the system maximum.
+- **Task limit.** All commands share the unit's cgroup, so `TasksMax=` limits all
+  running commands together. The unit sets `TasksMax=infinity`.
+- **Session and terminal.** K calls `setsid`, so a command never shares O's
+  session or process group. K cannot take the caller's terminal as its controlling
+  terminal: that terminal is already the controlling terminal of the caller's
+  session, and `TIOCSCTTY` refuses it. A program that opens `/dev/tty`, such as
+  the `sudo` password prompt, then has no terminal. PR2 measures this case. A fix
+  needs a decision (for example a terminal that the frontend relays), and this
+  document does not choose one.
+
+### Unit options
+
+Commands inherit the unit's execution environment, so the unit must not use an
+option that sets `no_new_privs` or that creates a mount namespace:
+
+- `NoNewPrivileges=yes` breaks `sudo` inside a command. For a service user that is
+  not Root, systemd also sets `no_new_privs` for `SystemCallFilter=`,
+  `SystemCallArchitectures=`, `RestrictSUIDSGID=`, `RestrictNamespaces=`,
+  `RestrictRealtime=`, `RestrictAddressFamilies=`, `MemoryDenyWriteExecute=`,
+  `LockPersonality=`, `ProtectKernelTunables=`, `ProtectKernelModules=`,
+  `ProtectKernelLogs=`, `ProtectClock=` and `ProtectHostname=`.
+- `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`, `PrivateDevices=`,
+  `ReadOnlyPaths=` and the other mount options put every command in the unit's
+  mount namespace.
+
+The unit uses only `User=`, `Group=`, `AmbientCapabilities=`, `KillMode=process`,
+`OOMPolicy=continue`, `TasksMax=infinity`, the `Limit*=` settings above,
+`Restart=` and `ExecStart=`. PR2 measures from inside a command that `NoNewPrivs:`
+in `/proc/self/status` is 0 and that the mount namespace is the host's.
+
 ### Pipes
 
 O creates two pipes before the fork, both with `O_CLOEXEC`:
@@ -147,11 +207,16 @@ measurement can read it.
 7. **S6, result and report.** O waits on the status pipe and K's pidfd together,
    with a deadline, and decides:
 
+   On end of file, O calls `waitid` on K's pidfd with `WEXITED | WNOHANG |
+   WNOWAIT`, which reads K's state without reaping it. Before `execve`, K exits
+   only with its reserved codes, so:
+
    | Status pipe | K | Result |
    | --- | --- | --- |
    | End of file | Still alive | `dispatched`: the close-on-exec write end closed, so `execve` succeeded |
+   | End of file | Exited normally with a code that is not reserved | `dispatched`: the command ran and already exited |
    | Errno record | Exited with the reserved code | `execFailed` with that errno |
-   | End of file | Exited or killed | `unknown`: K was killed between the go byte and `execve`, or the command already exited |
+   | End of file, no errno record | Exited with a reserved code, or killed by a signal | `unknown`: K died between the go byte and `execve`, or the command used that code or died by a signal |
    | Nothing before the deadline | Alive | `unknown`; O cannot signal K after the last `setresuid` |
 
    After the result, O checks C again. If C is gone, O records
@@ -259,6 +324,19 @@ check, comes from `TracerPid:` in `/proc/<pid>/status`. The report sets
 `strictAdmission` to true only when every case passes.
 
 ## Not verified
+
+The measurement is split in two pull requests. PR1 uses a stub authority (a
+one-use permit bound to O's generation and the nonce, and `beginDispatch` and the
+outcome in a file), so its report keeps `strictAdmission` and `productionAdmission`
+false. PR2 composes O with the Swift authority of the composed fixture and adds the
+systemd unit. Only PR2 can set `strictAdmission` to true. Until PR2:
+
+- the signed decision, the SQLite transaction and the real authority;
+- the unit options, `NoNewPrivs:` and the mount namespace inside a command;
+- `sudo` with a password prompt, and the controlling terminal;
+- the AppArmor `ux` rule, `KillMode=process` and `OOMPolicy=continue`.
+
+Also not verified, in either pull request:
 
 - Every result comes from one host and one kernel until a second host repeats it.
 - The `ux` rule in the AppArmor profile and the stacked label under systemd.
