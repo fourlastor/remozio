@@ -578,7 +578,7 @@ class TLSInteropTest {
             }
         }
 
-    @Test fun signedMessagesReachTheInboxThroughTheNegotiatedHttpsRelay(): Unit = Fixture(negotiate = true, commandMessages = true).use { f ->
+    @Test fun signedMessagesReachTheInboxAfterACaptureRefusalThroughTheNegotiatedHttpsRelay(): Unit = Fixture(negotiate = true, commandMessages = true).use { f ->
         val limits = CborLimits(32768, 32, 4096)
         val key = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         fun id(value: Int, count: Int = 16) = ByteArray(count) { value.toByte() }
@@ -586,41 +586,63 @@ class TLSInteropTest {
         val point = (key.public as ECPublicKey).w
         val authority = byteArrayOf(4) + scalar(point.affineX) + scalar(point.affineY)
         val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
-        val request = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(1), id(2), id(8), id(9, 32),
-            emptySet(), 1000u, 61000u, capture, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), limits, limits)
+        val captures = CommandCaptureBudgetFixture(capture, limits)
+        fun request(requestID: Int, bytes: ByteArray) = IssuedRequestPayload(
+            RequestContract(RequestKind.COMMAND, 1u, 1u), id(1), id(2), id(requestID), id(9, 32),
+            emptySet(), 1000u, 61000u, bytes, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), limits, limits)
         fun message(body: ByteArray, type: ApprovalMessageType, purpose: SigningPurpose): ByteArray {
             val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
                 initSign(key.private); update(SigningInput.make(1u, type, purpose, body, limits, limits)); sign()
             })
             return ApprovalMessage(1u, type, purpose, body, signature).encode(limits.maxBytes)
         }
-        val issued = message(request.encode(limits), ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
-        val terminal = message(RequestStatusPayload(id(1), id(2), id(8), request.requestDigest(limits, limits), request.challenge,
-            2u, RequestPhase.EXPIRED, RequestStatusReason.AUTHORIZATION_EXPIRED, id(10), 60000u, null, null, false, 60000u, null).encode(limits),
+        fun issued(request: IssuedRequestPayload) =
+            message(request.encode(limits), ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
+        fun terminal(request: IssuedRequestPayload) = message(RequestStatusPayload(id(1), id(2), request.requestID,
+            request.requestDigest(limits, limits), request.challenge, 2u, RequestPhase.EXPIRED,
+            RequestStatusReason.AUTHORIZATION_EXPIRED, id(10), 60000u, null, null, false, 60000u, null).encode(limits),
             ApprovalMessageType.STATUS, SigningPurpose.STATUS)
-        val enrollment = CommandRequestInbox(1, 4).add(id(1), id(2), authority, RequestLimits(limits, limits, limits, limits))
-        WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+        val refused = request(7, captures.longCapture)
+        CommandRequestInbox(1, 4).use { inbox ->
+            val enrollment = inbox.add(id(1), id(2), authority, captures.receiverLimits)
             runBlocking {
-                withTimeout(10_000) {
-                    val carrier = relay.connector.connect(this, relay.endpoint,
-                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
-                    val session = TLSRecordSession(this, f.engine(), carrier, handshakeTimeoutMillis = 4_000)
-                    try {
-                        val channel = NegotiatedTLSChannel.connect(session, ChannelScope(id(1), id(2), id(3), id(4)),
-                            listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 65536, timeoutMillis = 4_000)
-                        try {
-                            val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4)) { ElapsedInstant(0, 100u) }
-                            val receiving = async { receiver.run() }
-                            channel.send(issued)
-                            val owner = enrollment.requestSessions.first { it.isNotEmpty() }.single()
-                            assertNotNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
-                            channel.send(terminal)
-                            owner.revisions.first { it == 2uL }
-                            assertNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
-                            assertEquals(RequestPhase.EXPIRED, owner.snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
-                            receiver.close(); receiving.await()
-                        } finally { channel.closeAndJoin() }
-                    } finally { session.closeAndJoin() }
+                repeat(2) { attempt ->
+                    WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+                        withTimeout(10_000) {
+                            val next = request(8 + attempt, captures.shortCapture)
+                            val carrier = relay.connector.connect(this, relay.endpoint,
+                                RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                            val session = TLSRecordSession(this, f.engine(), carrier, handshakeTimeoutMillis = 4_000)
+                            try {
+                                val channel = NegotiatedTLSChannel.connect(session, ChannelScope(id(1), id(2), id(3), id(4)),
+                                    listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 65536, timeoutMillis = 4_000)
+                                try {
+                                    val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4),
+                                        queryRetainedOnStart = false) { ElapsedInstant(0, 100u) }
+                                    val receiving = async { receiver.run() }
+                                    try {
+                                        channel.send(issued(refused))
+                                        channel.send(terminal(refused))
+                                        channel.send(issued(next))
+                                        val id = CborValue.Bytes(next.requestID)
+                                        val owner = enrollment.requestSessions.first { rows -> rows.any { it.identity.requestID == id } }
+                                            .single { it.identity.requestID == id }
+                                        assertNotNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
+                                        channel.send(terminal(next))
+                                        owner.revisions.first { it == 2uL }
+                                        assertNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
+                                        assertEquals(RequestPhase.EXPIRED, owner.snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
+                                        assertTrue(receiver.captureOmitted)
+                                        assertTrue(receiving.isActive)
+                                        assertEquals(attempt + 1, enrollment.sessions().size)
+                                    } finally {
+                                        receiver.close()
+                                        receiving.await()
+                                    }
+                                } finally { channel.closeAndJoin() }
+                            } finally { session.closeAndJoin() }
+                        }
+                    }
                 }
             }
         }

@@ -36,6 +36,12 @@ The application shares an 8 MiB canonical-capture budget and a 262,144 retained-
 
 A signed terminal status releases capture capacity. Retirement or enrollment closure also releases metadata capacity. Duplicate requests reuse their reservation. At capacity, the app retains existing requests and shows a distinct capacity message. It discards the new capture and continues receiving authenticated statuses. It does not accumulate a queue or a set of omitted request IDs. Statuses for unowned requests are authenticated and discarded after a capacity rejection; they cannot create owners or grant action authority. The message remains visible for that connection attempt, even if later delivery succeeds. Reconnect starts another attempt and clears the message; a repeated capacity rejection shows it again. This is not a claim that a complete request snapshot was received. It does not silently evict pending requests or resend decisions. These accounting bounds are not a measured Android heap-size guarantee.
 
+## Unreadable captures
+
+The receiver verifies the request signature, enrolled scope and capture digest before it classifies an unreadable capture. It omits a capture when it exceeds the local capture budget or the capture decoder rejects it. Later requests can arrive on the same connection. Authentication failures, invalid framing and identity conflicts still close the connection.
+
+Each connection retains up to 128 refused request IDs and digests so it can verify their signed statuses. Reaching the limit and receiving another distinct refusal closes the connection. The local log records the request ID, digest and reason code. The phone does not send a refusal frame. A pending snapshot with an unreadable capture reports incomplete delivery. A matching live or retired request keeps its existing outcome.
+
 ## Remaining integration
 
 Pairing setup must populate the archive before this screen can connect. It currently uses the enrolled relay; LAN preference and push wake delivery remain separate integration work. Capture-limit settings and distinct remote oversized-request reporting remain pending. Issue #132 still tracks capacity and storage recovery beyond the current generic connection error. Device end-to-end behavior remains unverified.

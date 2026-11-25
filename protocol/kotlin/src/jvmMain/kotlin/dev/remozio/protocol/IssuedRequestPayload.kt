@@ -5,12 +5,14 @@ import java.util.Collections
 
 enum class IssuedRequestFailure {
     INVALID_FIELDS, UNSUPPORTED_WRAPPER, UNSUPPORTED_CONTRACT, UNSUPPORTED_FEATURES,
-    INVALID_BYTES, INVALID_TIMES, INVALID_FEATURES, INVALID_ACTIONS, INVALID_CAPTURE, CAPTURE_DIGEST_MISMATCH,
+    INVALID_BYTES, INVALID_TIMES, INVALID_FEATURES, INVALID_ACTIONS, INVALID_CAPTURE, CAPTURE_DIGEST_MISMATCH, WRONG_SCOPE,
 }
 class IssuedRequestException(val reason: IssuedRequestFailure) : IllegalArgumentException(reason.name)
+class IssuedCaptureBudgetException internal constructor(val requestID: CborValue.Bytes, val reason: CborFailure) :
+    IllegalArgumentException(reason.name)
 
 /** Common wrapper only. Capture semantics, authority identity, and current validity remain separate checks. */
-class IssuedRequestPayload(
+class IssuedRequestPayload private constructor(
     val contract: RequestContract,
     macID: ByteArray,
     accountID: ByteArray,
@@ -23,13 +25,26 @@ class IssuedRequestPayload(
     permittedActions: List<CapturedAction>,
     bodyLimits: CborLimits,
     captureLimits: CborLimits,
+    decoding: Decoding?,
 ) {
+    constructor(
+        contract: RequestContract,
+        macID: ByteArray, accountID: ByteArray, requestID: ByteArray, challenge: ByteArray,
+        requiredFeatures: Set<ULong>, createdUnixMilliseconds: ULong, expiresUnixMilliseconds: ULong,
+        canonicalCapture: ByteArray, permittedActions: List<CapturedAction>,
+        bodyLimits: CborLimits, captureLimits: CborLimits,
+    ) : this(contract, macID, accountID, requestID, challenge, requiredFeatures, createdUnixMilliseconds,
+        expiresUnixMilliseconds, canonicalCapture, permittedActions, bodyLimits, captureLimits, null)
+
+    private class Decoding(val digest: CborValue.Bytes, val scope: Pair<CborValue.Bytes, CborValue.Bytes>?)
+
     init {
         ensure(contract.wireVersion == 1uL, IssuedRequestFailure.UNSUPPORTED_CONTRACT)
         ensure(listOf(macID.size, accountID.size, requestID.size, challenge.size) == listOf(16, 16, 16, 32), IssuedRequestFailure.INVALID_BYTES)
         ensure(createdUnixMilliseconds < expiresUnixMilliseconds, IssuedRequestFailure.INVALID_TIMES)
         if (requiredFeatures.size > bodyLimits.maxItems || permittedActions.size > bodyLimits.maxItems) throw CborException(CborFailure.ITEM_LIMIT)
-        if (canonicalCapture.size > captureLimits.maxBytes || canonicalCapture.size > bodyLimits.maxBytes) throw CborException(CborFailure.BYTE_LIMIT)
+        if (canonicalCapture.size > bodyLimits.maxBytes ||
+            (decoding?.scope == null && canonicalCapture.size > captureLimits.maxBytes)) throw CborException(CborFailure.BYTE_LIMIT)
     }
 
     private val identities = listOf(macID, accountID, requestID, challenge).map { CborValue.Bytes(it) }
@@ -45,13 +60,25 @@ class IssuedRequestPayload(
     val permittedActions: List<CapturedAction> = Collections.unmodifiableList(ArrayList(permittedActions))
 
     init {
-        ensure(DeterministicCbor.decode(capture.copyBytes(), captureLimits) is CborValue.Fields, IssuedRequestFailure.INVALID_CAPTURE)
         val actions = this.permittedActions.toSet()
         ensure(actions.isNotEmpty() && actions.size == this.permittedActions.size, IssuedRequestFailure.INVALID_ACTIONS)
         try {
             this.permittedActions.forEach { ActionPolicy.requirement(it, contract.requestKind, actions) }
         } catch (_: ActionPolicyException) { fail(IssuedRequestFailure.INVALID_ACTIONS) }
         encode(bodyLimits)
+        val scope = decoding?.scope
+        if (scope != null) {
+            ensure(identities[0] == scope.first && identities[1] == scope.second, IssuedRequestFailure.WRONG_SCOPE)
+        }
+        if (decoding != null) ensure(decoding.digest == digest, IssuedRequestFailure.CAPTURE_DIGEST_MISMATCH)
+        try {
+            ensure(DeterministicCbor.decode(capture.copyBytes(), captureLimits) is CborValue.Fields, IssuedRequestFailure.INVALID_CAPTURE)
+        } catch (failure: CborException) {
+            if (scope != null && failure.reason in CAPTURE_BUDGET_FAILURES) {
+                throw IssuedCaptureBudgetException(identities[2], failure.reason)
+            }
+            throw failure
+        }
     }
 
     fun encode(limits: CborLimits): ByteArray {
@@ -77,8 +104,21 @@ class IssuedRequestPayload(
     ))
 
     companion object {
+        private val CAPTURE_BUDGET_FAILURES = setOf(CborFailure.BYTE_LIMIT, CborFailure.DEPTH_LIMIT, CborFailure.ITEM_LIMIT)
+
         fun decode(bytes: ByteArray, bodyLimits: CborLimits, captureLimits: CborLimits,
-                   localCapabilities: ContractCapabilities): IssuedRequestPayload {
+                   localCapabilities: ContractCapabilities): IssuedRequestPayload =
+            decode(bytes, bodyLimits, captureLimits, localCapabilities, null)
+
+        /** Call after signature verification. Scope and capture digest checks precede capture budget classification. */
+        fun decodeScoped(bytes: ByteArray, bodyLimits: CborLimits, captureLimits: CborLimits,
+            localCapabilities: ContractCapabilities, macID: ByteArray, accountID: ByteArray,
+        ): IssuedRequestPayload = decode(bytes, bodyLimits, captureLimits, localCapabilities,
+            CborValue.Bytes(macID) to CborValue.Bytes(accountID))
+
+        private fun decode(bytes: ByteArray, bodyLimits: CborLimits, captureLimits: CborLimits,
+            localCapabilities: ContractCapabilities, scope: Pair<CborValue.Bytes, CborValue.Bytes>?,
+        ): IssuedRequestPayload {
             val fields = (DeterministicCbor.decode(bytes, bodyLimits) as? CborValue.Fields)?.values
                 ?: fail(IssuedRequestFailure.INVALID_FIELDS)
             ensure(fields.keys == (0uL..12uL).toSet(), IssuedRequestFailure.INVALID_FIELDS)
@@ -109,10 +149,9 @@ class IssuedRequestPayload(
             val actionValues = (fields[12u] as? CborValue.ArrayValue)?.values ?: fail(IssuedRequestFailure.INVALID_ACTIONS)
             val actions = try { actionValues.map { ActionWire.decode(it) } }
                 catch (_: ActionWireException) { fail(IssuedRequestFailure.INVALID_ACTIONS) }
-            val result = IssuedRequestPayload(contract, data(1u), data(2u), data(3u), data(4u), features,
-                uint(8u), uint(9u), data(10u), actions, bodyLimits, captureLimits)
-            ensure(data(11u).contentEquals(result.captureDigest), IssuedRequestFailure.CAPTURE_DIGEST_MISMATCH)
-            return result
+            return IssuedRequestPayload(contract, data(1u), data(2u), data(3u), data(4u), features,
+                uint(8u), uint(9u), data(10u), actions, bodyLimits, captureLimits,
+                Decoding(CborValue.Bytes(data(11u)), scope))
         }
 
         private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
