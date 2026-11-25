@@ -4,6 +4,9 @@ import XCTest
 @testable import RemozioCore
 
 final class PairingSetupV2AdmissionsTests: XCTestCase {
+    private static let pendingCapacity = PairingSetupV2Admissions.maximumPending
+    private static let rate = PairingRegistrationBudget.registrationsPerSecond
+
     private struct Fixture {
         let started = ContinuousClock.now
         let epoch = UUID()
@@ -21,6 +24,17 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
                             draining: [PairingSetupV2Source] = []) -> PairingSetupV2Admissions.Admission {
             admission.admit(id, source: key, accepted: started.advanced(by: .milliseconds(Int64(offset))),
                 clock: .init(epoch: epoch, milliseconds: offset), draining: draining)
+        }
+
+        mutating func fillPending(draining: Int = 0) -> [UUID] {
+            (0..<PairingSetupV2AdmissionsTests.pendingCapacity).map { index in
+                let id = UUID()
+                let afterBurst = UInt64(max(0, index + 1 - Int(PairingRegistrationBudget.ingressBurst)))
+                let rate = PairingSetupV2AdmissionsTests.rate
+                let offset = (1_000 * afterBurst + rate - 1) / rate
+                XCTAssertEqual(admit(id, offset: offset, draining: draining), .admitted(evicting: nil))
+                return id
+            }
         }
 
         private mutating func sourceKey(_ label: String) -> PairingSetupV2Source {
@@ -64,7 +78,7 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
 
     func testGlobalBudgetStillAppliesAcrossDifferentSources() {
         var fixture = Fixture()
-        for _ in 0..<PairingRegistrationBudget.burst {
+        for _ in 0..<PairingRegistrationBudget.ingressBurst {
             let id = UUID()
             XCTAssertEqual(fixture.admit(id), .admitted(evicting: nil))
             XCTAssertTrue(fixture.admission.remove(id))
@@ -76,7 +90,7 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
 
     func testRejectedAttemptsDoNotCreateSourceEntriesOrConsumeSourceCredits() {
         var fixture = Fixture()
-        for _ in 0..<PairingRegistrationBudget.burst {
+        for _ in 0..<PairingRegistrationBudget.ingressBurst {
             let id = UUID()
             XCTAssertEqual(fixture.admit(id), .admitted(evicting: nil))
             XCTAssertTrue(fixture.admission.remove(id))
@@ -88,10 +102,11 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
             XCTAssertEqual(fixture.admit(source: "retry"), .rejected)
         }
 
-        XCTAssertEqual(fixture.admit(offset: 375), .admitted(evicting: nil))
+        let threeCredits = (3_000 + Self.rate - 1) / Self.rate
+        XCTAssertEqual(fixture.admit(offset: threeCredits), .admitted(evicting: nil))
         let first = UUID()
-        XCTAssertEqual(fixture.admit(first, source: "retry", offset: 375), .admitted(evicting: nil))
-        XCTAssertEqual(fixture.admit(source: "retry", offset: 375), .admitted(evicting: first))
+        XCTAssertEqual(fixture.admit(first, source: "retry", offset: threeCredits), .admitted(evicting: nil))
+        XCTAssertEqual(fixture.admit(source: "retry", offset: threeCredits), .admitted(evicting: first))
     }
 
     func testSourceKeyNormalizesMappedIPv4AndIgnoresPorts() throws {
@@ -131,35 +146,32 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
 
     func testUnrelatedSourceWaitsForReleasedSlotWithoutEvictingPendingPeers() {
         var fixture = Fixture()
-        let waiting = (0..<PairingSetupV2Admissions.maximumPending).map { _ in UUID() }
-        for id in waiting {
-            XCTAssertEqual(fixture.admit(id), .admitted(evicting: nil))
-        }
-        XCTAssertTrue(fixture.admission.beginVerification(waiting[0], at: fixture.started))
+        let waiting = fixture.fillPending()
+        let now = fixture.started.advanced(by: .milliseconds(500))
+        XCTAssertTrue(fixture.admission.beginVerification(waiting[0], at: now))
         let arrival = UUID()
-        XCTAssertEqual(fixture.admit(arrival, offset: 125), .rejected)
+        XCTAssertEqual(fixture.admit(arrival, offset: 500), .rejected)
 
-        let now = fixture.started.advanced(by: .milliseconds(250))
         XCTAssertTrue(fixture.admission.completeVerification(waiting[0], at: now))
-        XCTAssertEqual(fixture.admit(arrival, offset: 250), .admitted(evicting: nil))
+        XCTAssertEqual(fixture.admit(arrival, offset: 500), .admitted(evicting: nil))
         for id in waiting.dropFirst() {
             XCTAssertTrue(fixture.admission.beginVerification(id, at: now))
         }
         XCTAssertTrue(fixture.admission.beginVerification(arrival, at: now))
     }
 
-    func testFourVerifyingSlotsRejectTheNextArrivalWithoutEviction() {
+    func testFullVerifyingSlotsRejectTheNextArrivalWithoutEviction() {
         var fixture = Fixture()
-        let accepted = fixture.started
-        let verifying = (0..<4).map { _ in UUID() }
+        let verifying = fixture.fillPending()
+        XCTAssertEqual(verifying.count, 16)
+        let now = fixture.started.advanced(by: .milliseconds(500))
         for id in verifying {
-            XCTAssertEqual(fixture.admit(id), .admitted(evicting: nil))
-            XCTAssertTrue(fixture.admission.beginVerification(id, at: accepted))
+            XCTAssertTrue(fixture.admission.beginVerification(id, at: now))
         }
 
-        XCTAssertEqual(fixture.admit(), .rejected)
+        XCTAssertEqual(fixture.admit(offset: 500), .rejected)
         for id in verifying {
-            XCTAssertTrue(fixture.admission.completeVerification(id, at: accepted))
+            XCTAssertTrue(fixture.admission.completeVerification(id, at: now))
         }
     }
 
@@ -184,34 +196,32 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
 
     func testRejectedVerificationReleasesItsPendingSlot() {
         var fixture = Fixture()
-        let accepted = fixture.started
-        let rejected = UUID()
-        for id in [rejected, UUID(), UUID(), UUID()] {
-            XCTAssertEqual(fixture.admit(id), .admitted(evicting: nil))
-            XCTAssertTrue(fixture.admission.beginVerification(id, at: accepted))
+        let verifying = fixture.fillPending()
+        let rejected = verifying[0]
+        let now = fixture.started.advanced(by: .milliseconds(500))
+        for id in verifying {
+            XCTAssertTrue(fixture.admission.beginVerification(id, at: now))
         }
 
         XCTAssertTrue(fixture.admission.remove(rejected))
-        XCTAssertFalse(fixture.admission.isVerifying(rejected, at: accepted))
+        XCTAssertFalse(fixture.admission.isVerifying(rejected, at: now))
         XCTAssertFalse(fixture.admission.remove(rejected))
-        XCTAssertFalse(fixture.admission.completeVerification(rejected, at: accepted))
-        XCTAssertEqual(fixture.admit(draining: 1), .admitted(evicting: nil))
+        XCTAssertFalse(fixture.admission.completeVerification(rejected, at: now))
+        XCTAssertEqual(fixture.admit(offset: 500, draining: 1), .admitted(evicting: nil))
     }
 
     func testExpiredVerificationsStillCountUntilTheirWorkDrains() {
         var fixture = Fixture()
-        let accepted = fixture.started
-        let deadline = accepted.advanced(by: PairingSetupV2Admissions.proofTimeout)
-        let verifying = (0..<4).map { _ in UUID() }
+        let verifying = fixture.fillPending(draining: 4)
+        let now = fixture.started.advanced(by: .milliseconds(500))
+        let expiredAt = fixture.started.advanced(by: .seconds(4))
         for id in verifying {
-            XCTAssertEqual(fixture.admit(id, draining: 4), .admitted(evicting: nil))
-            XCTAssertTrue(fixture.admission.beginVerification(id, at: accepted))
-        }
-        for id in verifying {
-            XCTAssertTrue(fixture.admission.expire(id, at: deadline))
+            XCTAssertTrue(fixture.admission.beginVerification(id, at: now))
+            XCTAssertTrue(fixture.admission.expire(id, at: expiredAt))
         }
 
-        XCTAssertEqual(fixture.admit(offset: 3_000, draining: 8), .rejected)
-        XCTAssertEqual(fixture.admit(offset: 3_000, draining: 7), .admitted(evicting: nil))
+        let allDraining = verifying.count + 4
+        XCTAssertEqual(fixture.admit(offset: 4_000, draining: allDraining), .rejected)
+        XCTAssertEqual(fixture.admit(offset: 4_000, draining: allDraining - 1), .admitted(evicting: nil))
     }
 }

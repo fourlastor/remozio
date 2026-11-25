@@ -33,9 +33,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let root: URL
         let journal: AuthorityJournal
         let continuity: ContinuityStore
-        let authority = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey(), biometric = P256.Signing.PrivateKey()
+        let authority = P256.Signing.PrivateKey(), biometric = P256.Signing.PrivateKey()
+        let transport: P256.Signing.PrivateKey
         let environment = Environment()
         let access: AuthorityPairingSetupAccess
+        let pairingConfiguration: AuthorityPairingSetupConfiguration
         let gatewayRevocations: AuthorityGatewayRevocationState?
         let policy: XPCPeerPolicy
         let writer: AuditEpochWriter
@@ -44,7 +46,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let account: Data
         init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false,
              accountByte: UInt8 = 2, configureTransport: Bool = false, pairingLifetime: UInt64 = 1000,
+             v2ActivationEnabled: Bool? = nil, transportIdentity: P256.Signing.PrivateKey? = nil,
              observePairingContention: @escaping @Sendable () -> Void = {}) throws {
+            transport = transportIdentity ?? P256.Signing.PrivateKey()
             self.account = Data(repeating: accountByte, count: 16)
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
             let ownedRoot = root
@@ -95,8 +99,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             policy = try .init(teamID: app.teamID, componentIdentifier: app.identifier,
                 approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: getuid())
             let journal = journal, environment = environment, authority = authority
+            pairingConfiguration = try .init(transportPublicKey: transport.publicKey.x963Representation,
+                lifetimeMilliseconds: pairingLifetime, v2ActivationEnabled: v2ActivationEnabled)
             access = try .init(journal: journal, macID: mac, accountID: account, authorityPublicKey: authority.publicKey.x963Representation,
-                appPolicy: policy, configuration: .init(transportPublicKey: transport.publicKey.x963Representation, lifetimeMilliseconds: pairingLifetime),
+                appPolicy: policy, configuration: pairingConfiguration,
                 minimumEnvelopeVersion: 1, auditVersions: auditVersions, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
                     if environment.selfDenied.value { throw Failure.denied }
                 }, gatewayRevocations: gatewayRevocations, commit: { attempt, proof, event, authorize, validate in
@@ -149,6 +155,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 enrollmentTag: Data(repeating: 35, count: 32), replacement: nil,
                 expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1, expiresAtUnixMillis: 2)
         }
+        func activationRevision() -> AuthorityPairingSetupAccess.V2ActivationRevision {
+            .init(authorityEpoch: environment.epoch,
+                  configurationDigest: Data(SHA256.hash(data: pairingConfiguration.canonicalBytes)))
+        }
+
         func records() throws -> UInt64 {
             try journal.read { try $0.epoch(Data(repeating: 3, count: 16))?.head ?? 0 }
         }
@@ -1208,6 +1219,45 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             XCTAssertThrowsError(try AuthorityPairingSetupConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
         }
     }
+    func testActivationConfigurationKeepsTheLegacyBytesAndUsesCanonicalBooleans() throws {
+        let key = P256.Signing.PrivateKey().publicKey.x963Representation
+        let lifetime = Data([0x02, 0x1a, 0x00, 0x01, 0xd4, 0xc0])
+        let legacyBytes = Data([0xa3, 0x00, 0x01, 0x01, 0x58, 0x41]) + key + lifetime
+        let legacy = try AuthorityPairingSetupConfiguration(transportPublicKey: key)
+        XCTAssertEqual(legacy.canonicalBytes, legacyBytes)
+        XCTAssertNil(try AuthorityPairingSetupConfiguration.decode(legacyBytes).v2ActivationEnabled)
+        for enabled in [false, true] {
+            let bytes = Data([0xa4, 0x00, 0x02, 0x01, 0x58, 0x41]) + key + lifetime + Data([0x03, enabled ? 0xf5 : 0xf4])
+            XCTAssertEqual(try AuthorityPairingSetupConfiguration(transportPublicKey: key,
+                v2ActivationEnabled: enabled).canonicalBytes, bytes)
+            let decoded = try AuthorityPairingSetupConfiguration.decode(bytes)
+            XCTAssertEqual(decoded.v2ActivationEnabled, enabled)
+            XCTAssertEqual(decoded.canonicalBytes, bytes)
+        }
+    }
+
+    func testActivationConfigurationRejectsMalformedOrNoncanonicalFields() throws {
+        let key = P256.Signing.PrivateKey().publicKey.x963Representation
+        let limits = try CBORLimits(maxBytes: 512, maxDepth: 2, maxItems: 20)
+        let enabled = try AuthorityPairingSetupConfiguration(transportPublicKey: key, v2ActivationEnabled: true)
+        guard case .map(let fields) = try DeterministicCBOR.decode(enabled.canonicalBytes, limits: limits) else {
+            return XCTFail("Map required")
+        }
+        for (field, value): (UInt64, CBORValue?) in [(0, .unsigned(3)), (3, nil), (3, .unsigned(1)), (4, .boolean(true)),
+                                                   (1, .bytes(Data([0x04]) + Data(repeating: 0, count: 64)))] {
+            var changed = fields
+            changed[field] = value
+            XCTAssertThrowsError(try AuthorityPairingSetupConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
+        }
+        let tail = Data(enabled.canonicalBytes.dropFirst(3))
+        let reordered = Data([0xa4]) + tail + Data([0x00, 0x02])
+        let duplicate = Data(enabled.canonicalBytes.dropLast(2)) + Data([0x02, 0xf5])
+        let noncanonicalVersion = Data([0xa4, 0x00, 0x18, 0x02]) + tail
+        for invalid in [reordered, duplicate, noncanonicalVersion, enabled.canonicalBytes + Data([0])] {
+            XCTAssertThrowsError(try AuthorityPairingSetupConfiguration.decode(invalid))
+        }
+    }
+
     func testConfiguredAuditVersionsMatchStagedAndLiveEnrollmentOffers() throws {
         for versions: Set<UInt64> in [[], [1], [2, 3]] {
             let f = try Fixture(auditVersions: versions), endpoint = try f.endpoint(); try hello(endpoint)
@@ -1418,6 +1468,101 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let next = try fixture.endpoint()
         _ = try openV2(next)
         XCTAssertEqual(try fixture.records(), 1)
+    }
+
+    func testActivationRequiresAnEnabledProtectedConfiguration() throws {
+        for flag: Bool? in [nil, false] {
+            let f = try Fixture(v2ActivationEnabled: flag)
+            XCTAssertThrowsError(try f.access.requestV2Activation(revision: f.activationRevision(), compositionReady: true)) {
+                XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+            }
+            let endpoint = try f.endpoint()
+            try hello(endpoint)
+            _ = try staged(endpoint, proposal: f.proposal())
+        }
+    }
+
+    func testStaleActivationRequestLeavesCompatibilityAdmissionsOpen() throws {
+        let f = try Fixture()
+        let revision = f.activationRevision()
+        let stale = AuthorityPairingSetupAccess.V2ActivationRevision(authorityEpoch: UUID(),
+            configurationDigest: revision.configurationDigest)
+        XCTAssertThrowsError(try f.access.requestV2Activation(revision: stale, compositionReady: true)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .policyChanged)
+        }
+        let legacy = try f.endpoint()
+        try hello(legacy)
+        let transcript = try staged(legacy, proposal: f.proposal())
+        XCTAssertNotNil(try commit(legacy, transcript: transcript, fixture: f))
+        XCTAssertEqual(try f.records(), 1)
+        try f.assertCheckpoint()
+    }
+
+    private func assertFreshLegacyStageIsRefused(_ f: Fixture, proposal: Data) throws {
+        let endpoint = try f.endpoint()
+        try hello(endpoint)
+        let authorizationCount = f.environment.authorized.value
+        endpoint.stagePairing(proposal, authorization: authorization) { XCTAssertNil($0) }
+        XCTAssertEqual(f.environment.authorized.value, authorizationCount)
+    }
+
+    private func assertFreshPairingIsRefused(_ f: Fixture, proposal: Data) throws {
+        try assertFreshLegacyStageIsRefused(f, proposal: proposal)
+        let endpoint = try f.endpoint()
+        try hello(endpoint)
+        endpoint.openPairingV2(label: "Fixture", predecessor: nil) { XCTAssertNil($0) }
+    }
+
+    func testEnabledStartupDrainsUntilTheInstalledCompositionIsReady() throws {
+        let f = try Fixture(v2ActivationEnabled: true)
+        let proposal = try f.proposal().encode(), revision = f.activationRevision()
+        try assertFreshPairingIsRefused(f, proposal: proposal)
+        XCTAssertThrowsError(try f.access.requestV2Activation(revision: revision, compositionReady: false)) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+        try assertFreshPairingIsRefused(f, proposal: proposal)
+
+        XCTAssertEqual(try f.access.requestV2Activation(revision: revision, compositionReady: true), .active)
+        try assertFreshLegacyStageIsRefused(f, proposal: proposal)
+        let v2 = try f.endpoint()
+        _ = try openV2(v2)
+        v2.close()
+        try assertFreshLegacyStageIsRefused(f, proposal: proposal)
+        XCTAssertEqual(try f.records(), 0)
+    }
+
+    func testRestartWithEnabledConfigurationDrainsAndRejectsStaleActivationRevisions() throws {
+        func priorActivation() throws -> (transport: P256.Signing.PrivateKey, bytes: Data,
+                                          revision: AuthorityPairingSetupAccess.V2ActivationRevision) {
+            let f = try Fixture(v2ActivationEnabled: true)
+            let revision = f.activationRevision()
+            XCTAssertEqual(try f.access.requestV2Activation(revision: revision, compositionReady: true), .active)
+            return (f.transport, f.pairingConfiguration.canonicalBytes, revision)
+        }
+
+        let prior = try priorActivation()
+        let restarted = try Fixture(v2ActivationEnabled: true, transportIdentity: prior.transport)
+        let current = restarted.activationRevision(), proposal = try restarted.proposal().encode()
+        XCTAssertEqual(restarted.pairingConfiguration.canonicalBytes, prior.bytes)
+        XCTAssertEqual(current.configurationDigest, prior.revision.configurationDigest)
+        XCTAssertNotEqual(current.authorityEpoch, prior.revision.authorityEpoch)
+        try assertFreshPairingIsRefused(restarted, proposal: proposal)
+
+        let otherConfiguration = try AuthorityPairingSetupConfiguration(transportPublicKey: restarted.pairingConfiguration.transportPublicKey,
+            lifetimeMilliseconds: 120_000, v2ActivationEnabled: true)
+        let wrongConfiguration = AuthorityPairingSetupAccess.V2ActivationRevision(authorityEpoch: current.authorityEpoch,
+            configurationDigest: Data(SHA256.hash(data: otherConfiguration.canonicalBytes)))
+        for stale in [prior.revision, wrongConfiguration] {
+            XCTAssertThrowsError(try restarted.access.requestV2Activation(revision: stale, compositionReady: true)) {
+                XCTAssertEqual($0 as? AuthorityPairingSetupError, .policyChanged)
+            }
+            try assertFreshPairingIsRefused(restarted, proposal: proposal)
+        }
+        XCTAssertEqual(try restarted.access.requestV2Activation(revision: current, compositionReady: true), .active)
+        XCTAssertEqual(try restarted.access.requestV2Activation(revision: current, compositionReady: true), .active)
+        let v2 = try restarted.endpoint()
+        _ = try openV2(v2)
+        try assertFreshLegacyStageIsRefused(restarted, proposal: proposal)
     }
 
     func testV2OwnerExpiryReleasesAdmissionForLegacy() throws {

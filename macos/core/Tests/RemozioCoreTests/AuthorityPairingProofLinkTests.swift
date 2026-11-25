@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Network
 import RemozioProtocol
 import Security
 import Synchronization
@@ -448,7 +449,12 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         try await pairUsingDedicatedLink(rePair: false, exhaustBudget: true)
     }
 
-    private func pairUsingDedicatedLink(rePair: Bool, exhaustBudget: Bool = false) async throws {
+    func testSixteenLoopbackCandidatesRegisterInOneWindowAndOnlyOnePairs() async throws {
+        try await pairUsingDedicatedLink(rePair: false, multipleSources: true)
+    }
+
+    private func pairUsingDedicatedLink(rePair: Bool, exhaustBudget: Bool = false,
+                                        multipleSources: Bool = false) async throws {
         let authority = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey()
         let macID = Data(repeating: 1, count: 16), accountID = Data(repeating: 2, count: 16)
         let invitation = try PairingInvitation(macID: macID, accountID: accountID, label: "Proof fixture",
@@ -485,10 +491,19 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
 
         let ingress = PairingSetupV2Ingress(windowID: full.windowID, lifetimeMilliseconds: full.lifetimeMilliseconds, authority: client)
         let ready = AsyncStream<UInt16>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        let served = Mutex(false)
+        let served = Mutex(0)
+        let sourceIndex = Mutex<UInt32>(0)
+        let sourceKey: @Sendable (NWEndpoint) -> PairingSetupV2Source? = { endpoint in
+            guard let key = PairingSetupV2Source(endpoint) else { return nil }
+            guard multipleSources else { return key }
+            return sourceIndex.withLock {
+                $0 += 1
+                return .ipv4($0)
+            }
+        }
         let listener = try PairingSetupListener(identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport),
             invitation: invitation, binding: .loopback, maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
-            setupTimeoutMilliseconds: full.lifetimeMilliseconds, v2: ingress, event: { event in
+            setupTimeoutMilliseconds: full.lifetimeMilliseconds, v2: ingress, sourceKey: sourceKey, event: { event in
                 if case .ready(let port) = event { ready.continuation.yield(port) }
                 ready.continuation.finish()
             }, handler: { session in
@@ -502,7 +517,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                 _ = try await session.receiveProof()
                 let receipt = try authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation
                 try await session.sendReceipt(receipt)
-                served.withLock { $0 = true }
+                served.withLock { $0 += 1 }
             })
         do {
             try listener.start()
@@ -513,7 +528,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                 let reservations = try XCTUnwrap(bound.withLock { $0 })
                 let now = try clock.now()
                 frozenTime.withLock { $0 = now }
-                for attempt in 0..<PairingRegistrationBudget.burst {
+                for attempt in 0..<PairingRegistrationBudget.authorityBurst {
                     let candidate = try reservations.register(connection: UUID(), acceptedAt: now.milliseconds,
                         peerPoint: transport.publicKey.x963Representation, exporter: Data(repeating: UInt8(attempt), count: 32))
                     reservations.retire(candidate: candidate.id)
@@ -524,21 +539,73 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                     XCTFail("Pairing completed while Authority had no registration credit")
                 } catch {}
                 XCTAssertGreaterThan(sampled.withLock { $0 }, before)
-                XCTAssertFalse(served.withLock { $0 })
+                XCTAssertEqual(served.withLock { $0 }, 0)
                 frozenTime.withLock { $0 = nil }
                 let refill = (1_000 + PairingRegistrationBudget.registrationsPerSecond - 1) / PairingRegistrationBudget.registrationsPerSecond
                 while try clock.now().milliseconds < now.milliseconds + refill {
                     try await Task.sleep(for: .milliseconds(5))
                 }
             }
-            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full)
+            if multipleSources {
+                let reservations = try XCTUnwrap(bound.withLock { $0 })
+                try await pairOnlyOneOfSixteenNativePeers(port: port, invitation: full, reservations: reservations)
+            } else {
+                try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full)
+            }
         } catch {
             await listener.closeAndWait()
             throw error
         }
         await listener.closeAndWait()
-        XCTAssertTrue(served.withLock { $0 })
+        XCTAssertEqual(served.withLock { $0 }, 1)
+        XCTAssertThrowsError(try window.export(at: clock.now()))
         XCTAssertThrowsError(try window.requireStaging(clock.now()))
+    }
+
+    private func pairOnlyOneOfSixteenNativePeers(port: UInt16, invitation: PairingInvitationV2,
+                                                 reservations: AuthorityPairingProofReservations) async throws {
+        let capacity = PairingSetupV2Admissions.maximumPending
+        let burst = Int(PairingRegistrationBudget.ingressBurst)
+        let rate = PairingRegistrationBudget.registrationsPerSecond
+        XCTAssertEqual(capacity, 16)
+        let reached = (0..<capacity).map { XCTestExpectation(description: "Peer \($0 + 1) got its challenge") }
+        let release = reached.map { _ in AsyncStream<Void>.makeStream() }
+
+        func start(_ indexes: Range<Int>) -> [Task<Bool, Never>] {
+            indexes.map { index in
+                Task { @Sendable in
+                    do {
+                        try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation) {
+                            reached[index].fulfill()
+                            for await _ in release[index].stream {}
+                        }
+                        return true
+                    } catch { return false }
+                }
+            }
+        }
+
+        var peers = start(0..<burst)
+        defer {
+            for signal in release { signal.continuation.finish() }
+            for peer in peers { peer.cancel() }
+        }
+        await fulfillment(of: Array(reached[..<burst]), timeout: 1)
+        let refillMilliseconds = (1_000 * UInt64(capacity - burst) + rate - 1) / rate
+        try await Task.sleep(for: .milliseconds(Int64(refillMilliseconds)))
+        peers += start(burst..<capacity)
+        await fulfillment(of: Array(reached[burst...]), timeout: 1)
+        XCTAssertEqual(reservations.pendingCount, capacity)
+
+        release[0].continuation.finish()
+        let firstPaired = await peers[0].value
+        XCTAssertTrue(firstPaired)
+        XCTAssertEqual(reservations.pendingCount, 0)
+        for signal in release.dropFirst() { signal.continuation.finish() }
+        for peer in peers.dropFirst() {
+            let alsoPaired = await peer.value
+            XCTAssertFalse(alsoPaired)
+        }
     }
 
     func testProofSlotIsAvailableAtGeneralCapacityAndRejectsASecondLink() async throws {
