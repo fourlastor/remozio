@@ -11,26 +11,49 @@ struct PairingSetupV2Admissions {
 
     private struct Pending {
         let id: UUID
+        let source: PairingSetupV2Source
         let deadline: ContinuousClock.Instant
         var phase: Phase = .unproved
     }
 
     static let proofTimeout: Duration = .seconds(3)
-    private static let maximumPending = 4
+    static let maximumPending = 4
     private static let maximumDraining = 4
-    private var pending: [Pending] = []
+    private static let maximumSourceAttempts = 2
+    private static let maximumSources = 64
 
-    mutating func admit(_ id: UUID, deadline: ContinuousClock.Instant, draining: Int) -> Admission {
-        // Expired or cancelled work continues to occupy the total capacity until it returns.
-        guard pending.count + draining < Self.maximumPending + Self.maximumDraining else { return .rejected }
-        var evicted: UUID?
-        if pending.count == Self.maximumPending {
-            guard draining < Self.maximumDraining,
-                  let index = pending.firstIndex(where: { $0.phase == .unproved }) else { return .rejected }
-            evicted = pending.remove(at: index).id
+    private var pending: [Pending] = []
+    private var sources: [PairingSetupV2Source: (until: ContinuousClock.Instant, attempts: Int)] = [:]
+    private var budget = PairingRegistrationBudget()
+
+    mutating func admit(_ id: UUID, source: PairingSetupV2Source, accepted: ContinuousClock.Instant,
+                        clock: AuthorityMoment, draining: [PairingSetupV2Source]) -> Admission {
+        // Keep one pending turn per source. A repeat can replace its own unproved slot only.
+        guard draining.lazy.filter({ $0 == source }).count < 2,
+              pending.count + draining.count < Self.maximumPending + Self.maximumDraining else { return .rejected }
+
+        var victim: Int?
+        if let sameSource = pending.firstIndex(where: { $0.source == source }) {
+            guard draining.count < Self.maximumDraining, pending[sameSource].phase == .unproved else { return .rejected }
+            victim = sameSource
+        } else if pending.count == Self.maximumPending {
+            return .rejected
         }
-        pending.append(.init(id: id, deadline: deadline))
+        guard chargeAdmission(source, at: accepted, clock: clock) else { return .rejected }
+        let evicted = victim.map { pending.remove(at: $0).id }
+        pending.append(.init(id: id, source: source, deadline: accepted.advanced(by: Self.proofTimeout)))
         return .admitted(evicting: evicted)
+    }
+
+    private mutating func chargeAdmission(_ source: PairingSetupV2Source, at now: ContinuousClock.Instant,
+                                          clock: AuthorityMoment) -> Bool {
+        sources = sources.filter { $0.value.until > now }
+        let current = sources[source]
+        guard current != nil || sources.count < Self.maximumSources,
+              (current?.attempts ?? 0) < Self.maximumSourceAttempts,
+              budget.spend(at: clock) else { return false }
+        sources[source] = (current?.until ?? now.advanced(by: .seconds(1)), (current?.attempts ?? 0) + 1)
+        return true
     }
 
     mutating func beginVerification(_ id: UUID, at now: ContinuousClock.Instant) -> Bool {
@@ -66,5 +89,5 @@ struct PairingSetupV2Admissions {
         return true
     }
 
-    mutating func removeAll() { pending.removeAll() }
+    mutating func removeAll() { pending.removeAll(); sources.removeAll() }
 }

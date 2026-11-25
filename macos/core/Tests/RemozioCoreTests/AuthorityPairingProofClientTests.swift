@@ -236,13 +236,8 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
             secret: Data(repeating: 3, count: 32), lifetimeMilliseconds: 15_000)
         let served = Mutex(false)
         let (listener, port) = try await listen(fixture, invitation: invitation, client: client) { session in
-            let proposal = try await session.proposal()
-            let transcript = try AndroidPairingMacLoopbackTests.transcript(for: proposal, invitation: fixture.invitation)
-            try await session.stage(transcript)
-            _ = try await session.receiveProof()
-            let receipt = try fixture.authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation
+            try await Self.serveNativePairing(session, fixture: fixture)
             served.withLock { $0 = true }
-            try await session.sendReceipt(receipt)
         }
         do {
             do {
@@ -267,6 +262,71 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
         }
         await listener.closeAndWait()
         XCTAssertTrue(served.withLock { $0 })
+    }
+
+    func testNativeListenerExpiresAQueuedRegistrationAndAcceptsTheNextPeer() async throws {
+        let lane = PairingSetupV2RegistrationLane()
+        let entered = XCTestExpectation(description: "Registration turn occupied")
+        let release = AsyncStream<Void>.makeStream()
+        let holder = Task {
+            try await lane.withTurn(until: ContinuousClock.now.advanced(by: .seconds(10))) {
+                entered.fulfill()
+                var signal = release.stream.makeAsyncIterator()
+                _ = await signal.next()
+            }
+        }
+        defer { release.continuation.finish(); holder.cancel() }
+        await fulfillment(of: [entered], timeout: 2)
+
+        let replies = try Replies()
+        let closes = CloseCount()
+        let client = try await replies.client(closes: closes)
+        defer { client.close() }
+        let fixture = try TransportPairingFixture()
+        let invitation = try PairingInvitationV2(invitation: fixture.invitation, windowID: Data(repeating: 2, count: 16),
+            secret: Data(repeating: 3, count: 32), lifetimeMilliseconds: 15_000)
+        let served = Mutex(false)
+        let (listener, port) = try await listen(fixture, invitation: invitation, client: client, registrationLane: lane) { session in
+            try await Self.serveNativePairing(session, fixture: fixture)
+            served.withLock { $0 = true }
+        }
+        let queued = Task { try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation) }
+        defer { queued.cancel() }
+
+        do {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while lane.waitingCount == 0 && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(lane.waitingCount, 1)
+            if case .success = await queued.result {
+                XCTFail("The queued registration completed after its proof deadline")
+            }
+
+            release.continuation.finish()
+            try await holder.value
+            XCTAssertNil(replies.registered.withLock { $0 })
+            XCTAssertEqual(lane.waitingCount, 0)
+            XCTAssertFalse(served.withLock { $0 })
+            XCTAssertEqual(closes.value.withLock { $0 }, 0)
+
+            replies.holdRegistration.withLock { $0 = false }
+            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation)
+        } catch {
+            await listener.closeAndWait()
+            throw error
+        }
+        await listener.closeAndWait()
+        XCTAssertTrue(served.withLock { $0 })
+    }
+
+    private static func serveNativePairing(_ session: PairingSetupNetworkSession, fixture: TransportPairingFixture) async throws {
+        let proposal = try await session.proposal()
+        let transcript = try AndroidPairingMacLoopbackTests.transcript(for: proposal, invitation: fixture.invitation)
+        try await session.stage(transcript)
+        _ = try await session.receiveProof()
+        let receipt = try fixture.authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation
+        try await session.sendReceipt(receipt)
     }
 
     func testNativeListenerRejectsAProofExpiredBeforeConfirmation() async throws {
@@ -303,13 +363,15 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
 
     private func listen(_ fixture: TransportPairingFixture, invitation: PairingInvitationV2, client: AuthorityPairingProofClient,
                         proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+                        registrationLane: PairingSetupV2RegistrationLane = PairingSetupV2RegistrationLane(),
                         handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void)
         async throws -> (PairingSetupListener, UInt16) {
         let ready = AsyncStream<UInt16>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let ingress = PairingSetupV2Ingress(windowID: invitation.windowID, lifetimeMilliseconds: invitation.lifetimeMilliseconds, authority: client)
         let listener = try PairingSetupListener(identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(fixture.macTransport),
             invitation: fixture.invitation, binding: .loopback, maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
-            setupTimeoutMilliseconds: invitation.lifetimeMilliseconds, v2: ingress, proofTime: proofTime, event: { event in
+            setupTimeoutMilliseconds: invitation.lifetimeMilliseconds, v2: ingress, proofTime: proofTime,
+            registrationLane: registrationLane, event: { event in
                 if case .ready(let port) = event { ready.continuation.yield(port) }
                 ready.continuation.finish()
             }, handler: handler)
