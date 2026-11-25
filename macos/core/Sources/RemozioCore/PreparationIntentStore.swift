@@ -5756,8 +5756,10 @@ public final class PreparationIntentStore {
     /// Invariant: a read transaction holds a SHARED lock under journal_mode=DELETE (or pins one snapshot under WAL), so no
     /// other connection's commit can appear inside it. Only this connection can change what the frame reads, and every such
     /// write moves `sqlite3_total_changes64`. A hit therefore requires: a read transaction (`write: false`), the connection
-    /// still inside it (`sqlite3_get_autocommit == 0`), the same transaction serial, unchanged `total_changes64`, and the
-    /// exact candidate key. Every condition is checked again on each hit. Errors are never stored.
+    /// still inside it (`sqlite3_get_autocommit == 0`) and holding only a read lock (`sqlite3_txn_state == SQLITE_TXN_READ`,
+    /// so a statement that upgraded the transaction to a write is never a hit), the same transaction serial, unchanged
+    /// `total_changes64`, and the exact candidate key. Every condition is checked again on each hit, and the same checks
+    /// gate storing a frame. Errors are never stored.
     ///
     /// The lock does not cover the shared-import journal and relay directory, which the frame's `currentRowsDigest` pins
     /// through `machineEpochSourceDigest`. So every hit reruns the same `sharedImportCompatibilitySnapshot(installationID:)`
@@ -5788,9 +5790,12 @@ public final class PreparationIntentStore {
         // To count hits too, move this line back above the cache check (and restore `.frame == 6` / `12` in the tests).
         observeStoreRead?(.frame)
         observeStableFrameCache?(.miss)
+        // A load nested inside another uncached load records into its own list. On return, its captures are added to the
+        // outer list too, because the outer frame depends on everything the inner load read, so an outer hit must
+        // recapture them as well.
         let outer = stableFrameExternalRecorder
         stableFrameExternalRecorder = []
-        defer { stableFrameExternalRecorder = outer }
+        defer { stableFrameExternalRecorder = outer.map { $0 + (stableFrameExternalRecorder ?? []) } }
         let frame = try loadUncachedStableMachineUpdateFrame(candidate: release)
         let external = stableFrameExternalRecorder ?? []
         if let key, !external.isEmpty, active, !transactionWrites, let db, sqlite3_get_autocommit(db) == 0,
