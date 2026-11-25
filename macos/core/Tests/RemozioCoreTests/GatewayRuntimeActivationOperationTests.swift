@@ -86,6 +86,8 @@ final class GatewayRuntimeActivationOperationTests: XCTestCase {
     }
     // One test per stage, so each builds one fixture and the shards can spread them. The stages are the same
     // ones the earlier single loop covered; the coverage test below fails when a stage is added without its own test.
+    // Keep this list in step with the per-stage tests below: one entry per test method, in the same order. The
+    // coverage test compares it with Stage.allCases, so listing a stage here also requires adding its test.
     private static let interruptedStageTests: [GatewayRuntimeActivationOperation.Stage] =
         [.intentRetained, .artifactsPublished, .publicationRetained, .inventoryEnrolled, .jobRegistered, .completed]
 
