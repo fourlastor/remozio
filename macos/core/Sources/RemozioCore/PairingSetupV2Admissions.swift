@@ -28,9 +28,11 @@ struct PairingSetupV2Admissions {
     private var admissionClosed = false
 
     mutating func admit(_ id: UUID, source: PairingSetupV2Source, accepted: ContinuousClock.Instant,
-                        clock: AuthorityMoment, draining: [PairingSetupV2Source]) -> Admission {
+                        clock: AuthorityMoment, draining: [PairingSetupV2Source],
+                        peerIsOnLink: Bool) -> Admission {
+        guard !admissionClosed, peerIsOnLink else { return .rejected }
         // Keep one pending turn per source. A repeat can replace its own unproved slot only.
-        guard !admissionClosed, draining.lazy.filter({ $0 == source }).count < 2,
+        guard draining.lazy.filter({ $0 == source }).count < 2,
               pending.count + draining.count < Self.maximumPending + Self.maximumDraining else { return .rejected }
 
         var victim: Int?

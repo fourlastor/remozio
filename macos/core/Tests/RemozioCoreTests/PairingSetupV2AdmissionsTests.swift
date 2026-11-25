@@ -23,7 +23,7 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
         mutating func admit(_ id: UUID = UUID(), key: PairingSetupV2Source, offset: UInt64 = 0,
                             draining: [PairingSetupV2Source] = []) -> PairingSetupV2Admissions.Admission {
             admission.admit(id, source: key, accepted: started.advanced(by: .milliseconds(Int64(offset))),
-                clock: .init(epoch: epoch, milliseconds: offset), draining: draining)
+                clock: .init(epoch: epoch, milliseconds: offset), draining: draining, peerIsOnLink: true)
         }
 
         mutating func fillPending(draining: Int = 0) -> [UUID] {
@@ -43,6 +43,26 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
             sources[label] = key
             return key
         }
+    }
+
+    func testOffLinkBurstLeavesTheFullIngressBudgetAndNoPendingSlots() {
+        var admission = PairingSetupV2Admissions()
+        let now = ContinuousClock.now
+        let clock = AuthorityMoment(epoch: UUID(), milliseconds: 0)
+        let burst = Int(PairingRegistrationBudget.ingressBurst)
+        for index in 0..<(4 * burst) {
+            let id = UUID()
+            XCTAssertEqual(admission.admit(id, source: .ipv4(UInt32(index)), accepted: now, clock: clock, draining: [],
+                                           peerIsOnLink: false), .rejected)
+            XCTAssertFalse(admission.remove(id))
+        }
+
+        for index in 0..<burst {
+            XCTAssertEqual(admission.admit(UUID(), source: .ipv4(UInt32(index)), accepted: now, clock: clock, draining: [],
+                                           peerIsOnLink: true), .admitted(evicting: nil))
+        }
+        XCTAssertEqual(admission.admit(UUID(), source: .ipv4(UInt32(burst)), accepted: now, clock: clock, draining: [],
+                                       peerIsOnLink: true), .rejected)
     }
 
     func testCompletingScopedProofRejectsNewConnectionsBeforeBonjourWithdrawal() {

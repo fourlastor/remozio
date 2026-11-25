@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Network
 import RemozioProtocol
@@ -33,6 +34,18 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
     private static let lifetimeMilliseconds: UInt64 = 120_000
 
     func testInvitationProofAndReceiptOnTheNativeListener() async throws {
+        try await assertNativePairing()
+    }
+
+    func testLANFilterCancelsBeforeAllocatingChannelsOrSpendingIngressCredit() async throws {
+        let address = PairingLANRoute.Address.ipv4(try XCTUnwrap(IPv4Address("192.0.2.1")))
+        let offset = try XCTUnwrap(MemoryLayout<sockaddr_in>.offset(of: \.sin_addr))
+        let mask = [UInt8(offset + 3), UInt8(AF_INET)] + Array(repeating: 0, count: offset - 2) + [255, 255, 255]
+        let subnet = try XCTUnwrap(PairingLANSubnet(bound: address, netmask: mask))
+        try await assertNativePairing(filteredBy: subnet)
+    }
+
+    private func assertNativePairing(filteredBy subnet: PairingLANSubnet? = nil) async throws {
         let authority = P256.Signing.PrivateKey()
         let transport = P256.Signing.PrivateKey()
         let publicInvitation = try PairingInvitation(macID: AuthorityPairingSetupAccess.secureRandom(16),
@@ -48,6 +61,12 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
         }
         let window = try AuthorityPairingV2Window(invitation: invitation, predecessor: nil, started: now())
         let observation = Observation()
+        let channels = Mutex(0), allowPeer = Mutex(false), offLinkSources = Mutex<UInt32>(0)
+        let fixture = subnet.map {
+            PairingSetupListener.IngressFixture(peerSubnet: $0,
+                now: { .init(epoch: epoch, milliseconds: 100) },
+                channelAllocated: { channels.withLock { $0 += 1 } })
+        }
         let ingress = PairingSetupV2Ingress(windowID: invitation.windowID, lifetimeMilliseconds: invitation.lifetimeMilliseconds,
             reserve: { proof in
                 try window.reserve(proof, at: now())
@@ -56,7 +75,14 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
         let listener = try PairingSetupListener(
             identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport), invitation: publicInvitation,
             binding: .loopback, maximumConnections: 4, handshakeTimeoutMilliseconds: 5_000, setupTimeoutMilliseconds: 30_000,
-            v2: ingress, event: { event in
+            v2: ingress, sourceKey: { endpoint in
+                guard subnet != nil else { return PairingSetupV2Source(endpoint) }
+                if allowPeer.withLock({ $0 }) { return .ipv4(0xc0000202) }
+                return offLinkSources.withLock {
+                    $0 += 1
+                    return .ipv4(0xc6336400 + $0)
+                }
+            }, ingressFixture: fixture, event: { event in
                 observation.value.withLock {
                     switch event {
                     case .ready(let port): $0.port = port
@@ -85,7 +111,28 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
         do {
             try await wait(observation, seconds: 5) { $0.port != nil }
             let port = try XCTUnwrap(observation.value.withLock { $0.port })
-            if let directory = ProcessInfo.processInfo.environment["REMOZIO_ANDROID_PAIRING_LOOPBACK_DIR"] {
+            if subnet != nil {
+                let offLinkAttempts = 2 * PairingRegistrationBudget.ingressBurst
+                await withTaskGroup(of: Bool.self) { group in
+                    for _ in 0..<offLinkAttempts {
+                        group.addTask {
+                            do {
+                                try await Self.pairNativeClient(port: port, invitation: invitation)
+                                return true
+                            } catch { return false }
+                        }
+                    }
+                    for await paired in group {
+                        XCTAssertFalse(paired, "An off-link candidate completed pairing")
+                    }
+                }
+                XCTAssertEqual(offLinkSources.withLock { $0 }, UInt32(offLinkAttempts))
+                XCTAssertEqual(channels.withLock { $0 }, 0)
+                XCTAssertEqual(observation.value.withLock { $0.reservations }, 0)
+                allowPeer.withLock { $0 = true }
+                try await Self.pairNativeClient(port: port, invitation: invitation)
+                XCTAssertEqual(channels.withLock { $0 }, 1)
+            } else if let directory = ProcessInfo.processInfo.environment["REMOZIO_ANDROID_PAIRING_LOOPBACK_DIR"] {
                 let ready = try Ready(port: port, publicInvitation: publicInvitation.exportText(),
                     windowID: invitation.windowID.map { String(format: "%02x", $0) }.joined())
                 try JSONEncoder().encode(ready).write(

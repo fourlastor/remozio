@@ -68,7 +68,15 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let advertisement: PairingLANAdvertisement?
     private let v2: PairingSetupV2Ingress?
     private let applicationProtocol: String
-    private let intakeClock: AuthorityClock?
+    struct IngressFixture: Sendable {
+        let peerSubnet: PairingLANSubnet
+        let now: @Sendable () throws -> AuthorityMoment
+        let channelAllocated: @Sendable () -> Void
+    }
+
+    private let intakeNow: (@Sendable () throws -> AuthorityMoment)?
+    private let peerSubnet: PairingLANSubnet?
+    private let channelAllocated: (@Sendable () -> Void)?
     private let registrationLane: PairingSetupV2RegistrationLane
     private let sourceKey: @Sendable (NWEndpoint) -> PairingSetupV2Source?
     private var v2Admissions = PairingSetupV2Admissions()
@@ -100,12 +108,21 @@ public final class PairingSetupListener: @unchecked Sendable {
          proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
          registrationLane: PairingSetupV2RegistrationLane = PairingSetupV2RegistrationLane(),
          sourceKey: @escaping @Sendable (NWEndpoint) -> PairingSetupV2Source? = { PairingSetupV2Source($0) },
+         ingressFixture: IngressFixture? = nil,
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
               (1...300_000).contains(setupTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
-        guard (lanRoute == nil) == (lanBinding == nil) else { throw DirectListenerError.invalidConfiguration }
-        if lanRoute?.isCurrent == false { throw TransportPairingControlError.unavailableInterface }
+        guard (lanRoute == nil) == (lanBinding == nil),
+              ingressFixture == nil || (lanRoute == nil && v2 != nil && binding == .loopback) else {
+            throw DirectListenerError.invalidConfiguration
+        }
+        if let lanRoute {
+            guard lanRoute.isCurrent, let subnet = lanRoute.liveSubnet else { throw TransportPairingControlError.unavailableInterface }
+            peerSubnet = subnet
+        } else {
+            peerSubnet = ingressFixture?.peerSubnet
+        }
         if let v2 {
             guard binding == (lanRoute == nil ? .loopback : .localNetwork), v2.windowID.count == 16,
                   (1...300_000).contains(v2.lifetimeMilliseconds),
@@ -125,7 +142,15 @@ public final class PairingSetupListener: @unchecked Sendable {
         advertisement = lanRoute == nil ? nil : PairingLANAdvertisement(queue: queue)
         self.registrationLane = registrationLane
         self.sourceKey = sourceKey
-        intakeClock = try v2.map { _ in try AuthorityClock() }
+        if let ingressFixture {
+            intakeNow = ingressFixture.now
+        } else if v2 != nil {
+            let clock = try AuthorityClock()
+            intakeNow = clock.now
+        } else {
+            intakeNow = nil
+        }
+        channelAllocated = ingressFixture?.channelAllocated
         let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
         self.applicationProtocol = applicationProtocol
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
@@ -201,7 +226,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     }
 
     private func lanRemainingLifetime() -> UInt64? {
-        guard let lanBinding, let v2, let now = try? intakeClock?.now() else { return nil }
+        guard let lanBinding, let v2, let now = try? intakeNow?() else { return nil }
         return lanBinding.remainingMilliseconds(at: now.milliseconds, windowLifetime: v2.lifetimeMilliseconds)
     }
 
@@ -219,7 +244,10 @@ public final class PairingSetupListener: @unchecked Sendable {
                 guard lock.withLock({ !closed }) else { return }
                 guard let lanServiceName else { finish(.failed); return }
                 advertisement.start(name: lanServiceName, index: lanRoute.index, port: port.rawValue, address: lanRoute.address,
-                                    isCurrent: { [weak self] in lanRoute.isCurrent && self?.lanRemainingLifetime() != nil }) { [weak self] event in
+                                    isCurrent: { [weak self] in
+                    guard let self, self.lanRemainingLifetime() != nil, lanRoute.isCurrent, let current = lanRoute.liveSubnet else { return false }
+                    return current == self.peerSubnet
+                }) { [weak self] event in
                     switch event {
                     case .ready(let port): self?.publishReady(port)
                     case .failed, .stopped: self?.finish(event)
@@ -236,9 +264,10 @@ public final class PairingSetupListener: @unchecked Sendable {
         let accepted = ContinuousClock.now
         let deadline = accepted.advanced(by: PairingSetupV2Admissions.proofTimeout)
         let acceptedAt: AuthorityMoment?
-        do { acceptedAt = try intakeClock?.now() }
+        do { acceptedAt = try intakeNow?() }
         catch { connection.cancel(); return }
         let source = v2 == nil ? nil : sourceKey(connection.endpoint)
+        let peerIsOnLink = peerSubnet.map { subnet in source.map(subnet.contains) ?? false } ?? true
         let applicationProtocol = applicationProtocol
         let registrations = registrationLane
         var evicted: Slot?
@@ -250,9 +279,10 @@ public final class PairingSetupListener: @unchecked Sendable {
             if self.v2 == nil {
                 guard slots.count < maximumConnections else { return nil }
             } else {
-                guard let acceptedAt, let source else { return nil }
+                guard peerIsOnLink, let acceptedAt, let source else { return nil }
                 switch v2Admissions.admit(id, source: source, accepted: accepted, clock: acceptedAt,
-                                           draining: retired.values.compactMap(\.source)) {
+                                           draining: retired.values.compactMap(\.source),
+                                           peerIsOnLink: peerIsOnLink) {
                 case .rejected: return nil
                 case .admitted(let victim):
                     if let victim { evicted = retireProof(victim) }
@@ -262,6 +292,7 @@ public final class PairingSetupListener: @unchecked Sendable {
                 Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
                     .flatMap { Self.candidatePoint(metadata: $0) } != nil
             }
+            channelAllocated?()
             let value = Slot(channel, source: source)
             slots[id] = value
             return value
