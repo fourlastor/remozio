@@ -129,7 +129,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
     func pairingHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
-            let completed = try work(handshake: true) { ready = true }
+            let completed = try work(handshake: true) { try access.requirePairingOpen(); ready = true }
             defer { completed.completion.close() }
             onHandshake(); send { reply(1) }
         } catch { close(); reply(0) }
@@ -213,6 +213,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void) {
         do {
             let completed = try work { () -> (UInt64, Data?) in
+                try access.requirePairingOpen()
                 guard maximumVersion >= 1, let owners else { return (0, nil) }
                 guard access.requiresInstalledV2 else { return (1, nil) }
                 let version: UInt64 = access.lanScope == nil ? 2 : 3

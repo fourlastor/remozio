@@ -88,6 +88,16 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             phoneUpdateSchedulingVersion: phoneUpdateSchedulingVersion)
         try validate(account: account, reference: reference)
     }
+    func replacingPairingHost(_ next: InstalledAuthorityCommandConfiguration) throws -> Self {
+        if next.canonicalBytes == host.canonicalBytes { return self }
+        guard try PairingColdDisableConfiguration(source: host).target.canonicalBytes == next.canonicalBytes else {
+            throw RuntimeActivationError.changedScope
+        }
+        return try .init(reference: reference, bundlePath: bundlePath, host: next, transport: transport,
+            gatewaySettingsHost: gatewaySettingsHost, phoneRoutingVersion: phoneRoutingVersion,
+            phoneAuditVersion: phoneAuditVersion, phoneUpdateSchedulingVersion: phoneUpdateSchedulingVersion)
+    }
+
     /// The native file verifier uses the pinned plan policy. The owner independently binds it to the retained import.
     func configurationBundle(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
                              inventory: InstallationInventory) throws -> RuntimeConfigurationBundle {

@@ -46,7 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case maintenanceCloseMarker
+        case maintenanceCloseMarker, pairingColdDisableIntent
         case auditUpgradeStartupFence
         case auditUpgradeMaterial(intentID: Data)
         case auditUpgradeGraph(intentID: Data, contentDigest: Data)
@@ -76,6 +76,7 @@ public enum AdministrativeSetupPublication {
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
             case .maintenanceCloseMarker: AuthorityMaintenanceCloseMarker.fileName
+            case .pairingColdDisableIntent: PairingColdDisableIntent.fileName
             case .auditUpgradeStartupFence: RuntimeAuditUpgradeStartupFence.fileName
             case .auditUpgradeGraph(let id, let digest): "runtime-audit-graph-" + LowercaseHexadecimal.encode(id) + "-" + LowercaseHexadecimal.encode(digest) + ".cbor"
             case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + LowercaseHexadecimal.encode(id) + ".cbor"
@@ -322,6 +323,16 @@ public enum AdministrativeSetupPublication {
         return try replaceSettingsRecord(target, expected: leaf.source, file: leaf.entry.file, directory: directory,
             owner: owner, verify: verify, didStage: didStage,
             expectedIdentity: .init(device: metadata.device, inode: metadata.inode))
+    }
+
+    static func replacePairingColdDisable(_ bytes: Data, expected: Data, file: File,
+        directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void) throws {
+        switch file {
+        case .commandConfiguration, .commandHost, .pairingColdDisableIntent: break
+        default: throw AdministrativeSetupPublicationError.invalidArtifact
+        }
+        _ = try replaceSettingsRecord(bytes, expected: expected, file: file, directory: directory,
+            owner: owner, verify: verify, didStage: { _ in })
     }
 
     /// The update scope has already retained the original and target bytes under closed machine admission.

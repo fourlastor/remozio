@@ -15,14 +15,24 @@ enum RuntimeActivationFiles {
         try access(plan: plan, account: account, initialization: initialization, inventory: inventory,
             publishNew: false, verifyCurrent: verifyCurrent)
     }
+    static func validateCommand(derived: AuthorityCommandStartupConfiguration, retained: AuthorityCommandStartupConfiguration,
+        readIntent: () throws -> Data?) throws {
+        guard derived.canonicalBytes != retained.canonicalBytes else { return }
+        try PairingColdDisableConfiguration.requirePairingOnlyDifference(derived: derived, retained: retained)
+        do { try PairingColdDisableIntent.requirePairingOpen(read: readIntent) }
+        catch { throw RuntimeActivationError.changedScope }
+    }
+
     private static func access(plan: RuntimeActivationPlan, account: AccountPreparationIntent,
                                initialization: AuthorityInitializationIntent, inventory: InstallationInventory,
                                publishNew: Bool, verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try verifyCurrent(); try plan.validate(account: account, reference: plan.reference)
         let bundle = try plan.configurationBundle(account: account, initialization: initialization, inventory: inventory)
-        guard bundle.command.canonicalBytes == plan.host.command.canonicalBytes,
-              bundle.transport.canonicalBytes == plan.transport.canonicalBytes,
+        let commandBytes = plan.host.command.canonicalBytes
+        try validateCommand(derived: bundle.command, retained: plan.host.command,
+            readIntent: { try PairingColdDisableIntent.read(accountID: account.accountID) })
+        guard bundle.transport.canonicalBytes == plan.transport.canonicalBytes,
               let transport = plan.reference.services.claims.first(where: { $0.role == .transport }) else { throw RuntimeActivationError.changedScope }
         let native = try NativeServiceAccountDirectory(accountID: account.accountID, ownerUID: account.ownerUID)
         func verifyServices() throws {
@@ -52,7 +62,7 @@ enum RuntimeActivationFiles {
         }
         try retained(raw, .runtimeRecord, privateState)
         try retained(account.policyBytes, .elevationPolicy, privateState)
-        try retained(bundle.command.canonicalBytes, .commandConfiguration, privateState)
+        try retained(commandBytes, .commandConfiguration, privateState)
         try retained(material.transportIdentity, .transportIdentity(ownerUID: transport.number, groupID: transport.number), shared)
         try retained(bundle.transport.canonicalBytes, .transportConfiguration, shared)
         if let host = plan.gatewaySettingsHost { try retained(host.encoded, .gatewaySettingsHost, shared) }

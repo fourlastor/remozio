@@ -17,6 +17,14 @@ enum GatewaySettingsFenceRemoval {
         return try removeRecord(bytes, file: .auditUpgradeStartupFence, directory: directory, owner: owner,
             verifyCurrent: verifyCurrent, didValidate: didValidate, didRemove: didRemove)
     }
+    static func removeCompletedPairingDisable(_ record: PairingColdDisableIntent,
+        directory: ProtectedSetupDirectory, owner: uid_t, verifyCurrent: () throws -> Void,
+        didRemove: () throws -> Void = {}) throws -> Result {
+        guard record.completed else { throw PairingColdDisableError.changedConfiguration }
+        return try removeRecord(record.encoded, file: .pairingColdDisableIntent, directory: directory, owner: owner,
+            verifyCurrent: verifyCurrent, didValidate: {}, didRemove: didRemove)
+    }
+
     private static func removeRecord(_ bytes: Data, file: AdministrativeSetupPublication.File,
                                      directory: ProtectedSetupDirectory, owner: uid_t, verifyCurrent: () throws -> Void,
                                      didValidate: () throws -> Void, didRemove: () throws -> Void) throws -> Result {
@@ -29,7 +37,7 @@ enum GatewaySettingsFenceRemoval {
             guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
         }
         try verify()
-        return try directory.withSharedDirectory { parent in
+        func removeFromDirectory(_ parent: Int32) throws -> Result {
             let fd = openat(parent, file.name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
             if fd < 0 {
                 guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
@@ -42,7 +50,8 @@ enum GatewaySettingsFenceRemoval {
                 var held = stat(), named = stat()
                 guard fstat(fd, &held) == 0, fstatat(parent, file.name, &named, AT_SYMLINK_NOFOLLOW) == 0 else { throw JournalLeaseError.system(errno) }
                 guard held.st_dev == named.st_dev, held.st_ino == named.st_ino else { throw JournalLeaseError.identityChanged }
-                try ProtectedStorageMetadata.validate(fd, held, directory: false, privateObject: false, owner: owner, ancestorOwner: owner)
+                try ProtectedStorageMetadata.validate(fd, held, directory: false,
+                    privateObject: file.mode == 0o600, owner: owner, ancestorOwner: owner)
                 guard held.st_mode & 0o7777 == file.mode, held.st_size == bytes.count else { throw JournalLeaseError.unsafeMetadata }
                 return held
             }
@@ -65,5 +74,7 @@ enum GatewaySettingsFenceRemoval {
             try didRemove(); try verify()
             try requireAbsent(parent); return .removed
         }
+        if file.requiresSharedDirectory { return try directory.withSharedDirectory(removeFromDirectory) }
+        return try directory.withPrivateDirectory(removeFromDirectory)
     }
 }
