@@ -8,8 +8,8 @@ struct SetupMain {
     static func main() async {
         // Exit 64 reports invalid command usage.
         guard CommandLine.arguments.count == 3,
-              ["--configuration", "--bootstrap-installation", "--prepare-package", "--inspect-package", "--ensure-app-entry"].contains(CommandLine.arguments[1]) else {
-            fail("Usage: RemozioSetup --configuration /absolute/protected/setup.cbor | --bootstrap-installation PUBLISHER_TEAM_ID | --prepare-package|--inspect-package|--ensure-app-entry PINNED_PROFILE", code: EX_USAGE)
+              ["--configuration", "--bootstrap-installation", "--prepare-package", "--inspect-package", "--ensure-app-entry", "--disable-pairing-v2"].contains(CommandLine.arguments[1]) else {
+            fail("Usage: RemozioSetup --configuration /absolute/protected/setup.cbor | --bootstrap-installation PUBLISHER_TEAM_ID | --prepare-package|--inspect-package|--ensure-app-entry PINNED_PROFILE | --disable-pairing-v2 ACCOUNT_ID", code: EX_USAGE)
         }
         // Exit 77 refuses a caller outside the Root account.
         guard getuid() == 0, geteuid() == 0 else { fail("Setup startup requires the Root account.", code: EX_NOPERM) }
@@ -24,6 +24,18 @@ struct SetupMain {
                 }
                 return
             } catch { fail("Package preparation refused or failed. Existing code and setup state were not replaced.", code: EX_CONFIG) }
+        }
+        if CommandLine.arguments[1] == "--disable-pairing-v2" {
+            do {
+                try PairingColdDisableSetup.run(accountIdentifier: CommandLine.arguments[2])
+                return
+            } catch PairingColdDisableSetup.RecoveryError.originalJobsRestored {
+                fail("Pairing disable stopped before publication. Setup restored the original jobs. You can retry.", code: EX_TEMPFAIL)
+            } catch PairingColdDisableSetup.RecoveryError.originalJobsRestorationFailed {
+                fail("Pairing disable stopped before publication. Setup could not confirm restoration of both original jobs.", code: EX_CONFIG)
+            } catch {
+                fail("Pairing disable did not complete. Verify the installed account before retrying.", code: EX_CONFIG)
+            }
         }
         if CommandLine.arguments[1] == "--bootstrap-installation" {
             do {

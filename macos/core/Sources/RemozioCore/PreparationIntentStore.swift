@@ -610,6 +610,27 @@ public final class PreparationIntentStore {
             try identity(macID)
         }
     }
+    func retainColdDisabledPairing(expected: RuntimeActivationPlan, target: RuntimeActivationPlan) throws {
+        let before = try expected.encoded
+        let after = try target.encoded
+        guard target.host.command.presence.pairing?.v2ActivationEnabled == false,
+              target.host.command.presence.pairing?.lanScope == nil,
+              try expected.replacingPairingHost(target.host).encoded == after else {
+            throw RuntimeActivationError.changedScope
+        }
+        try transaction(write: true) {
+            try identity(macID)
+            try requireRuntimeActivationScope(target)
+            let current = try loadRuntimeActivation(accountID: expected.accountID)
+            guard current.jobsRegistered, let plan = current.plan else { throw RuntimeActivationError.incomplete }
+            let retained = try plan.encoded
+            if retained == after { return }
+            guard retained == before else { throw PreparationStoreError.staleRevision }
+            try replaceRuntimeAuditRow("UPDATE runtime_activation_v1 SET digest=?,record=? WHERE account=? AND record=?",
+                account: expected.accountID, before: before, after: after, digest: PairingColdDisableIntent.digest(after))
+        }
+    }
+
     // Publish exact host/job files first. Native registration follows only after this writer's lease is released.
     func enrollRuntimeActivation(_ plan: RuntimeActivationPlan) throws -> InstallationInventory {
         let before: InstallationInventory = try transaction(write: false) {

@@ -50,7 +50,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false,
              accountByte: UInt8 = 2, configureTransport: Bool = false, pairingLifetime: UInt64 = 1000,
              v2ActivationEnabled: Bool? = nil, lanScope: PairingLANScope? = nil, transportIdentity: P256.Signing.PrivateKey? = nil,
-             observePairingContention: @escaping @Sendable () -> Void = {}) throws {
+             observePairingContention: @escaping @Sendable () -> Void = {},
+             readColdDisableIntent: @escaping @Sendable () throws -> Data? = { nil }) throws {
             transport = transportIdentity ?? P256.Signing.PrivateKey()
             self.account = Data(repeating: accountByte, count: 16)
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
@@ -108,7 +109,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 appPolicy: policy, configuration: pairingConfiguration,
                 minimumEnvelopeVersion: 1, auditVersions: auditVersions, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
                     if environment.selfDenied.value { throw Failure.denied }
-                }, gatewayRevocations: gatewayRevocations, commit: { attempt, proof, event, authorize, validate in
+                }, gatewayRevocations: gatewayRevocations, readColdDisableIntent: readColdDisableIntent,
+                commit: { attempt, proof, event, authorize, validate in
                     try journal.commitPairingFixture(attempt, biometricProof: proof, authorityPublicKey: authority.publicKey.x963Representation,
                         addEventID: event, recheckAdministrator: authorize, now: { environment.now() }, validate: validate, sign: {
                             environment.signed.value += 1
@@ -3059,6 +3061,66 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let result = try lookupBytes(endpoint, proof)
         XCTAssertEqual(try lookupBytes(endpoint, proof), try PairingRecoveryFrame.refused.encode())
         return result
+    }
+
+    func testInvalidColdDisableIntentClosesBothPairingHandshakes() throws {
+        let fixture = try Fixture(v2ActivationEnabled: true, readColdDisableIntent: { Data([0]) })
+        let legacy = Box<UInt64>(UInt64.max)
+        try fixture.endpoint().pairingHello { legacy.value = $0 }
+        XCTAssertEqual(legacy.value, 0)
+        let installed = Box<UInt64>(UInt64.max)
+        try fixture.endpoint().pairingSetupHello(maximumVersion: 3) { version, _ in installed.value = version }
+        XCTAssertEqual(installed.value, 0)
+        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
+        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.v2))
+    }
+
+    func testWellFormedColdDisableIntentClosesUntilTheDisabledDigestMatches() throws {
+        let marker = Box<Data?>(nil)
+        let fixture = try Fixture(v2ActivationEnabled: false, readColdDisableIntent: { marker.value })
+        let limits = try CBORLimits(maxBytes: 768, maxDepth: 1, maxItems: 24)
+        func intent(_ completed: Bool, digest: Data) throws -> Data {
+            try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(fixture.mac), 2: .bytes(fixture.account),
+                3: .bytes(Data(repeating: 3, count: 16)), 4: .bytes(Data(repeating: 4, count: 32)),
+                5: .bytes(Data(repeating: 5, count: 32)), 6: .bytes(Data(repeating: 6, count: 32)),
+                7: .bytes(Data(repeating: 7, count: 32)), 8: .bytes(Data(repeating: 8, count: 32)),
+                9: .bytes(digest), 10: .boolean(completed)]), limits: limits)
+        }
+        let digest = PairingColdDisableIntent.digest(fixture.pairingConfiguration.canonicalBytes)
+        let pending = try intent(false, digest: digest)
+        XCTAssertFalse(try PairingColdDisableIntent.decode(pending).completed)
+        marker.value = pending
+        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
+        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.v2))
+
+        marker.value = try intent(true, digest: digest)
+        let endpoint = try fixture.endpoint()
+        let version = Box<UInt64>(0)
+        endpoint.pairingHello { version.value = $0 }
+        XCTAssertEqual(version.value, 1)
+        XCTAssertNoThrow(try fixture.access.admitPairingVersion(.legacy))
+
+        marker.value = try intent(true, digest: Data(repeating: 50, count: 32))
+        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
+        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.v2))
+    }
+
+    func testColdDisableLeavesCommittedPairingReceiptAvailable() throws {
+        let marker = Box<Data?>(nil)
+        let fixture = try Fixture(v2ActivationEnabled: false, readColdDisableIntent: { marker.value })
+        let transport = P256.Signing.PrivateKey()
+        let (replacement, biometric) = try proposal(fixture, transportKey: transport.publicKey)
+        let attempt = try stage(fixture, replacement)
+        _ = try commit(fixture, attempt, key: biometric)
+        marker.value = Data([0])
+
+        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
+        let query = try lookupQuery(attempt.transcript)
+        guard case let .committed(signature) = try PairingRecoveryFrame.decode(recover(fixture, query: query, key: transport)) else {
+            return XCTFail("Expected committed pairing proof")
+        }
+        XCTAssertTrue(try attempt.transcript.verify(signature: signature,
+            publicKey: fixture.authority.publicKey.x963Representation, purpose: .macCommit))
     }
 
     func testRecoveryReadsStayInconclusiveUntilTheOwnerRecordsExpiry() throws {

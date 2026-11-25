@@ -105,6 +105,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     private let validateSelf: @Sendable (JournalTransaction) throws -> Void
     private let commitPairing: Commit
     private let gatewayRevocations: AuthorityGatewayRevocationState?
+    private let readColdDisableIntent: @Sendable () throws -> Data?
 
     convenience init(journal: AuthorityJournal, signer: EnclaveAuthorityRequestSigner, appPolicy: XPCPeerPolicy,
                      configuration: AuthorityPairingSetupConfiguration, minimumEnvelopeVersion: UInt64, auditVersions: Set<UInt64>,
@@ -118,7 +119,8 @@ final class AuthorityPairingSetupAccess: Sendable {
                 guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityPairingSetupError.unavailable }
                 return UInt64(value)
             }, random: Self.secureRandom, validateSelf: AuthoritySelfValidation.validate,
-            gatewayRevocations: gatewayRevocations, commit: { attempt, proof, event, authorize, validate in
+            gatewayRevocations: gatewayRevocations,
+            readColdDisableIntent: { try PairingColdDisableIntent.read(accountID: signer.accountID) }, commit: { attempt, proof, event, authorize, validate in
                 try journal.commitPairing(attempt, biometricProof: proof, signer: signer, addEventID: event,
                     receiptTimeMs: nil, recheckAdministrator: authorize, now: now, validateSetupCode: validate).receipt
             })
@@ -131,6 +133,7 @@ final class AuthorityPairingSetupAccess: Sendable {
          random: @escaping @Sendable (Int) throws -> Data = AuthorityPairingSetupAccess.secureRandom,
          validateSelf: @escaping @Sendable (JournalTransaction) throws -> Void,
          gatewayRevocations: AuthorityGatewayRevocationState? = nil,
+         readColdDisableIntent: @escaping @Sendable () throws -> Data? = { nil },
          commit: @escaping Commit) throws {
         guard macID.count == 16, accountID.count == 16, appPolicy.expectedUserID > 0, appPolicy.expectedUserID < UInt32.max,
               minimumEnvelopeVersion == 1, auditVersions.count <= 16, !auditVersions.contains(0), authorityPublicKey.count == 65,
@@ -159,14 +162,21 @@ final class AuthorityPairingSetupAccess: Sendable {
         appEntry = retained.0; appRevision = retained.1
         self.now = now; self.unixMilliseconds = unixMilliseconds; self.random = random; self.validateSelf = validateSelf; self.commitPairing = commit
         self.gatewayRevocations = gatewayRevocations
+        self.readColdDisableIntent = readColdDisableIntent
     }
 
     var requiresInstalledV2: Bool { configuration.v2ActivationEnabled == true }
     var lanScope: PairingLANScope? { configuration.lanScope }
 
+    func requirePairingOpen() throws {
+        try PairingColdDisableIntent.requirePairingOpen(macID: macID, accountID: accountID,
+            pairingDigest: activationRevision.configurationDigest, read: readColdDisableIntent)
+    }
+
     /// Endpoints retain the admission through the attempt and its in-flight replies.
     func admitPairingVersion(_ version: PairingVersion) throws -> VersionAdmission {
-        try pairingVersions.withLock { state in
+        try requirePairingOpen()
+        return try pairingVersions.withLock { state in
             switch state.mode {
             case .compatibility:
                 guard state.leases.values.allSatisfy({ $0 == version }) else { throw AuthorityPairingSetupError.unavailable }
@@ -184,6 +194,7 @@ final class AuthorityPairingSetupAccess: Sendable {
 
     /// The protected owner retries only when its installed v2 composition is ready.
     func requestV2Activation(revision: V2ActivationRevision, compositionReady: Bool) throws -> V2ActivationResult {
+        try requirePairingOpen()
         guard revision == activationRevision else { throw AuthorityPairingSetupError.policyChanged }
         guard configuration.v2ActivationEnabled == true, compositionReady else {
             throw AuthorityPairingSetupError.unavailable
@@ -215,6 +226,7 @@ final class AuthorityPairingSetupAccess: Sendable {
 
     func verifyCurrent() throws { try journal.read { try self.requireCurrent($0) } }
     func context() throws -> Data {
+        try requirePairingOpen()
         try verifyCurrent()
         return try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(macID), 2: .bytes(accountID),
             3: .bytes(authorityPublicKey), 4: .bytes(configuration.transportPublicKey),

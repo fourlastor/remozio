@@ -67,6 +67,11 @@ final class RuntimeJobStopSession {
         try verifyCurrent()
         return observed
     }
+    // Capture the process before the first call that can remove this exact registration.
+    func requireRunning() throws {
+        guard getpid() == ownerPID, case .matching(.some) = try observe() else { throw RuntimeActivationError.unavailable }
+    }
+
     /// Fresh validation only. Never issue bootout, capture another process, or infer exit from absence here.
     func requireRemoved() throws {
         guard getpid() == ownerPID else { throw RuntimeActivationError.unavailable }
