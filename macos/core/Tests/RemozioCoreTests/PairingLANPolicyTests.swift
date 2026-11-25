@@ -93,14 +93,57 @@ final class PairingLANPolicyTests: XCTestCase {
         let candidates: [PairingLANAddressSelection.IPv6Candidate] = [
             .init(address: later, flags: 0), .init(address: earlier, flags: 0),
             .init(address: bytes("20010db8000000000000000000000000"), flags: flags),
-            .init(address: bytes("fe800000000000000000000000000001"), flags: 0),
-            .init(address: bytes("fd000000000000000000000000000001"), flags: 0)
+            .init(address: bytes("fe800000000000000000000000000001"), flags: 0)
         ]
         XCTAssertEqual(PairingLANAddressSelection.ipv6(candidates), earlier)
         XCTAssertEqual(PairingLANAddressSelection.ipv6(Array(candidates.reversed())), earlier)
         XCTAssertNil(PairingLANAddressSelection.ipv6(Array(candidates.dropFirst(2))))
         for flag in [UInt32(0x01), 0x10, 0x80, 0x0200, 0x1000] {
             XCTAssertNil(PairingLANAddressSelection.ipv6([.init(address: earlier, flags: flag)]))
+        }
+    }
+
+    func testIPv6PrefersGlobalAndSupportsBothUniqueLocalPrefixes() {
+        let global = bytes("20010db8000000000000000000000001")
+        let fc = bytes("fc000000000000000000000000000001")
+        let fd = bytes("fd000000000000000000000000000001")
+        let unusable = UInt32(RemozioPairingIPv6Unusable)
+        let local: [PairingLANAddressSelection.IPv6Candidate] = [.init(address: fd, flags: 0), .init(address: fc, flags: 0)]
+
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(local), fc)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(Array(local.reversed())), fc)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6([local[0]]), fd)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(local + [.init(address: global, flags: 0)]), global)
+        XCTAssertEqual(PairingLANAddressSelection.ipv6(local + [.init(address: global, flags: unusable)]), fc)
+        XCTAssertNil(PairingLANAddressSelection.ipv6([.init(address: fc, flags: nil), .init(address: fd, flags: unusable)]))
+    }
+
+    func testBoundIPv4SurvivesPrimaryChangeWhileTheAddressRemainsUsable() throws {
+        let before = Data([192, 168, 1, 7]), after = Data([192, 168, 1, 8])
+        let bound = try XCTUnwrap(PairingLANRoute.Address(family: .ipv4, bytes: before))
+        XCTAssertEqual(PairingLANAddressSelection.ipv4([before, after], primary: before), before)
+        XCTAssertEqual(PairingLANAddressSelection.ipv4([before, after], primary: after), after)
+        XCTAssertTrue(PairingLANAddressSelection.contains(bound, ipv4: [before, after], ipv6: []))
+        XCTAssertFalse(PairingLANAddressSelection.contains(bound, ipv4: [after], ipv6: []))
+        let linkLocal = Data([169, 254, 1, 9])
+        let invalid = try XCTUnwrap(PairingLANRoute.Address(family: .ipv4, bytes: linkLocal))
+        XCTAssertFalse(PairingLANAddressSelection.contains(invalid, ipv4: [linkLocal], ipv6: []))
+    }
+
+    func testBoundIPv6SurvivesANewPreferredAddressAndRejectsLossOrUnusableFlags() throws {
+        let preferred = bytes("20010db8000000000000000000000001")
+        let alternative = PairingLANAddressSelection.IPv6Candidate(address: preferred, flags: 0)
+        for previous in [bytes("20010db8000000000000000000000002"), bytes("fd000000000000000000000000000001")] {
+            let bound = try XCTUnwrap(PairingLANRoute.Address(family: .ipv6, bytes: previous))
+            let existing = PairingLANAddressSelection.IPv6Candidate(address: previous, flags: 0)
+            XCTAssertEqual(PairingLANAddressSelection.ipv6([existing]), previous)
+            XCTAssertEqual(PairingLANAddressSelection.ipv6([existing, alternative]), preferred)
+            XCTAssertTrue(PairingLANAddressSelection.contains(bound, ipv4: [], ipv6: [existing, alternative]))
+            XCTAssertFalse(PairingLANAddressSelection.contains(bound, ipv4: [], ipv6: [alternative]))
+            for flags in [nil, UInt32(RemozioPairingIPv6Unusable)] {
+                let unusable = PairingLANAddressSelection.IPv6Candidate(address: previous, flags: flags)
+                XCTAssertFalse(PairingLANAddressSelection.contains(bound, ipv4: [], ipv6: [unusable, alternative]))
+            }
         }
     }
 
