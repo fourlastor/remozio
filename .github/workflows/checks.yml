@@ -377,8 +377,9 @@ jobs:
         env:
           REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
         run: python3 scripts/ci-build-cache.py restore --scope mac
-      # Whole classes in three concurrent xctest processes. The Mac build job runs the classes that need the built app,
-      # so a skip here other than the GUI-session control means a test silently lost its fixture.
+      # Whole classes in three concurrent xctest processes. The Mac build job runs the classes that need the built app.
+      # Only the GUI-session control and the privileged PTY fixture may skip here.
+      # Any other skip means a test silently lost its fixture.
       - name: Run macos/core class shards concurrently
         env:
           PART: ${{ matrix.part }}
@@ -397,7 +398,7 @@ jobs:
           fi
           python3 scripts/run-xctest-shards.py --package-path macos/core \
             --weights .github/macos-core-test-weights.json "$@" --app-dependent exclude \
-            --allowed-skips RemozioCoreTests.LiveOwnedJobInspectionTests/testOwnedGUIJobReconciliation \
+            --allowed-skips RemozioCoreTests.LiveOwnedJobInspectionTests/testOwnedGUIJobReconciliation,RemozioCoreTests.CommandPTYTests/testPrivilegedPTYTransfersOwnershipAndTargetCanReopenSlave \
             -- --triple arm64-apple-macosx26.0 -Xswiftc -O
       # Fails on a test over 20 s (or over its cap in .github/macos-core-slow-tests.json) that is still slow when
       # re-run alone, and on a pull request whose selected or changed classes outgrow their weights. It reads the
