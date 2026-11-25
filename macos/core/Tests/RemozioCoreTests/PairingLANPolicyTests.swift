@@ -1,5 +1,7 @@
+import Darwin
 import dnssd
 import Foundation
+import Network
 import RemozioMach
 import RemozioProtocol
 import Synchronization
@@ -16,6 +18,108 @@ final class PairingLANPolicyTests: XCTestCase {
     private func bytes(_ hex: String) -> Data {
         let digits = Array(hex.filter { !$0.isWhitespace })
         return Data(stride(from: 0, to: digits.count, by: 2).map { UInt8(String(digits[$0...($0 + 1)]), radix: 16)! })
+    }
+
+    private func subnet(_ address: PairingLANRoute.Address, mask: [UInt8], family: Int32 = AF_UNSPEC,
+                        offset: Int, reportedLength: UInt8? = nil) -> PairingLANSubnet? {
+        let length = offset + mask.count
+        let header = [reportedLength ?? UInt8(length), UInt8(family)] + Array(repeating: 0, count: offset - 2)
+        return PairingLANSubnet(bound: address, netmask: header + mask)
+    }
+
+    private func source(_ host: String) throws -> PairingSetupV2Source {
+        try XCTUnwrap(PairingSetupV2Source(.hostPort(host: NWEndpoint.Host(host), port: 1)))
+    }
+
+    func testIPv4SubnetUsesTheExactMaskAndNormalizesMappedPeers() throws {
+        let bound = PairingLANRoute.Address.ipv4(try XCTUnwrap(IPv4Address("198.51.100.130")))
+        let offset = try XCTUnwrap(MemoryLayout<sockaddr_in>.offset(of: \.sin_addr))
+        let subnet25 = try XCTUnwrap(subnet(bound, mask: [255, 255, 255, 128], family: AF_INET, offset: offset))
+        let subnet24 = try XCTUnwrap(subnet(bound, mask: [255, 255, 255], offset: offset))
+        XCTAssertTrue(subnet25.contains(try source("198.51.100.200")))
+        XCTAssertTrue(subnet25.contains(try source("::ffff:198.51.100.200")))
+        XCTAssertFalse(subnet25.contains(try source("198.51.100.40")))
+        XCTAssertTrue(subnet24.contains(try source("198.51.100.40")))
+        XCTAssertFalse(subnet24.contains(try source("198.51.101.40")))
+        XCTAssertFalse(subnet24.contains(try source("2001:db8::1")))
+        XCTAssertNil(PairingSetupV2Source(.hostPort(host: .name("peer.local", nil), port: 1)))
+    }
+
+    func testIPv6SubnetMatchesNonByteAlignedGlobalAndUniqueLocalPrefixes() throws {
+        let offset = try XCTUnwrap(MemoryLayout<sockaddr_in6>.offset(of: \.sin6_addr))
+        for block in ["2001:db8", "fc00:db8", "fd00:db8"] {
+            let bound = PairingLANRoute.Address.ipv6(try XCTUnwrap(IPv6Address("\(block):0:0:8000::1")))
+            let mask = Array(repeating: UInt8.max, count: 8) + [128]
+            let link = try XCTUnwrap(subnet(bound, mask: mask, family: AF_INET6, offset: offset))
+            XCTAssertTrue(link.contains(try source("\(block):0:0:ffff::2")))
+            XCTAssertFalse(link.contains(try source("\(block):0:0:7fff::2")))
+            XCTAssertFalse(link.contains(try source("::ffff:198.51.100.200")))
+        }
+    }
+
+    func testSubnetRejectsUnusablePeersAndOverbroadMasks() throws {
+        let v4 = PairingLANRoute.Address.ipv4(try XCTUnwrap(IPv4Address("169.1.1.1")))
+        let offset4 = try XCTUnwrap(MemoryLayout<sockaddr_in>.offset(of: \.sin_addr))
+        let v6 = PairingLANRoute.Address.ipv6(try XCTUnwrap(IPv6Address("fd00::1")))
+        let offset6 = try XCTUnwrap(MemoryLayout<sockaddr_in6>.offset(of: \.sin6_addr))
+        XCTAssertNil(subnet(v4, mask: [254], offset: offset4))
+        XCTAssertNil(subnet(v6, mask: [255, 254], offset: offset6))
+        let link4 = try XCTUnwrap(subnet(v4, mask: [255], offset: offset4))
+        let link6 = try XCTUnwrap(subnet(v6, mask: [255, 255], offset: offset6))
+        XCTAssertTrue(link4.contains(try source("169.1.2.3")))
+        XCTAssertFalse(link4.contains(try source("169.254.1.2")))
+        XCTAssertTrue(link6.contains(try source("fd00::2")))
+        XCTAssertFalse(link6.contains(try source("fe80::2")))
+        XCTAssertFalse(link6.contains(try source("ff02::1")))
+    }
+
+    func testSubnetSnapshotUsesOnlyTheExactUsableBoundRow() throws {
+        let ip = try XCTUnwrap(IPv6Address("2001:db8::7"))
+        let bound = PairingLANRoute.Address.ipv6(ip)
+        let offset = try XCTUnwrap(MemoryLayout<sockaddr_in6>.offset(of: \.sin6_addr))
+        let length = MemoryLayout<sockaddr_in6>.size
+        let flags = UInt32(IFF_UP | IFF_RUNNING)
+        func row(_ ip: IPv6Address, mask: [UInt8]?, claimedLength: Int = 28) -> PairingLANRoute.InterfaceRow {
+            var bytes = [UInt8](repeating: 0, count: length)
+            bytes[0] = UInt8(claimedLength)
+            bytes[1] = UInt8(AF_INET6)
+            bytes.replaceSubrange(offset..<(offset + 16), with: ip.rawValue)
+            return .init(flags: flags, address: bytes, netmask: mask)
+        }
+        let mask = [UInt8(offset + 8), 0] + Array(repeating: 0, count: offset - 2) + Array(repeating: 255, count: 8)
+        let exact = row(ip, mask: mask), alias = row(try XCTUnwrap(IPv6Address("2001:db8:1::7")), mask: nil)
+        func snapshot(_ rows: [PairingLANRoute.InterfaceRow],
+                      ipv6: UInt32? = 0) -> PairingLANSubnet? {
+            PairingLANRoute.readSubnet(bound: bound, index: 7, liveIndex: { 7 }, rows: { rows }, ipv6Flags: { _ in ipv6 })
+        }
+        XCTAssertNotNil(snapshot([alias, exact]))
+        XCTAssertNil(snapshot([alias]))
+        XCTAssertNil(snapshot([exact, exact]))
+        XCTAssertNil(snapshot([row(ip, mask: nil)]))
+        XCTAssertNil(snapshot([row(ip, mask: mask, claimedLength: offset + 2)]))
+        XCTAssertNil(snapshot([exact], ipv6: UInt32(RemozioPairingIPv6Unusable)))
+        XCTAssertNil(snapshot([exact], ipv6: nil))
+
+        var index: UInt32 = 7
+        XCTAssertNil(PairingLANRoute.readSubnet(bound: bound, index: 7, liveIndex: { index }, rows: {
+            index = 8
+            return [exact]
+        }, ipv6Flags: { _ in 0 }))
+
+        let newMask = [UInt8(offset + 9), 0] + Array(repeating: 0, count: offset - 2) + Array(repeating: 255, count: 9)
+        XCTAssertNotEqual(snapshot([exact]), snapshot([row(ip, mask: newMask)]))
+    }
+
+    func testNetmaskRejectsInvalidLengthFamilyAndNoncontiguousPrefixes() throws {
+        let bound = PairingLANRoute.Address.ipv4(try XCTUnwrap(IPv4Address("192.0.2.10")))
+        let offset = try XCTUnwrap(MemoryLayout<sockaddr_in>.offset(of: \.sin_addr))
+        XCTAssertNil(subnet(bound, mask: [], offset: offset))
+        XCTAssertNil(subnet(bound, mask: [0], offset: offset))
+        XCTAssertNil(subnet(bound, mask: [255, 0, 255], offset: offset))
+        XCTAssertNil(subnet(bound, mask: [255, 255, 127], offset: offset))
+        XCTAssertNil(subnet(bound, mask: [255], family: AF_INET6, offset: offset))
+        XCTAssertNil(subnet(bound, mask: [], offset: offset, reportedLength: 1))
+        XCTAssertNil(subnet(bound, mask: [], offset: offset, reportedLength: 255))
     }
 
     private let point = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
