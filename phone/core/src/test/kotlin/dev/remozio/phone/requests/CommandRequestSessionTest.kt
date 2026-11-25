@@ -38,6 +38,39 @@ class CommandRequestSessionTest {
         return session.observe(body, sign(body, status = true), time(at))
     }
 
+    @Test fun ordinarySignedCaptureReportsReducedByteAndDepthBudgets() {
+        val body = request.encode(bound)
+        val signature = sign(body)
+        val settings = listOf(
+            bound.copy(maxBytes = capture.size - 1) to "BYTE_LIMIT",
+            bound.copy(maxDepth = 1) to "DEPTH_LIMIT",
+        )
+        for ((captureLimit, reason) in settings) {
+            val failure = assertFailsWith<CommandCaptureRefused> {
+                CommandRequestSession.openForDelivery(body, signature, mac, account, publicKey(pair),
+                    limits.copy(capture = captureLimit), setOf(1uL))
+            }
+            assertEquals(reason, failure.reasonCode)
+            assertContentEquals(request.requestID, failure.requestID.copyBytes())
+            assertContentEquals(request.requestDigest(bound, bound), failure.requestDigest.copyBytes())
+        }
+    }
+
+    @Test fun typedCaptureRejectionsRetainReasonAfterAuthenticatedAdmission() {
+        val body = request.encode(bound)
+        val signature = sign(body)
+        for (reason in listOf(CommandCaptureFailure.UNSUPPORTED_TAG, CommandCaptureFailure.ENUMERATION)) {
+            val failure = assertFailsWith<CommandCaptureRefused> {
+                CommandRequestSession.openForDelivery(body, signature, mac, account, publicKey(pair), limits, setOf(1uL)) {
+                        _, _, _ -> throw CommandCaptureException(reason)
+                }
+            }
+            assertEquals(reason.name, failure.reasonCode)
+            assertContentEquals(request.requestID, failure.requestID.copyBytes())
+            assertContentEquals(request.requestDigest(bound, bound), failure.requestDigest.copyBytes())
+        }
+    }
+
     @Test fun authenticatesCommandBeforeExposingDetailsAndCopiesInputs() {
         val body = request.encode(bound)
         val key = publicKey(pair)

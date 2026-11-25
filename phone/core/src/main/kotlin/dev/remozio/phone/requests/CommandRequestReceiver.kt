@@ -52,7 +52,10 @@ class CommandRequestReceiver private constructor(
     private val closed = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private val writing = Mutex()
+    private val rejectedCaptures = RejectedCommandCaptures()
     @Volatile internal var capacityOmitted = false
+        private set
+    @Volatile internal var captureOmitted = false
         private set
 
     /** Run once in the host's connection scope. EOF leaves retained request owners intact. */
@@ -72,7 +75,11 @@ class CommandRequestReceiver private constructor(
                         if (closed.get()) return@coroutineScope
                         val message = ApprovalMessage.decode(bytes, maximumBodyBytes)
                         require(message.type != ApprovalMessageType.DECISION)
-                        capacityOmitted = enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas) || capacityOmitted
+                        when (enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas, rejectedCaptures)) {
+                            CommandDeliveryOutcome.DELIVERED -> Unit
+                            CommandDeliveryOutcome.CAPACITY_OMITTED -> capacityOmitted = true
+                            CommandDeliveryOutcome.CAPTURE_OMITTED -> captureOmitted = true
+                        }
                     }
                 } finally { queries.cancelAndJoin() }
             }

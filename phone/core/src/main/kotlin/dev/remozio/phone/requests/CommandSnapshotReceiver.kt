@@ -20,6 +20,7 @@ class CommandSnapshotReceiver private constructor(
         coroutineContext.ensureActive()
         snapshot.requireComplete()
         if (receiver.capacityOmitted) throw IOException("Snapshot exceeded request capacity")
+        if (receiver.captureOmitted) throw IOException("Snapshot contains an unreadable command capture")
     }
     override fun close() = receiver.close()
     override fun toString() = "CommandSnapshotReceiver(redacted)"

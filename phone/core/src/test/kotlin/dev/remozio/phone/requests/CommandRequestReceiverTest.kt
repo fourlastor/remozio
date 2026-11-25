@@ -55,8 +55,9 @@ class CommandRequestReceiverTest {
             if (terminal) RequestStatusReason.AUTHORIZATION_EXPIRED else RequestStatusReason.NONE, id(7),
             if (terminal) 60000u else 10u, if (terminal) null else 60000u, null, false, if (terminal) 60000u else null, null).encode(bound),
             ApprovalMessageType.STATUS, SigningPurpose.STATUS)
-        fun enroll(inbox: CommandRequestInbox = CommandRequestInbox(2, 4), retired: RetiredCommandRequests? = null) =
-            inbox.add(id(identity), id(2), publicKey, limits, retired)
+        fun enroll(inbox: CommandRequestInbox = CommandRequestInbox(2, 4), retired: RetiredCommandRequests? = null,
+            requestLimits: RequestLimits = limits,
+        ) = inbox.add(id(identity), id(2), publicKey, requestLimits, retired)
     }
     private fun bind(enrollment: CommandRequestEnrollment, wire: RequestMessageChannel, time: ULong = 100u) =
         CommandRequestReceiver.bind(enrollment, wire, id(3), id(4)) { ElapsedInstant(0, time) }
@@ -66,6 +67,114 @@ class CommandRequestReceiverTest {
         bind(enrollment, wire, time).run()
         assertTrue(wire.closed)
     }
+    @Test fun captureBudgetRefusalKeepsTheConnectionAndDoesNotSendAFrame() = runBlocking<Unit> {
+        val fixture = CommandCaptureBudgetFixture(capture, bound)
+        val mac = Mac()
+        mac.captureBytes = fixture.longCapture
+        val refused = mac.issued()
+        val refusedStatus = mac.status()
+        val enrollment = mac.enroll(requestLimits = fixture.receiverLimits)
+        try {
+            repeat(2) { attempt ->
+                mac.captureBytes = fixture.shortCapture
+                mac.requestID = 8 + attempt
+                val next = mac.issued()
+                val nextStatus = mac.status()
+                val nextID = CborValue.Bytes(id(mac.requestID))
+                val wire = Wire(scope())
+                val receiver = bind(enrollment, wire)
+                val receiving = async { receiver.run() }
+                try {
+                    listOf(refused, refusedStatus, refused, refusedStatus, next, nextStatus).forEach { wire.queue.send(it) }
+                    val accepted = withTimeout(2_000) {
+                        enrollment.requestSessions.first { rows -> rows.any { it.identity.requestID == nextID } }
+                            .single { it.identity.requestID == nextID }
+                    }
+                    withTimeout(2_000) { accepted.revisions.first { it == 1uL } }
+                    assertEquals(attempt + 1, enrollment.sessions().size)
+                    assertTrue(receiving.isActive)
+                    assertTrue(receiver.captureOmitted)
+                    assertFalse(receiver.capacityOmitted)
+                    assertFalse(enrollment.capacityLimited.value)
+                    assertTrue(wire.sent.tryReceive().isFailure)
+                } finally {
+                    receiver.close()
+                    receiving.await()
+                }
+            }
+        } finally {
+            enrollment.close()
+        }
+    }
+
+    @Test fun captureRefusalStillRequiresVerifiedSignatureScopeAndDigest() = runBlocking<Unit> {
+        val fixture = CommandCaptureBudgetFixture(capture, bound)
+        val mac = Mac().apply { captureBytes = fixture.longCapture }
+        val signed = ApprovalMessage.decode(mac.issued(), bound.maxBytes)
+        val fields = (DeterministicCbor.decode(signed.body.copyBytes(), bound) as CborValue.Fields).values
+        fun requestWith(field: ULong, value: ByteArray): ByteArray {
+            val body = DeterministicCbor.encode(CborValue.Fields(fields + (field to CborValue.Bytes(value))), bound)
+            return mac.envelope(body, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
+        }
+        val wrongSignature = ApprovalMessage(1u, signed.type, signed.purpose, signed.body.copyBytes(), ByteArray(64)).encode(bound.maxBytes)
+        val enrollment = mac.enroll(requestLimits = fixture.receiverLimits)
+        try {
+            for (frame in listOf(wrongSignature, requestWith(1u, id(9)), requestWith(2u, id(9)), requestWith(11u, id(9, 32)))) {
+                val wire = Wire(scope())
+                wire.queue.send(frame)
+                wire.queue.close()
+                val receiver = bind(enrollment, wire)
+                assertFailsWith<IOException> { receiver.run() }
+                assertFalse(receiver.captureOmitted)
+                assertTrue(wire.closed)
+                assertTrue(enrollment.sessions().isEmpty())
+            }
+        } finally {
+            enrollment.close()
+        }
+    }
+
+    @Test fun rejectedCaptureStatusStillRequiresTheMatchingDigestAndSignature() = runBlocking<Unit> {
+        val fixture = CommandCaptureBudgetFixture(capture, bound)
+        val mac = Mac().apply { captureBytes = fixture.longCapture }
+        val refused = mac.issued()
+        val status = ApprovalMessage.decode(mac.status(), bound.maxBytes)
+        val wrongSignature = ApprovalMessage(1u, status.type, status.purpose, status.body.copyBytes(), ByteArray(64)).encode(bound.maxBytes)
+        mac.captureBytes = fixture.shortCapture
+        val wrongDigest = mac.status()
+        val enrollment = mac.enroll(requestLimits = fixture.receiverLimits)
+        try {
+            for (frame in listOf(wrongSignature, wrongDigest)) {
+                val wire = Wire(scope())
+                wire.queue.send(refused)
+                wire.queue.send(frame)
+                wire.queue.close()
+                val receiver = bind(enrollment, wire)
+                assertFailsWith<IOException> { receiver.run() }
+                assertTrue(receiver.captureOmitted)
+                assertTrue(wire.closed)
+                assertTrue(enrollment.sessions().isEmpty())
+            }
+        } finally {
+            enrollment.close()
+        }
+    }
+
+    @Test fun rejectedCaptureBudgetKeepsExactDigestsAndRefusesOverflow() {
+        val rejections = RejectedCommandCaptures(maximum = 1)
+        val first = CborValue.Bytes(id(1))
+        val digest = CborValue.Bytes(id(3, 32))
+        assertTrue(rejections.remember(first, digest))
+        assertFalse(rejections.remember(first, digest))
+        assertEquals(InboxRejection.CONFLICTING_REQUEST, assertFailsWith<InboxException> {
+            rejections.remember(first, CborValue.Bytes(id(4, 32)))
+        }.reason)
+        assertEquals(InboxRejection.REJECTION_LIMIT, assertFailsWith<InboxException> {
+            rejections.remember(CborValue.Bytes(id(2)), digest)
+        }.reason)
+        assertEquals(digest, rejections[first])
+    }
+
     @Test fun onlySharedImplementedSchemasEnableRequestDelivery() {
         fun offer(schema: ULong, features: Set<ULong> = emptySet()) = ChannelRequestCapability(0u, 1u, schema, features)
         assertEquals(setOf(1uL), commandChannelSchemas(listOf(offer(1u), offer(2u)), emptySet(), ChannelRole.MAC, listOf(offer(1u))))
@@ -135,7 +244,13 @@ class CommandRequestReceiverTest {
         malformed[8u] = CborValue.Unsigned(1u) // continue-running is outside this Linux profile.
         linux.captureBytes = DeterministicCbor.encode(CborValue.Fields(malformed), bound)
         linux.requestID = 9
-        assertFailsWith<IOException> { receiveLinux(setOf(4u), linux.issued()) }
+        val unreadable = Wire(scope(8), commandSchemas = setOf(4u))
+        unreadable.queue.send(linux.issued())
+        unreadable.queue.send(linux.status())
+        unreadable.queue.close()
+        val receiver = bind(linuxEnrollment, unreadable)
+        receiver.run()
+        assertTrue(receiver.captureOmitted)
         assertEquals(listOf(linuxOwner), linuxEnrollment.sessions())
         assertSame(macOwner, macEnrollment.sessions().single())
         assertFalse(macOwner.closed.value)
@@ -557,6 +672,45 @@ class CommandRequestReceiverTest {
         assertTrue(query.retainedRequestIDs.isEmpty()); assertTrue(wire.sent.tryReceive().isFailure); assertTrue(wire.closed)
         enrollment.close()
     }
+    @Test fun aPreviouslyRetiredCaptureDoesNotMakeASnapshotIncomplete() = runBlocking<Unit> {
+        val fixture = CommandCaptureBudgetFixture(capture, bound)
+        val mac = Mac().apply { captureBytes = fixture.longCapture }
+        val index = Retired()
+        index.remember(mac.request.requestID, mac.request.requestDigest(bound, bound))
+        val enrollment = mac.enroll(retired = index, requestLimits = fixture.receiverLimits)
+        try {
+            val wire = Wire(scope())
+            wire.snapshotReply(listOf(mac.issued(), mac.status()))
+            snapshot(enrollment, wire).run()
+            assertTrue(enrollment.sessions().isEmpty())
+            assertIs<PendingRequestSnapshotFrame.Query>(PendingRequestSnapshotFrame.decode(wire.sent.receive()))
+            assertTrue(wire.sent.tryReceive().isFailure)
+        } finally {
+            enrollment.close()
+        }
+    }
+
+    @Test fun snapshotCaptureRefusalCannotReportCompleteDelivery() = runBlocking<Unit> {
+        val fixture = CommandCaptureBudgetFixture(capture, bound)
+        val mac = Mac().apply { captureBytes = fixture.longCapture }
+        val refused = listOf(mac.issued(), mac.status())
+        mac.captureBytes = fixture.shortCapture
+        mac.requestID = 8
+        val enrollment = mac.enroll(requestLimits = fixture.receiverLimits)
+        try {
+            val wire = Wire(scope())
+            wire.snapshotReply(refused + listOf(mac.issued(), mac.status()))
+            val error = assertFailsWith<IOException> { snapshot(enrollment, wire).run() }
+            assertEquals("Snapshot contains an unreadable command capture", error.message)
+            assertEquals(CborValue.Bytes(id(8)), enrollment.sessions().single().identity.requestID)
+            assertIs<PendingRequestSnapshotFrame.Query>(PendingRequestSnapshotFrame.decode(wire.sent.receive()))
+            assertTrue(wire.sent.tryReceive().isFailure)
+            assertTrue(wire.closed)
+        } finally {
+            enrollment.close()
+        }
+    }
+
     @Test fun snapshotEarlyEofAndExplicitCloseCannotSucceed() = runBlocking<Unit> {
         val mac = Mac(); val enrollment = mac.enroll(); val partial = Wire(scope())
         partial.snapshotReply(listOf(mac.issued()), complete = false)

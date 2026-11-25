@@ -2,7 +2,7 @@ package dev.remozio.protocol
 
 import java.util.Collections
 
-enum class CommandCaptureFailure { FIELDS, TYPE, VERSION, BYTES, PATH, ENVIRONMENT, ENUMERATION, ANCESTRY }
+enum class CommandCaptureFailure { FIELDS, TYPE, VERSION, BYTES, PATH, ENVIRONMENT, ENUMERATION, ANCESTRY, UNSUPPORTED_TAG }
 class CommandCaptureException(val reason: CommandCaptureFailure) : IllegalArgumentException(reason.name)
 
 interface CommandWireTag { val wireValue: ULong }
@@ -291,7 +291,10 @@ private class CaptureFields(value: CborValue, count: Int) {
     fun uint32(field: ULong): UInt = uint32(get(field))
     fun pid(field: ULong): UInt = uint32(field).also { ensure(it > 0u && it <= Int.MAX_VALUE.toUInt(), CommandCaptureFailure.TYPE) }
     fun optionalUInt32(field: ULong): UInt? = if (get(field) == CborValue.Null) null else uint32(field)
-    fun <T: CommandWireTag> tag(field: ULong, values: List<T>): T = values.firstOrNull { it.wireValue == uint(field) } ?: fail(CommandCaptureFailure.ENUMERATION)
+    fun <T: CommandWireTag> tag(field: ULong, values: List<T>): T {
+        val tag = uint(field)
+        return values.firstOrNull { it.wireValue == tag } ?: fail(CommandCaptureFailure.UNSUPPORTED_TAG)
+    }
     fun array(field: ULong): List<CborValue> = (get(field) as? CborValue.ArrayValue)?.values ?: fail(CommandCaptureFailure.TYPE)
     fun bytes(field: ULong, count: Int): CborValue.Bytes = ((get(field) as? CborValue.Bytes)?.takeIf { it.size == count }) ?: fail(CommandCaptureFailure.BYTES)
     fun optionalBytes(field: ULong, count: Int): CborValue.Bytes? = if (get(field) == CborValue.Null) null else bytes(field, count)

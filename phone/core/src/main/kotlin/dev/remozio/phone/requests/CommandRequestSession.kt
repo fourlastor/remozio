@@ -1,12 +1,19 @@
 package dev.remozio.phone.requests
 
 import dev.remozio.protocol.*
+import java.security.MessageDigest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 enum class CommandSessionRejection { INVALID_SIGNATURE, WRONG_AUTHORITY, CLOSED }
 class CommandSessionException(val reason: CommandSessionRejection) : IllegalArgumentException(reason.name)
+
+internal class CommandCaptureRefused(
+    val requestID: CborValue.Bytes,
+    val requestDigest: CborValue.Bytes,
+    val reasonCode: String,
+) : IllegalArgumentException(reasonCode)
 
 data class RequestLimits(
     val body: CborLimits,
@@ -124,6 +131,21 @@ class CommandRequestSession private constructor(
             trustedAuthorityPublicKey: ByteArray,
             limits: RequestLimits,
             negotiatedSchemas: Set<ULong> = setOf(1u),
+        ): CommandRequestSession = open(body, signature, expectedMacID, expectedAccountID, trustedAuthorityPublicKey,
+            limits, negotiatedSchemas, isolateCaptureRefusal = false)
+
+        internal fun openForDelivery(
+            body: ByteArray, signature: ByteArray, expectedMacID: ByteArray, expectedAccountID: ByteArray,
+            trustedAuthorityPublicKey: ByteArray, limits: RequestLimits, negotiatedSchemas: Set<ULong>,
+            decodeCapture: (ByteArray, CborLimits, ULong) -> CommandCapturePayload = CommandCapturePayload.Companion::decode,
+        ): CommandRequestSession = open(body, signature, expectedMacID, expectedAccountID, trustedAuthorityPublicKey,
+            limits, negotiatedSchemas, isolateCaptureRefusal = true, decodeCapture = decodeCapture)
+
+        private fun open(
+            body: ByteArray, signature: ByteArray, expectedMacID: ByteArray, expectedAccountID: ByteArray,
+            trustedAuthorityPublicKey: ByteArray, limits: RequestLimits, negotiatedSchemas: Set<ULong>,
+            isolateCaptureRefusal: Boolean,
+            decodeCapture: (ByteArray, CborLimits, ULong) -> CommandCapturePayload = CommandCapturePayload.Companion::decode,
         ): CommandRequestSession {
             require(expectedMacID.size == 16 && expectedAccountID.size == 16)
             if (body.size > limits.body.maxBytes) throw CborException(CborFailure.BYTE_LIMIT)
@@ -136,11 +158,30 @@ class CommandRequestSession private constructor(
             }
             require(negotiatedSchemas.isNotEmpty() && CommandCapturePayload.supportedSchemaVersions.containsAll(negotiatedSchemas))
             val capabilities = ContractCapabilities(negotiatedSchemas.associate { RequestContract(RequestKind.COMMAND, 1u, it) to emptySet<ULong>() })
-            val request = IssuedRequestPayload.decode(canonical, limits.body, limits.capture, capabilities)
-            if (!request.macID.contentEquals(expectedMacID) || !request.accountID.contentEquals(expectedAccountID)) {
-                throw CommandSessionException(CommandSessionRejection.WRONG_AUTHORITY)
+            fun refuse(id: CborValue.Bytes, reasonCode: String): Nothing {
+                val signed = SigningInput.make(1u, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST,
+                    canonical, limits.body, limits.signing)
+                val digest = CborValue.Bytes(MessageDigest.getInstance("SHA-256").digest(signed))
+                throw CommandCaptureRefused(id, digest, reasonCode)
             }
-            val capture = CommandCapturePayload.decode(request.canonicalCapture, limits.capture, expectedSchemaVersion = request.contract.schemaVersion)
+            val request = try {
+                IssuedRequestPayload.decodeScoped(canonical, limits.body, limits.capture, capabilities,
+                    expectedMacID, expectedAccountID)
+            } catch (failure: IssuedCaptureBudgetException) {
+                if (!isolateCaptureRefusal) throw CborException(failure.reason)
+                refuse(failure.requestID, failure.reason.name)
+            } catch (failure: IssuedRequestException) {
+                if (failure.reason == IssuedRequestFailure.WRONG_SCOPE) {
+                    throw CommandSessionException(CommandSessionRejection.WRONG_AUTHORITY)
+                }
+                throw failure
+            }
+            val capture = try {
+                decodeCapture(request.canonicalCapture, limits.capture, request.contract.schemaVersion)
+            } catch (failure: CommandCaptureException) {
+                if (!isolateCaptureRefusal) throw failure
+                refuse(CborValue.Bytes(request.requestID), failure.reason.name)
+            }
             return CommandRequestSession(capture,
                 RequestStatusTracker(request, key, limits.status, limits.signing, limits.body),
                 CommandRequestIdentity(CborValue.Bytes(request.macID), CborValue.Bytes(request.accountID),

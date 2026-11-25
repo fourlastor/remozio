@@ -30,8 +30,10 @@ class CommandConnectionTest {
         reference(EnrollmentKeyRole.DECISION, decision), reference(EnrollmentKeyRole.BIOMETRIC, biometric), id(6, 32), null), EnrollmentPhase.ACTIVE)
     private val decline = CapturedAction(ActionChoice.DECLINE, ActionScope.CurrentRequest)
     private val execute = CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)
-    private val request = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(2), id(3), id(7), id(8, 32), emptySet(),
-        1u, 60001u, File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes(), listOf(decline, execute), bound, bound)
+    private val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
+    private val request = request(capture)
+    private fun request(capture: ByteArray) = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u),
+        id(2), id(3), id(7), id(8, 32), emptySet(), 1u, 60001u, capture, listOf(decline, execute), bound, bound)
     private var time = ElapsedInstant(0, 100u)
     private fun sign(body: ByteArray, key: KeyPair, type: ApprovalMessageType, purpose: SigningPurpose) =
         P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
@@ -64,6 +66,21 @@ class CommandConnectionTest {
     private fun owner(snapshot: (suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire)? = null,
                       open: suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire) =
         CommandConnection(record, limits, open, { time }, dispatcher = Dispatchers.Unconfined, openSnapshot = snapshot)
+
+    @Test fun ordinaryCaptureWithAnExtraArgumentFitsTheProductionBudget() {
+        val fields = (DeterministicCbor.decode(capture, bound) as CborValue.Fields).values
+        val arguments = fields.getValue(2uL) as CborValue.ArrayValue
+        val extraArgument = CborValue.Bytes("fixture".encodeToByteArray())
+        val longer = DeterministicCbor.encode(CborValue.Fields(
+            fields + (2uL to CborValue.ArrayValue(arguments.values + extraArgument))), bound)
+        val body = request(longer).encode(bound)
+        val signature = sign(body, authority, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
+        CommandRequestInbox(1, 2).use { inbox ->
+            val enrollment = inbox.add(id(2), id(3), point(authority), commandRequestLimits())
+            val session = enrollment.accept(body, signature)
+            assertEquals(extraArgument, assertNotNull(session.snapshot(time).capture).arguments.last())
+        }
+    }
 
     @Test fun sendsExactEnrolledDecisionWithoutInventingAcceptance() = runBlocking<Unit> {
         val wire = Wire(); lateinit var session: CommandRequestSession
