@@ -90,6 +90,26 @@ final class WakeStartupConfigurationTests: XCTestCase {
             XCTAssertThrowsError(try AuthorityPresenceStartupConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
         }
     }
+    func testPresenceStartupPreservesTheProtectedPairingActivationPayload() throws {
+        let wake = try root(), key = P256.Signing.PrivateKey().publicKey.x963Representation
+        let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 3, maxItems: 128)
+        for flag: Bool? in [nil, false, true] {
+            let pairing = try AuthorityPairingSetupConfiguration(transportPublicKey: key, v2ActivationEnabled: flag)
+            let original = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501,
+                appServiceName: "dev.sebastiano.remozio.macos.presence", teamID: "TEAMID1234",
+                appIdentifier: "dev.sebastiano.remozio.macos", appHashes: [id(7, count: 20)],
+                policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000), pairing: pairing)
+            let decoded = try AuthorityPresenceStartupConfiguration.decode(original.canonicalBytes)
+            XCTAssertEqual(decoded.canonicalBytes, original.canonicalBytes)
+            XCTAssertEqual(decoded.pairing?.v2ActivationEnabled, flag)
+            guard case .map(let fields) = try DeterministicCBOR.decode(original.canonicalBytes, limits: limits) else {
+                return XCTFail("Map required")
+            }
+            XCTAssertEqual(fields[0], .unsigned(2))
+            XCTAssertEqual(fields[10], .bytes(pairing.canonicalBytes))
+        }
+    }
+
     func testPublicPresenceClientConfigurationPinsRootAndRejectsMalformedMetadata() throws {
         let original = try AuthorityPresenceClientConfiguration(macID: id(1), accountID: id(2), ownerUID: 501,
             serviceName: "dev.sebastiano.remozio.macos.presence", teamID: "TEAMID1234", rootIdentifier: "dev.sebastiano.remozio.macos.authority", rootHashes: [id(7, count: 20)])

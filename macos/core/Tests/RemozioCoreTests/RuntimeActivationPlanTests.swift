@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
@@ -21,6 +22,39 @@ final class RuntimeActivationPlanTests: XCTestCase {
         XCTAssertEqual(String(reflecting: decoded), "RuntimeActivationPlan(redacted)")
         XCTAssertNoThrow(try decoded.validate(account: f.account, reference: f.material.reference))
     }
+    func testVersionedPairingConfigurationKeepsTheProtectedTransportPinCheck() throws {
+        let f = try fixture(), p = f.plan
+        let limits = try CBORLimits(maxBytes: 262_144, maxDepth: 3, maxItems: 512)
+        func replacing(_ key: UInt64, in bytes: Data, with payload: Data) throws -> Data {
+            guard case .map(var fields) = try DeterministicCBOR.decode(bytes, limits: limits), fields[key] != nil else {
+                throw RuntimeActivationError.invalidPlan
+            }
+            fields[key] = .bytes(payload)
+            return try DeterministicCBOR.encode(.map(fields), limits: limits)
+        }
+
+        let correctKey = try f.material.reference.transportPublicKeyX963
+        let otherKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        XCTAssertNotEqual(correctKey, otherKey)
+        for key in [correctKey, otherKey] {
+            let pairing = try AuthorityPairingSetupConfiguration(transportPublicKey: key, v2ActivationEnabled: true)
+            let command = p.host.command
+            let presenceBytes = try replacing(10, in: command.presence.canonicalBytes, with: pairing.canonicalBytes)
+            let commandBytes = try replacing(1, in: command.canonicalBytes, with: presenceBytes)
+            let hostBytes = try replacing(5, in: p.host.canonicalBytes, with: commandBytes)
+            let encoded = try replacing(3, in: p.encoded, with: hostBytes)
+            if key == correctKey {
+                let decoded = try RuntimeActivationPlan.decode(encoded)
+                XCTAssertEqual(decoded.host.command.presence.pairing?.v2ActivationEnabled, true)
+                XCTAssertEqual(try decoded.encoded, encoded)
+            } else {
+                XCTAssertThrowsError(try RuntimeActivationPlan.decode(encoded)) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .invalidPlan)
+                }
+            }
+        }
+    }
+
     func testEnrollmentAddsOnlyTheExactAccountAndJobsAndIsIdempotent() throws {
         let f = try fixture(), original = try XCTUnwrap(f.machine.inventory())
         let added = try f.plan.enrolledInventory(original)

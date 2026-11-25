@@ -14,25 +14,40 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
     static let maximumLifetimeMilliseconds: UInt64 = 300_000
     public let transportPublicKey: Data
     public let lifetimeMilliseconds: UInt64
+    public let v2ActivationEnabled: Bool?
     public let canonicalBytes: Data
     public var description: String { "AuthorityPairingSetupConfiguration(redacted)" }
-    public init(transportPublicKey: Data, lifetimeMilliseconds: UInt64 = 120_000) throws {
+    public init(transportPublicKey: Data, lifetimeMilliseconds: UInt64 = 120_000,
+                v2ActivationEnabled: Bool? = nil) throws {
         guard transportPublicKey.count == 65, transportPublicKey.first == 4,
               (try? P256.Signing.PublicKey(x963Representation: transportPublicKey)) != nil,
               (1...Self.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds) else { throw AuthorityPairingSetupError.invalidConfiguration }
         self.transportPublicKey = transportPublicKey; self.lifetimeMilliseconds = lifetimeMilliseconds
-        canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(transportPublicKey),
-            2: .unsigned(lifetimeMilliseconds)]), limits: Self.limits)
+        self.v2ActivationEnabled = v2ActivationEnabled
+        var fields: [UInt64: CBORValue] = [0: .unsigned(v2ActivationEnabled == nil ? 1 : 2), 1: .bytes(transportPublicKey),
+            2: .unsigned(lifetimeMilliseconds)]
+        if let v2ActivationEnabled { fields[3] = .boolean(v2ActivationEnabled) }
+        canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
     public static func decode(_ bytes: Data) throws -> Self {
-        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits), Set(fields.keys) == Set(UInt64(0)...2),
-              fields[0] == .unsigned(1), case .bytes(let key) = fields[1], case .unsigned(let lifetime) = fields[2] else {
+        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
+              case .bytes(let key) = fields[1], case .unsigned(let lifetime) = fields[2] else {
             throw AuthorityPairingSetupError.invalidConfiguration
         }
-        let result = try Self(transportPublicKey: key, lifetimeMilliseconds: lifetime)
+        let activation: Bool?
+        switch fields[0] {
+        case .unsigned(1) where Set(fields.keys) == Set(UInt64(0)...2):
+            activation = nil
+        case .unsigned(2) where Set(fields.keys) == Set(UInt64(0)...3):
+            guard case .boolean(let flag) = fields[3] else { throw AuthorityPairingSetupError.invalidConfiguration }
+            activation = flag
+        default:
+            throw AuthorityPairingSetupError.invalidConfiguration
+        }
+        let result = try Self(transportPublicKey: key, lifetimeMilliseconds: lifetime, v2ActivationEnabled: activation)
         guard result.canonicalBytes == bytes else { throw AuthorityPairingSetupError.invalidConfiguration }; return result
     }
-    private static var limits: CBORLimits { get throws { try .init(maxBytes: 512, maxDepth: 1, maxItems: 7) } }
+    private static var limits: CBORLimits { get throws { try .init(maxBytes: 512, maxDepth: 1, maxItems: 9) } }
 }
 
 /// Trusted local app access to the existing authority. It owns no database, key creation or network listener.
@@ -40,6 +55,18 @@ final class AuthorityPairingSetupAccess: Sendable {
     typealias Commit = @Sendable (PairingEnrollmentAttempt, Data, Data, () throws -> Void,
                                  @Sendable (JournalTransaction) throws -> Void) throws -> Data
     enum PairingVersion: Equatable { case legacy, v2 }
+    enum V2ActivationResult: Equatable { case draining, active }
+
+    struct V2ActivationRevision: Equatable, Sendable {
+        let authorityEpoch: UUID
+        let configurationDigest: Data
+    }
+
+    private struct PairingAdmissionState {
+        enum Mode { case compatibility, draining, v2 }
+        var mode: Mode
+        var leases: [UUID: PairingVersion] = [:]
+    }
 
     final class VersionAdmission: Sendable {
         private let access: AuthorityPairingSetupAccess
@@ -48,10 +75,11 @@ final class AuthorityPairingSetupAccess: Sendable {
             self.access = access
             self.id = id
         }
-        deinit { _ = access.pairingVersions.withLock { $0.removeValue(forKey: id) } }
+        deinit { _ = access.pairingVersions.withLock { $0.leases.removeValue(forKey: id) } }
     }
 
-    private let pairingVersions = Mutex<[UUID: PairingVersion]>([:])
+    private let pairingVersions: Mutex<PairingAdmissionState>
+    private let activationRevision: V2ActivationRevision
     private let pairingWindowOwner = UUID()
     private let journal: AuthorityJournal
     let maintenanceAdmission: AuthorityMaintenancePairingAdmission
@@ -112,8 +140,12 @@ final class AuthorityPairingSetupAccess: Sendable {
             guard current.requirement == appPolicy.requirement else { throw AuthorityPairingSetupError.policyChanged }
             return (entry, revision)
         }
-        var incarnation = try now().epoch.uuid
+        let epoch = try now().epoch
+        var incarnation = epoch.uuid
         maintenanceAdmission = try .init(accountID: accountID, incarnation: withUnsafeBytes(of: &incarnation) { Data($0) })
+        activationRevision = .init(authorityEpoch: epoch, configurationDigest: Data(SHA256.hash(data: configuration.canonicalBytes)))
+        // Restore the admission closure before any endpoint can open. A new owner must promote explicitly.
+        pairingVersions = Mutex(.init(mode: configuration.v2ActivationEnabled == true ? .draining : .compatibility))
         self.journal = journal; self.macID = macID; self.accountID = accountID; self.authorityPublicKey = authorityPublicKey
         self.configuration = configuration; self.minimumEnvelopeVersion = minimumEnvelopeVersion; self.auditVersions = auditVersions
         appEntry = retained.0; appRevision = retained.1
@@ -123,11 +155,39 @@ final class AuthorityPairingSetupAccess: Sendable {
 
     /// Endpoints retain the admission through the attempt and its in-flight replies.
     func admitPairingVersion(_ version: PairingVersion) throws -> VersionAdmission {
-        try pairingVersions.withLock {
-            guard $0.values.allSatisfy({ $0 == version }) else { throw AuthorityPairingSetupError.unavailable }
+        try pairingVersions.withLock { state in
+            switch state.mode {
+            case .compatibility:
+                guard state.leases.values.allSatisfy({ $0 == version }) else { throw AuthorityPairingSetupError.unavailable }
+            case .draining:
+                throw AuthorityPairingSetupError.unavailable
+            case .v2:
+                guard version == .v2 else { throw AuthorityPairingSetupError.unavailable }
+            }
             let id = UUID()
-            $0[id] = version
+            state.leases[id] = version
             return VersionAdmission(access: self, id: id)
+        }
+    }
+
+    /// The protected owner retries only when its installed v2 composition is ready.
+    func requestV2Activation(revision: V2ActivationRevision, compositionReady: Bool) throws -> V2ActivationResult {
+        guard revision == activationRevision else { throw AuthorityPairingSetupError.policyChanged }
+        guard configuration.v2ActivationEnabled == true, compositionReady else {
+            throw AuthorityPairingSetupError.unavailable
+        }
+        try verifyCurrent()
+        return try pairingVersions.withLock { state in
+            switch state.mode {
+            case .compatibility:
+                throw AuthorityPairingSetupError.unavailable
+            case .draining:
+                guard state.leases.isEmpty else { return .draining }
+                state.mode = .v2
+                return .active
+            case .v2:
+                return .active
+            }
         }
     }
 
