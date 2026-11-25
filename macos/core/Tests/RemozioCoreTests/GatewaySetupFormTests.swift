@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import RemozioCore
@@ -101,6 +102,25 @@ final class GatewaySetupFormTests: XCTestCase, @unchecked Sendable {
             _ = try await SetupFCMConfiguration.importServiceAccount(from: malformed)
             XCTFail("Accepted an invalid credential")
         } catch PortableSetupError.rejected { }
+    }
+    func testCredentialFileImportRejectsNamedPipeWithoutWriter() async throws {
+        let directory = try importDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("account.json")
+        guard Darwin.mkfifo(file.path, 0o600) == 0 else {
+            return XCTFail("Could not create the temporary FIFO")
+        }
+        let finished = expectation(description: "The import finishes while the FIFO has no writer")
+        let task = Task {
+            defer { finished.fulfill() }
+            do {
+                _ = try await SetupFCMConfiguration.importServiceAccount(from: file)
+                XCTFail("Accepted a FIFO as a credential file")
+            } catch SetupPreviewReadError.unreadable { }
+            catch { XCTFail("Expected an unreadable file error") }
+        }
+        defer { task.cancel() }
+        await fulfillment(of: [finished], timeout: 5)
     }
     func testCancelledCredentialFileImportStopsBeforeReading() async {
         let task = Task {
