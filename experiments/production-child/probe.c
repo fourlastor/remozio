@@ -48,7 +48,8 @@ static bool contains(const gid_t *groups, int count, gid_t group) {
     return false;
 }
 
-enum case_kind { positive, wrong_name, missing_group, legacy, cancel_prepared };
+/* protected_launch exercises the frame tag. The disposable location does not prove Root's path classification. */
+enum case_kind { positive, wrong_name, missing_group, legacy, cancel_prepared, stale_launch, protected_launch };
 static char directory[PATH_MAX], monitor_path[PATH_MAX], child_path[PATH_MAX], target_path[PATH_MAX];
 static bool path(char *out, const char *name) {
     return snprintf(out, PATH_MAX, "%s/%s", directory, name) < PATH_MAX;
@@ -75,6 +76,10 @@ static bool protected_helpers(void) {
 static void word(unsigned char *frame, size_t *count, uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) frame[(*count)++] = (unsigned char)(value >> (24 - 8 * i));
 }
+static void wide_word(unsigned char *frame, size_t *count, uint64_t value) {
+    word(frame, count, (uint32_t)(value >> 32));
+    word(frame, count, (uint32_t)value);
+}
 static void string(unsigned char *frame, size_t *count, const char *value) {
     size_t length = strlen(value); word(frame, count, (uint32_t)length);
     memcpy(frame + *count, value, length); *count += length;
@@ -89,10 +94,25 @@ static size_t frame(const struct account *target, enum case_kind kind, unsigned 
     }
     if (kind == legacy) groups[group_count++] = target->gid;
     size_t count = 0;
-    uint32_t header[] = {kind == legacy ? REMOZIO_CHILD_FRAME_V1 : REMOZIO_CHILD_FRAME_V3, 0,
+    uint32_t header[] = {kind == legacy ? REMOZIO_CHILD_FRAME_V1 : REMOZIO_CHILD_FRAME_V4, 0,
         target->uid, target->gid, group_count, 3, 0, 10000, 0027, 0};
     for (unsigned i = 0; i < 10; ++i) word(bytes, &count, header[i]);
-    if (kind != legacy) word(bytes, &count, 0);
+    if (kind != legacy) {
+        struct stat file;
+        if (lstat(target_path, &file) != 0 || !S_ISREG(file.st_mode)) return 0;
+        word(bytes, &count, 0);
+        word(bytes, &count, kind == protected_launch ? REMOZIO_CHILD_LAUNCH_PROTECTED_PATH : REMOZIO_CHILD_LAUNCH_PATH_BOUND);
+        word(bytes, &count, (uint32_t)file.st_dev);
+        wide_word(bytes, &count, kind == stale_launch ? file.st_ino ^ 1U : file.st_ino);
+        wide_word(bytes, &count, (uint64_t)file.st_size);
+        word(bytes, &count, file.st_mode);
+        word(bytes, &count, file.st_uid);
+        word(bytes, &count, file.st_gid);
+        wide_word(bytes, &count, (uint64_t)file.st_mtimespec.tv_sec);
+        word(bytes, &count, (uint32_t)file.st_mtimespec.tv_nsec);
+        wide_word(bytes, &count, (uint64_t)file.st_ctimespec.tv_sec);
+        word(bytes, &count, (uint32_t)file.st_ctimespec.tv_nsec);
+    }
     for (unsigned i = 0; i < group_count; ++i) word(bytes, &count, groups[i]);
     if (kind != legacy) string(bytes, &count, kind == wrong_name ? "remozio-no-such-account" : target->name);
     char uid[16], gid[16]; snprintf(uid, sizeof(uid), "%u", target->uid); snprintf(gid, sizeof(gid), "%u", target->gid);
@@ -118,6 +138,7 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
                struct control_diagnostic *diagnostic) {
     *diagnostic = (struct control_diagnostic){0};
     unsigned char bytes[16384]; size_t count = frame(target, kind, bytes);
+    if (!count) return 1;
     int input[2] = {-1,-1}, output[2] = {-1,-1}, sink = -1, cwd = -1, failure = 0;
     remozio_command_monitor_t *owner = NULL; remozio_command_monitor_observation_t state = {0};
     if (pipe(input) || pipe(output) || (sink = open("/dev/null", O_WRONLY | O_CLOEXEC)) < 0 ||
@@ -135,14 +156,16 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
         if (state.status.failed) break;
         usleep(1000);
     }
-    bool should_prepare = kind == positive || kind == cancel_prepared;
-    if (state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
+    bool starts = kind == positive || kind == protected_launch;
+    bool stale = kind == stale_launch;
+    bool should_prepare = starts || stale || kind == cancel_prepared;
+    if (state.fault || state.protocol_failed || (should_prepare && !stale && state.status.failed)) { failure = 13; goto cleanup; }
     int available = 0, produced = 0;
     if (state.prepared != should_prepare || state.target_exec_observed || state.release_attempted ||
         ioctl(input[0], FIONREAD, &available) || available != 1 ||
         ioctl(output[0], FIONREAD, &produced) || produced != 0) { failure = 5; goto cleanup; }
     if (!should_prepare && (!state.status.failed || state.status.failure_error != (uint32_t)(kind == legacy ? EINVAL : ESTALE))) { failure = 5; goto cleanup; }
-    if (kind == positive) {
+    if (starts || stale) {
         if (remozio_command_monitor_release(owner) || remozio_command_monitor_release(owner) != EALREADY) { failure = 6; goto cleanup; }
     } else if (kind == cancel_prepared) {
         if (remozio_command_monitor_cancel(owner)) { failure = 7; goto cleanup; }
@@ -151,21 +174,25 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
     while (awaiting_retirement(&state) && !state.monitor_ownership_lost && before(began, 15000)) {
         error = remozio_command_monitor_poll(owner, &state);
         if (error) diagnostic->poll_error = error;
-        if (error || state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
+        if (error || state.fault || state.protocol_failed || (should_prepare && !stale && state.status.failed)) { failure = 13; goto cleanup; }
         usleep(1000);
     }
-    if (state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
+    if (state.fault || state.protocol_failed || (should_prepare && !stale && state.status.failed)) { failure = 13; goto cleanup; }
     if (!state.monitor_reaped || state.monitor_ownership_lost || !state.status.reaped) { failure = 8; goto cleanup; }
     if (!WIFEXITED(state.monitor_wait_status) ||
-        WEXITSTATUS(state.monitor_wait_status) != (should_prepare ? EX_OK : EX_SOFTWARE)) { failure = 14; goto cleanup; }
+        WEXITSTATUS(state.monitor_wait_status) != (should_prepare && !stale ? EX_OK : EX_SOFTWARE)) { failure = 14; goto cleanup; }
     unsigned char result_bytes[sizeof(fixed_result_t) + 1] = {0};
     ssize_t received = read(output[0], result_bytes, sizeof(result_bytes));
-    if (kind == positive) {
+    if (starts) {
         fixed_result_t result; memcpy(&result, result_bytes, sizeof(result));
         if (received != sizeof(result) || result.magic != FIXED_RESULT_MAGIC || !result.identity || !result.input ||
             !result.private_fds_closed || !result.extra_group_access || !state.target_exec_observed || !state.target_exit_observed ||
             !state.status.reaped || state.status.latest.tag != REMOZIO_MONITOR_TARGET_REAPED ||
             state.status.latest.detail != 0 || !state.status.target_release_attempted) failure = 9;
+    } else if (stale) {
+        if (received != 0 || !state.release_attempted || !state.status.target_release_attempted ||
+            !state.status.failed || state.status.failure_error != ESTALE || state.target_exec_observed ||
+            ioctl(input[0], FIONREAD, &available) || available != 1) failure = 10;
     } else if (received != 0 || state.release_attempted || state.target_exec_observed ||
                ioctl(input[0], FIONREAD, &available) || available != 1) failure = 10;
 cleanup:
@@ -195,18 +222,28 @@ int main(int argc, char **argv) {
     if (!locate()) return 70;
     struct account target, root;
     if (account((uid_t)uid, &target) || account(0, &root)) return 70;
-    const struct account *accounts[] = {&root, &target, &target, &target, &target, &target};
-    const enum case_kind kinds[] = {positive, positive, wrong_name, missing_group, legacy, cancel_prepared};
+    const struct account *accounts[] = {&root, &target, &target, &target, &target, &target, &target, &target};
+    const enum case_kind kinds[] = {positive, positive, wrong_name, missing_group, legacy, cancel_prepared, stale_launch, protected_launch};
+    enum { controls = sizeof(kinds) / sizeof(kinds[0]) };
     if (inspect) {
-        for (unsigned i = 0; i < 6; ++i) {
+        for (unsigned i = 0; i < controls; ++i) {
             enum case_kind kind = kinds[i];
             unsigned char bytes[16384]; size_t count = frame(accounts[i], kind, bytes);
             remozio_child_spec_t spec = {0}; int error = remozio_child_spec_decode(bytes, count, &spec);
             if (!error) error = remozio_child_account_validate(&spec);
+            bool valid_account = kind == positive || kind == cancel_prepared || kind == stale_launch || kind == protected_launch;
+            if ((valid_account && error) || (!valid_account && !error)) {
+                remozio_child_spec_close(&spec); return 71;
+            }
+            if (valid_account) {
+                error = remozio_child_spec_check_executable(&spec);
+                if (error != (kind == stale_launch ? ESTALE : 0)) {
+                    remozio_child_spec_close(&spec); return 71;
+                }
+            }
             remozio_child_spec_close(&spec);
-            if ((kind == positive || kind == cancel_prepared) ? error != 0 : error == 0) return 71;
         }
-        puts("{\"schemaVersion\":1,\"codecControls\":6,\"privilegedControlsRun\":false}"); return 0;
+        puts("{\"schemaVersion\":1,\"codecControls\":8,\"privilegedControlsRun\":false}"); return 0;
     }
     if (!protected_helpers()) return 78;
     long limit = sysconf(_SC_NGROUPS_MAX);
@@ -227,7 +264,7 @@ int main(int argc, char **argv) {
     if (file < 0) return 70;
     int failure = fchown(file, 0, extra) || fchmod(file, 0640) || write(file, "G", 1) != 1;
     close(file); bool all_reaped = true; int passed = 0;
-    for (unsigned i = 0; !failure && i < 6; ++i) {
+    for (unsigned i = 0; !failure && i < controls; ++i) {
         struct control_diagnostic diagnostic;
         int result = one(accounts[i], kinds[i], &all_reaped, &diagnostic);
         if (result) {
@@ -256,6 +293,6 @@ int main(int argc, char **argv) {
     snprintf(summary, sizeof(summary), "{\"schemaVersion\":1,\"privilegedControlsRun\":true,\"passed\":%d,\"parentCredentialsUnchanged\":%s,\"allOwnedCleanupConfirmed\":%s,\"fixtureRemoved\":%s,\"installedRemozio\":false}\n",
         passed, unchanged ? "true" : "false", all_reaped ? "true" : "false", removed ? "true" : "false");
     fputs(summary, stdout);
-    if (failure || passed != 6 || !unchanged || !all_reaped || !removed) fputs(summary, stderr);
-    return !failure && passed == 6 && unchanged && all_reaped && removed ? 0 : 71;
+    if (failure || passed != controls || !unchanged || !all_reaped || !removed) fputs(summary, stderr);
+    return !failure && passed == controls && unchanged && all_reaped && removed ? 0 : 71;
 }

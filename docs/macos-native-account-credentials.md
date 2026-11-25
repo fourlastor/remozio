@@ -34,20 +34,21 @@ flowchart TD
 
 The common 40-byte header retains UID, GID, group and string counts, preparation budget, creation mask and I/O mode.
 Version 3 uses magic `RMC3`. Its body contains the terminal mask, full group vector, account name, executable, arguments and environment.
+Version 4 uses magic `RMC4` and adds the launch mode and file metadata after the terminal mask.
 Strings retain their existing length prefixes and NUL refusal. The account name is nonempty and bounded to 65,535 bytes.
 The group vector has 1–1,024 distinct IDs in ascending order. It includes the primary GID and rejects the invalid-ID sentinel.
 Pipe, legacy terminal and mapped terminal layouts retain their existing stream meanings.
 
 | Component | Supported private child formats |
 | --- | --- |
-| Production Swift encoder | 3 |
-| Native decoder and monitor | 1, 2, 3 |
-| Production credential validator and child | 3 |
-| Explicit legacy fixture encoder | 1, 2 |
+| Production Swift encoder | 4 |
+| Native decoder and monitor | 1, 2, 3, 4 |
+| Native credential validator | 3, 4 |
+| Production child | 4 |
+| Legacy fixtures | 1, 2, 3 |
 
-Unknown versions fail. The production child refuses historical static-group frames before applying credentials.
-The static-group helper also refuses version 3. It cannot truncate the directory vector into a legacy representation.
-An older monitor refuses the new magic. A newer monitor cannot make an old frame execute through the production child.
+Unknown versions fail. The production child requires format 4 before it applies credentials.
+The static-group helper accepts only formats 1 and 2. The format 3 monitor rejects format 4.
 These bytes remain private Root-to-child data. They grant no enrollment or execution authority. The phone protocol and capture schema stay unchanged.
 
 ## Identity and lifetime

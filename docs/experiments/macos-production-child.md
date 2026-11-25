@@ -4,6 +4,7 @@ This experiment prepares the actual product monitor and command child without cr
 Ordinary preparation compiles the helpers and checks refusal and frame handling. It never requests elevation.
 The six privileged controls passed on hosted macOS 26.6.2 after PR #399 merged.
 The [sanitized record](evidence/production-child-native-macos26.json) matches source `2bbda9cfa6b029bce202ef8e758369b1821fed17`.
+The recorded result predates the format 4 frame in #928. The new live run with Root remains part of the attended session.
 The first hosted attempt remains failed.
 
 ```mermaid

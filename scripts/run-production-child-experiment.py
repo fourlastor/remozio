@@ -100,7 +100,7 @@ def prepare(directory):
     uid = os.getuid()
     inspect = subprocess.run([str(directory / "probe"), "--inspect", str(uid)], check=True,
                              capture_output=True, text=True, timeout=30)
-    expected = {"schemaVersion": 1, "codecControls": 6, "privilegedControlsRun": False}
+    expected = {"schemaVersion": 1, "codecControls": 8, "privilegedControlsRun": False}
     if json.loads(inspect.stdout) != expected:
         raise RuntimeError("Unexpected ordinary frame inspection")
     for name in SOURCES:

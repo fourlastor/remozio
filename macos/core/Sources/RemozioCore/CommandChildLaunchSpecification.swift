@@ -1,5 +1,22 @@
+import Darwin
 import Foundation
 import RemozioProtocol
+
+/// Prepared by Root from the active filesystem proof.
+struct CommandExecutableLaunch: Sendable {
+    enum Mode: UInt32, Sendable {
+        case protectedPath = 1
+        case pathBound = 2
+    }
+
+    let mode: Mode
+    let info: stat
+
+    func accepts(_ current: Self) -> Bool {
+        CommandFilesystemCapture.stable(info, current.info) &&
+            (mode == .pathBound || current.mode == .protectedPath)
+    }
+}
 
 /// Private Root-to-child data. These bytes are not an authorization or a public command endpoint.
 struct CommandChildLaunchSpecification {
@@ -7,11 +24,11 @@ struct CommandChildLaunchSpecification {
     static let maximumEntries = 262_144
     let canonicalBytes: Data
 
-    init(capture: CommandCapture, resolvedExecutablePath: Data? = nil,
+    init(capture: CommandCapture, resolvedExecutablePath: Data? = nil, launch: CommandExecutableLaunch? = nil,
          preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
         try self.init(capture: capture, executablePath: resolvedExecutablePath ?? capture.executable.path,
             preparationMilliseconds: preparationMilliseconds,
-            fileCreationMask: fileCreationMask, directoryAccount: true)
+            fileCreationMask: fileCreationMask, directoryAccount: true, launch: launch)
     }
 
     /// Encodes the historical static-group format for compatibility controls. The production child refuses it.
@@ -21,7 +38,7 @@ struct CommandChildLaunchSpecification {
     }
 
     private init(capture: CommandCapture, executablePath: Data, preparationMilliseconds: UInt32, fileCreationMask: UInt32,
-                 directoryAccount: Bool) throws {
+                 directoryAccount: Bool, launch: CommandExecutableLaunch? = nil) throws {
         guard (100...60_000).contains(preparationMilliseconds), fileCreationMask <= 0o777,
               capture.target.uid != UInt32.max, capture.target.gid != UInt32.max,
               capture.target.supplementaryGroups.count <= (directoryAccount ? 1024 : 16),
@@ -41,6 +58,10 @@ struct CommandChildLaunchSpecification {
         } else { accountName = nil }
         var body = Data()
         func appendWord(_ value: UInt32) { var word = value.bigEndian; withUnsafeBytes(of: &word) { body.append(contentsOf: $0) } }
+        func appendWideWord(_ value: UInt64) {
+            appendWord(UInt32(value >> 32))
+            appendWord(UInt32(truncatingIfNeeded: value))
+        }
         func appendString(_ value: Data) throws {
             guard !value.contains(0), let count = UInt32(exactly: value.count),
                   value.count <= Self.maximumBytes - min(body.count, Self.maximumBytes) - 4 else {
@@ -51,6 +72,24 @@ struct CommandChildLaunchSpecification {
         let mappedTerminal = capture.ioMode == .pty && capture.stdioLayout != nil
         if directoryAccount || mappedTerminal {
             appendWord(mappedTerminal ? capture.stdioLayout!.ptyMask : capture.ioMode == .pty ? 7 : 0)
+        }
+        if let launch {
+            let file = launch.info
+            guard file.st_size >= 0, (0..<1_000_000_000).contains(file.st_mtimespec.tv_nsec),
+                  (0..<1_000_000_000).contains(file.st_ctimespec.tv_nsec) else {
+                throw CommandChildSpecificationError.invalid
+            }
+            appendWord(launch.mode.rawValue)
+            appendWord(UInt32(bitPattern: file.st_dev))
+            appendWideWord(file.st_ino)
+            appendWideWord(UInt64(file.st_size))
+            appendWord(UInt32(file.st_mode))
+            appendWord(file.st_uid)
+            appendWord(file.st_gid)
+            appendWideWord(UInt64(bitPattern: Int64(file.st_mtimespec.tv_sec)))
+            appendWord(UInt32(file.st_mtimespec.tv_nsec))
+            appendWideWord(UInt64(bitPattern: Int64(file.st_ctimespec.tv_sec)))
+            appendWord(UInt32(file.st_ctimespec.tv_nsec))
         }
         for group in capture.target.supplementaryGroups { appendWord(group) }
         if let accountName { try appendString(accountName) }
@@ -70,7 +109,11 @@ struct CommandChildLaunchSpecification {
             throw CommandChildSpecificationError.invalid
         }
         var frame = Data()
-        for value: UInt32 in [directoryAccount ? 0x524d4333 : mappedTerminal ? 0x524d4332 : 0x524d4331, count, capture.target.uid, capture.target.gid,
+        let format: UInt32
+        if launch != nil { format = 0x524d4334 }
+        else if directoryAccount { format = 0x524d4333 }
+        else { format = mappedTerminal ? 0x524d4332 : 0x524d4331 }
+        for value: UInt32 in [format, count, capture.target.uid, capture.target.gid,
             UInt32(capture.target.supplementaryGroups.count), UInt32(capture.arguments.count), UInt32(capture.environment.count),
             preparationMilliseconds, fileCreationMask, mappedTerminal ? 2 : UInt32(capture.ioMode.rawValue)] {
             var word = value.bigEndian; withUnsafeBytes(of: &word) { frame.append(contentsOf: $0) }

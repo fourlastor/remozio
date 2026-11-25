@@ -27,7 +27,7 @@ class ProductionChildCIEvidenceTests(unittest.TestCase):
 
     def preparation(self):
         return {"schemaVersion": 1, "hostMacOS": "26.6.2", "hostArchitecture": "arm64",
-                "ordinaryControls": {"schemaVersion": 1, "codecControls": 6, "privilegedControlsRun": False},
+                "ordinaryControls": {"schemaVersion": 1, "codecControls": 8, "privilegedControlsRun": False},
                 "ownerControls": {"schemaVersion": 1, "ownerControls": 30, "privilegedControlsRun": False, "realProcessesSpawned": 0},
                 "descriptorControls": {"schemaVersion": 1, "descriptorControls": 3, "privilegedControlsRun": False},
                 "ordinaryPrivilegedModeRefused": True, "invalidUIDRefused": True,
@@ -61,7 +61,7 @@ class ProductionChildCIEvidenceTests(unittest.TestCase):
             bad[key] = not value if type(value) is bool else value + 1
             with self.subTest(changed=key), self.assertRaises(ValueError):
                 self.collect(native=bad)
-        for changed in [dict(EVIDENCE.NATIVE_SUCCESS, passed=5), dict(EVIDENCE.NATIVE_SUCCESS, passed=True), dict(EVIDENCE.NATIVE_SUCCESS, schemaVersion=True),
+        for changed in [dict(EVIDENCE.NATIVE_SUCCESS, passed=6), dict(EVIDENCE.NATIVE_SUCCESS, passed=True), dict(EVIDENCE.NATIVE_SUCCESS, schemaVersion=True),
                         dict(EVIDENCE.NATIVE_SUCCESS, fixtureRemoved=1), dict(EVIDENCE.NATIVE_SUCCESS, accountName="private")]:
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 self.collect(native=changed)

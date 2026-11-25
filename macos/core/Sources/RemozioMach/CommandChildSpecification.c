@@ -1,5 +1,6 @@
 #include "include/RemozioCommandChild.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,9 @@
 
 static uint32_t word(const unsigned char *bytes) {
     return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | bytes[3];
+}
+static uint64_t wide_word(const unsigned char *bytes) {
+    return ((uint64_t)word(bytes) << 32) | word(bytes + 4);
 }
 void remozio_child_spec_close(remozio_child_spec_t *spec) {
     if (!spec) return;
@@ -30,7 +34,7 @@ static int string(const unsigned char *bytes, size_t count, size_t *cursor, remo
     return 0;
 }
 int remozio_child_spec_groups(const remozio_child_spec_t *spec, uint32_t *groups, uint32_t *count) {
-    if (!spec || !groups || !count || spec->format_version == 3 || spec->gid == UINT32_MAX || spec->group_count > 16 || (spec->group_count && !spec->groups)) return EINVAL;
+    if (!spec || !groups || !count || spec->format_version >= 3 || spec->gid == UINT32_MAX || spec->group_count > 16 || (spec->group_count && !spec->groups)) return EINVAL;
     *count = 1; groups[0] = spec->gid;
     for (uint32_t index = 0; index < spec->group_count; ++index) {
         uint32_t group = spec->groups[index];
@@ -50,10 +54,11 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
     if (!input || count < REMOZIO_CHILD_HEADER_BYTES || count > REMOZIO_CHILD_MAX_BYTES) return EINVAL;
     const unsigned char *bytes = input;
     uint32_t magic = word(bytes);
-    if ((magic != REMOZIO_CHILD_FRAME_V1 && magic != REMOZIO_CHILD_FRAME_V2 && magic != REMOZIO_CHILD_FRAME_V3) ||
+    if ((magic != REMOZIO_CHILD_FRAME_V1 && magic != REMOZIO_CHILD_FRAME_V2 &&
+         magic != REMOZIO_CHILD_FRAME_V3 && magic != REMOZIO_CHILD_FRAME_V4) ||
         word(bytes + 4) != count - REMOZIO_CHILD_HEADER_BYTES) return EINVAL;
     remozio_child_spec_t spec = {0};
-    spec.format_version = magic == REMOZIO_CHILD_FRAME_V1 ? 1 : magic == REMOZIO_CHILD_FRAME_V2 ? 2 : 3;
+    spec.format_version = magic - REMOZIO_CHILD_FRAME_V1 + 1;
     size_t body_start = REMOZIO_CHILD_HEADER_BYTES;
     spec.uid = word(bytes + 8); spec.gid = word(bytes + 12); spec.group_count = word(bytes + 16);
     spec.argument_count = word(bytes + 20); spec.environment_count = word(bytes + 24);
@@ -67,10 +72,31 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
         if (spec.stdio_pty_mask > 7 || (spec.io_mode == 0 && spec.stdio_pty_mask != 0) ||
             (spec.io_mode == 1 && spec.stdio_pty_mask != 7)) return EINVAL;
     }
-    if (spec.uid == UINT32_MAX || spec.gid == UINT32_MAX || spec.group_count > (spec.format_version == 3 ? REMOZIO_CHILD_MAX_ACCOUNT_GROUPS : 16) || spec.argument_count == 0 ||
+    if (spec.format_version == 4) {
+        if (count - body_start < REMOZIO_CHILD_LAUNCH_BYTES) return EINVAL;
+        const unsigned char *launch = bytes + body_start;
+        spec.launch_mode = word(launch);
+        spec.executable_device = word(launch + 4);
+        spec.executable_inode = wide_word(launch + 8);
+        spec.executable_size = wide_word(launch + 16);
+        spec.executable_mode = word(launch + 24);
+        spec.executable_uid = word(launch + 28);
+        spec.executable_gid = word(launch + 32);
+        spec.executable_mtime_s = wide_word(launch + 36);
+        spec.executable_mtime_ns = word(launch + 44);
+        spec.executable_ctime_s = wide_word(launch + 48);
+        spec.executable_ctime_ns = word(launch + 56);
+        if ((spec.launch_mode != REMOZIO_CHILD_LAUNCH_PROTECTED_PATH &&
+             spec.launch_mode != REMOZIO_CHILD_LAUNCH_PATH_BOUND) ||
+            spec.executable_mode > UINT16_MAX || !S_ISREG(spec.executable_mode) ||
+            (spec.executable_mode & 0111) == 0 || spec.executable_size > INT64_MAX ||
+            spec.executable_mtime_ns >= 1000000000U || spec.executable_ctime_ns >= 1000000000U) return EINVAL;
+        body_start += REMOZIO_CHILD_LAUNCH_BYTES;
+    }
+    if (spec.uid == UINT32_MAX || spec.gid == UINT32_MAX || spec.group_count > (spec.format_version >= 3 ? REMOZIO_CHILD_MAX_ACCOUNT_GROUPS : 16) || spec.argument_count == 0 ||
         spec.argument_count > REMOZIO_CHILD_MAX_ENTRIES || spec.environment_count > REMOZIO_CHILD_MAX_ENTRIES ||
         spec.preparation_milliseconds < 100 || spec.preparation_milliseconds > 60000 || spec.file_creation_mask > 0777) return EINVAL;
-    size_t entries = 1U + spec.argument_count + spec.environment_count + (spec.format_version == 3 ? 1U : 0U);
+    size_t entries = 1U + spec.argument_count + spec.environment_count + (spec.format_version >= 3 ? 1U : 0U);
     if (spec.group_count * 4U + entries * 4U > count - body_start) return EINVAL;
     spec.groups = calloc(spec.group_count + 1U, sizeof(uint32_t));
     spec.arguments = calloc(spec.argument_count + 1U, sizeof(char *));
@@ -85,7 +111,7 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
         spec.groups[index] = word(bytes + cursor); cursor += 4;
         if (spec.groups[index] == UINT32_MAX) goto fail;
     }
-    if (spec.format_version == 3) {
+    if (spec.format_version >= 3) {
         bool primary = false;
         if (!spec.group_count) goto fail;
         for (uint32_t index = 0; index < spec.group_count; ++index) {
@@ -118,11 +144,30 @@ fail:
     remozio_child_spec_close(&spec); return error;
 }
 
+int remozio_child_spec_check_executable(const remozio_child_spec_t *spec) {
+    if (!spec || spec->format_version != 4 || !spec->executable) return EINVAL;
+    if (spec->launch_mode != REMOZIO_CHILD_LAUNCH_PROTECTED_PATH &&
+        spec->launch_mode != REMOZIO_CHILD_LAUNCH_PATH_BOUND) return EINVAL;
+    /* The target must be able to execute the file. This check needs no read access. */
+    int descriptor = open(spec->executable, O_EXEC | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
+    if (descriptor < 0) return errno;
+    struct stat file;
+    int error = 0;
+    if (fstat(descriptor, &file) != 0) error = errno;
+    else if ((uint32_t)file.st_dev != spec->executable_device || file.st_ino != spec->executable_inode ||
+        (uint64_t)file.st_size != spec->executable_size || file.st_mode != spec->executable_mode ||
+        file.st_uid != spec->executable_uid || file.st_gid != spec->executable_gid ||
+        (uint64_t)file.st_mtimespec.tv_sec != spec->executable_mtime_s || file.st_mtimespec.tv_nsec != spec->executable_mtime_ns ||
+        (uint64_t)file.st_ctimespec.tv_sec != spec->executable_ctime_s || file.st_ctimespec.tv_nsec != spec->executable_ctime_ns) error = ESTALE;
+    close(descriptor);
+    return error;
+}
+
 int remozio_child_spec_validate_stdio(const remozio_child_spec_t *spec, int terminal, const int streams[3]) {
     if (!spec || !streams || spec->stdio_pty_mask > 7 || spec->io_mode > 2) return EINVAL;
-    if (spec->io_mode == 0) return (spec->format_version == 1 || spec->format_version == 3) && terminal < 0 && spec->stdio_pty_mask == 0 ? 0 : EINVAL;
-    if ((spec->io_mode == 1 && ((spec->format_version != 1 && spec->format_version != 3) || spec->stdio_pty_mask != 7)) ||
-        (spec->io_mode == 2 && spec->format_version != 2 && spec->format_version != 3)) return EINVAL;
+    if (spec->io_mode == 0) return (spec->format_version == 1 || spec->format_version >= 3) && terminal < 0 && spec->stdio_pty_mask == 0 ? 0 : EINVAL;
+    if ((spec->io_mode == 1 && ((spec->format_version != 1 && spec->format_version < 3) || spec->stdio_pty_mask != 7)) ||
+        (spec->io_mode == 2 && spec->format_version != 2 && spec->format_version < 3)) return EINVAL;
     struct stat control, stream;
     struct termios attributes;
     if (fstat(terminal, &control) < 0 || tcgetattr(terminal, &attributes) < 0) return errno;

@@ -28,9 +28,8 @@ No private configuration, release, status, directory or control descriptor reach
 
 ## Private frame versions
 
-These versions apply to inherited native helper frames, not the authenticated phone protocol.
-Existing authenticated profiles and Root dispatch still use format 1.
-Format 2 requires an explicit native API and is not yet advertised to callers.
+These legacy versions describe the inherited native helper frames.
+Current Root dispatch uses the [account and launch format](macos-native-account-credentials.md). It carries the terminal mask for an explicit layout.
 
 | Field | Format 1 | Format 2 |
 | --- | --- | --- |

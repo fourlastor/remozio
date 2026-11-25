@@ -8,6 +8,10 @@
 #define REMOZIO_CHILD_FRAME_V1 0x524d4331U
 #define REMOZIO_CHILD_FRAME_V2 0x524d4332U
 #define REMOZIO_CHILD_FRAME_V3 0x524d4333U
+#define REMOZIO_CHILD_FRAME_V4 0x524d4334U
+#define REMOZIO_CHILD_LAUNCH_BYTES 60U
+#define REMOZIO_CHILD_LAUNCH_PROTECTED_PATH 1U
+#define REMOZIO_CHILD_LAUNCH_PATH_BOUND 2U
 #define REMOZIO_CHILD_MAX_ACCOUNT_GROUPS 1024U
 #define REMOZIO_CHILD_MAX_ACCOUNT_NAME 65535U
 /* This decoder only owns data. It grants no execution permission. */
@@ -20,6 +24,10 @@ typedef struct {
     uint32_t *groups;
     /* Format 3 binds native account initialization to the complete captured account identity. */
     char *account_name;
+    /* Format 4 binds the launch mode and Root's verified executable metadata. */
+    uint32_t launch_mode, executable_device, executable_mode, executable_uid, executable_gid;
+    uint32_t executable_mtime_ns, executable_ctime_ns;
+    uint64_t executable_inode, executable_size, executable_mtime_s, executable_ctime_s;
     char *executable;
     char **arguments;
     char **environment;
@@ -29,6 +37,7 @@ typedef struct {
 /* Output must be fresh or closed. Close wipes and frees the decoded string storage. */
 int remozio_child_spec_decode(const void *bytes, size_t count, remozio_child_spec_t *output);
 void remozio_child_spec_close(remozio_child_spec_t *spec);
+int remozio_child_spec_check_executable(const remozio_child_spec_t *spec);
 /* Output has room for 16 entries. The approved primary GID occupies the first slot. */
 int remozio_child_spec_groups(const remozio_child_spec_t *spec, uint32_t *groups, uint32_t *count);
 /* Checks only descriptor layout. No input is read and no flags, attributes or

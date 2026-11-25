@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
     unsigned char header[REMOZIO_CHILD_HEADER_BYTES];
     if ((error = read_exact(configuration_fd, header, sizeof(header), deadline))) goto fail;
     uint32_t body_count = word(header + 4), budget = word(header + 28);
-    if ((word(header) != REMOZIO_CHILD_FRAME_V3) || body_count > REMOZIO_CHILD_MAX_BYTES - sizeof(header) || budget < 100 || budget > 60000) { error = EINVAL; goto fail; }
+    if ((word(header) != REMOZIO_CHILD_FRAME_V4) || body_count > REMOZIO_CHILD_MAX_BYTES - sizeof(header) || budget < 100 || budget > 60000) { error = EINVAL; goto fail; }
     deadline = started + budget;
     frame_count = sizeof(header) + body_count;
     frame = malloc(frame_count);
@@ -148,6 +148,7 @@ int main(int argc, char **argv) {
     if ((error = read_exact(release_fd, &release, 1, deadline))) goto fail;
     if (release != 1) { error = EINVAL; goto fail; }
     close(release_fd); signal(SIGPIPE, SIG_DFL);
+    if ((error = remozio_child_spec_check_executable(&spec))) goto fail;
     execve(spec.executable, spec.arguments, spec.environment);
     error = errno;
 fail:

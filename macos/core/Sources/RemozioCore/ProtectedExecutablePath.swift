@@ -38,7 +38,7 @@ public final class ProtectedExecutablePath {
             var parent = fd
             for (index, name) in components.enumerated() {
                 let directory = index != components.count - 1
-                let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (directory ? O_DIRECTORY : 0)
+                let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | O_NOCTTY | (directory ? O_DIRECTORY : 0)
                 let next = openat(parent, name, flags)
                 guard next >= 0 else { throw JournalLeaseError.system(errno) }
                 try retain(next, parent: parent, name: name, directory: directory)
@@ -73,6 +73,32 @@ public final class ProtectedExecutablePath {
             }
         } catch { close(); throw error }
     }
+    /// Reuse the protected walk for commands that already have an approved file identity.
+    func commandExecutableInfo() throws -> stat {
+        try validate()
+        guard let executable = nodes.last else { throw JournalLeaseError.invalidated }
+        var system = statfs(), data = statfs()
+        guard statfs("/", &system) == 0, statfs("/System/Volumes/Data", &data) == 0 else {
+            throw JournalLeaseError.system(errno)
+        }
+        for node in nodes {
+            var mount = statfs()
+            guard fstatfs(node.fd, &mount) == 0 else { throw JournalLeaseError.system(errno) }
+            try Self.validateLaunchMount(mount, system: system.f_fsid, data: data.f_fsid)
+        }
+        return executable.initial
+    }
+
+    static func validateLaunchMount(_ mount: statfs, system: fsid_t, data: fsid_t) throws {
+        try ProtectedStorageMetadata.validateMount(mount)
+        let identity = mount.f_fsid
+        guard mount.f_flags & UInt32(MNT_IGNORE_OWNERSHIP) == 0,
+              (identity.val.0 == system.val.0 && identity.val.1 == system.val.1) ||
+              (identity.val.0 == data.val.0 && identity.val.1 == data.val.1) else {
+            throw JournalLeaseError.unsafeMetadata
+        }
+    }
+
     public func close() {
         guard !retired else { return }
         retired = true

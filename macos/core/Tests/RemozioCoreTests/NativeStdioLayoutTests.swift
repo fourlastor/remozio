@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import RemozioMach
 import XCTest
 
 final class NativeStdioLayoutTests: XCTestCase {
@@ -68,14 +69,31 @@ final class NativeStdioLayoutTests: XCTestCase {
             var word = value.bigEndian
             withUnsafeBytes(of: &word) { bytes.append(contentsOf: $0) }
         }
+        func appendWideWord(_ value: UInt64) {
+            appendWord(UInt32(value >> 32), to: &body)
+            appendWord(UInt32(truncatingIfNeeded: value), to: &body)
+        }
+        var info = stat()
+        guard lstat(target.path, &info) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
         appendWord(mask, to: &body)
+        appendWord(REMOZIO_CHILD_LAUNCH_PATH_BOUND, to: &body)
+        appendWord(UInt32(bitPattern: info.st_dev), to: &body)
+        appendWideWord(info.st_ino)
+        appendWideWord(UInt64(info.st_size))
+        appendWord(UInt32(info.st_mode), to: &body)
+        appendWord(info.st_uid, to: &body)
+        appendWord(info.st_gid, to: &body)
+        appendWideWord(UInt64(bitPattern: Int64(info.st_mtimespec.tv_sec)))
+        appendWord(UInt32(info.st_mtimespec.tv_nsec), to: &body)
+        appendWideWord(UInt64(bitPattern: Int64(info.st_ctimespec.tv_sec)))
+        appendWord(UInt32(info.st_ctimespec.tv_nsec), to: &body)
         appendWord(getgid(), to: &body)
         for value in [Data("fixture".utf8), Data(target.path.utf8)] + arguments + environment {
             appendWord(UInt32(value.count), to: &body)
             body.append(value)
         }
         var frame = Data()
-        for value in [UInt32(0x524d4333), UInt32(body.count), getuid(), getgid(), 1, UInt32(arguments.count),
+        for value in [REMOZIO_CHILD_FRAME_V4, UInt32(body.count), getuid(), getgid(), 1, UInt32(arguments.count),
                       UInt32(environment.count), 5000, 0o022, 2] {
             appendWord(value, to: &frame)
         }
