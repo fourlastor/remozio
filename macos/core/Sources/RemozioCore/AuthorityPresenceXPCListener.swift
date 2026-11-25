@@ -164,7 +164,10 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
                     let local = try AuthorityPairingXPCEndpoint(connection: connection, policy: policy, access: pairingAccess,
                         budget: budget, onHandshake: { [weak registry] in registry?.handshake(id) },
                         onClose: { [weak registry] in registry?.remove(id) })
-                    try maintenancePairingOwners?.retain(local, id: id)
+                    if let owners = maintenancePairingOwners {
+                        local.attachInstalledPairing(to: owners)
+                        try owners.retain(local, id: id)
+                    }
                     pairing = local
                     connection.exportedInterface = NSXPCInterface(with: AuthorityAppXPCProtocol.self)
                     connection.exportedObject = AuthorityAppXPCEndpoint(presence: endpoint, pairing: local)

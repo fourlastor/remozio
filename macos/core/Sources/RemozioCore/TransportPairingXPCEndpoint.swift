@@ -7,6 +7,10 @@ import RemozioProtocol
     func setupHello(reply: @escaping @Sendable (UInt64) -> Void)
     func waitForRePairSetupDrain(_ invitation: Data, reply: @escaping @Sendable (Bool) -> Void)
     func beginSetup(_ invitation: Data, reply: @escaping @Sendable (UInt64) -> Void)
+    func setupV2Hello(reply: @escaping @Sendable (UInt64) -> Void)
+    func preparePairingV2(_ rendezvousID: Data, reply: @escaping @Sendable (Bool) -> Void)
+    func beginPairingV2(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
+                        reply: @escaping @Sendable (UInt64) -> Void)
     func setupCandidates(reply: @escaping @Sendable (Data?) -> Void)
     func stageSetup(_ candidateID: Data, transcript: Data, reply: @escaping @Sendable (Bool) -> Void)
     func deliverSetupReceipt(_ candidateID: Data, signature: Data, reply: @escaping @Sendable (Bool) -> Void)
@@ -77,6 +81,36 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
             return { reply(UInt64(port)) }
         }
     }
+    func setupV2Hello(reply: @escaping @Sendable (UInt64) -> Void) {
+        launch(failed: { reply(0) }) { owner in
+            let version: UInt64 = owner.supportsInstalledV2 ? 2 : 1
+            return { reply(version) }
+        }
+    }
+
+    func preparePairingV2(_ rendezvousID: Data, reply: @escaping @Sendable (Bool) -> Void) {
+        launch(failed: { reply(false) }) { owner in
+            try await owner.prepareInstalledV2(rendezvousID)
+            return { reply(true) }
+        }
+    }
+
+    func beginPairingV2(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
+                        reply: @escaping @Sendable (UInt64) -> Void) {
+        launch(failed: { reply(0) }) { owner in
+            guard rendezvousID.count == 16, windowID.count == 16,
+                  (1...AuthorityPairingSetupConfiguration.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds) else {
+                throw TransportPairingControlError.invalidMessage
+            }
+            let rePair = try? RePairInvitation.decode(invitation)
+            let publicInvitation = try rePair?.invitation ?? PairingInvitation.decode(invitation)
+            let window = MacPairingV2PublicWindow(id: windowID, invitation: publicInvitation,
+                replacement: rePair?.predecessor, lifetimeMilliseconds: lifetimeMilliseconds)
+            let port = try await owner.beginInstalledV2(window, rendezvousID: rendezvousID)
+            return { reply(UInt64(port)) }
+        }
+    }
+
     func setupCandidates(reply: @escaping @Sendable (Data?) -> Void) {
         launch(failed: { reply(nil) }) { owner in
             let bytes = try await owner.snapshot().encode(); return { reply(bytes) }

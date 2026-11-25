@@ -155,11 +155,19 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     }
 
     public func openPairingProof(reply: @escaping @Sendable (UInt64, NSXPCListenerEndpoint?) -> Void) {
+        openPairingProof(rendezvousID: nil, reply: reply)
+    }
+
+    public func openPairingProofV2(_ rendezvousID: Data, reply: @escaping @Sendable (UInt64, NSXPCListenerEndpoint?) -> Void) {
+        openPairingProof(rendezvousID: rendezvousID, reply: reply)
+    }
+
+    private func openPairingProof(rendezvousID: Data?, reply: @escaping @Sendable (UInt64, NSXPCListenerEndpoint?) -> Void) {
         do {
             let completed = try work {
                 guard let pairingProofs, let verifyProofPeer else { return (UInt64(0), nil as NSXPCListenerEndpoint?) }
                 let peer = try verifyProofPeer()
-                let endpoint = try? pairingProofs.offer(bootstrap: pairingProofBootstrap, peer: peer)
+                let endpoint = try? pairingProofs.offer(bootstrap: pairingProofBootstrap, peer: peer, rendezvousID: rendezvousID)
                 return (UInt64(1), endpoint)
             }
             defer { completed.activity?.close() }

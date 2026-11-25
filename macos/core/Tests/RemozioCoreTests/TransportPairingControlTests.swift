@@ -123,6 +123,17 @@ final class PairingControlLocalDriver: TransportPairingDriver, @unchecked Sendab
                 calls.append("rePairDrain")
                 endpoint.waitForRePairSetupDrain(bytes) { reply(.flag($0)) }
             case .begin(let bytes): calls.append("begin"); endpoint.beginSetup(bytes) { reply(.number($0)) }
+            case .v2Hello:
+                calls.append("v2Hello")
+                endpoint.setupV2Hello { reply(.number($0)) }
+            case .prepareV2(let id):
+                calls.append("prepareV2")
+                endpoint.preparePairingV2(id) { reply(.flag($0)) }
+            case let .beginV2(id, windowID, invitation, lifetime):
+                calls.append("beginV2")
+                endpoint.beginPairingV2(id, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime) {
+                    reply(.number($0))
+                }
             case .snapshot:
                 calls.append("snapshot")
                 if holdSnapshot { lateSnapshot = reply }
@@ -146,6 +157,19 @@ final class PairingControlLocalDriver: TransportPairingDriver, @unchecked Sendab
 }
 
 final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
+    func testPrepareV2RefusesTransportThatOnlySupportsV1() async throws {
+        let fixture = try TransportPairingFixture(), ingress = PairingControlIngressFixture()
+        let driver = PairingControlLocalDriver(owner: ingress.owner(fixture.configuration))
+        let channel = TransportPairingChannel(configuration: fixture.configuration, driver: driver)
+        defer { channel.abort() }
+        do {
+            try await channel.prepareV2(rendezvousID: Data(count: 16))
+            XCTFail("A v1-only Transport accepted a v2 rendezvous")
+        } catch TransportPairingControlError.unsupportedVersion {}
+        XCTAssertEqual(driver.calls, ["hello", "v2Hello"])
+        XCTAssertEqual(ingress.starts, 0)
+    }
+
     private func until(_ condition: () async throws -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         while !(try await condition()) {

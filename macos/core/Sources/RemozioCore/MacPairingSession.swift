@@ -1,5 +1,6 @@
 import Foundation
 import RemozioProtocol
+import Synchronization
 
 public enum MacPairingSessionError: Error { case invalidConfiguration, invalidState, closed, expired, changedCandidate, ineligiblePredecessor }
 public enum MacPairingSessionPhase: Sendable {
@@ -13,6 +14,7 @@ public struct MacPairingSessionSnapshot: Sendable {
     public let invitation: PairingInvitation?
     public let rePairInvitation: RePairInvitation?
     public let invitationV2: PairingInvitationV2?
+    public let usesLoopbackOnlyV2: Bool
     public let candidates: [TransportPairingCandidate]
     public let selectedPhoneID: Data?
     public let comparisonCode: String?
@@ -75,11 +77,14 @@ actor NativePairingAdministrator: MacPairingAdministrator {
 
 /// One explicit app-owned enrollment. Only the authenticated Root transcript is confirmable; commits never retry.
 public actor MacPairingSession {
-    private let root: any MacPairingRootControl
+    private let rootOwner: Mutex<any MacPairingRootControl>
+    private nonisolated var root: any MacPairingRootControl { rootOwner.withLock { $0 } }
     private let transport: any MacPairingTransportControl
     private let administrator: any MacPairingAdministrator
     private let predecessor: PairedPhoneSelection?
-    private let v2: MacPairingV2Control?
+    private var v2: MacPairingV2Control?
+    private let openInstalledRoot: (@Sendable () throws -> AuthorityPairingChannel)?
+    private let installedTransport: TransportPairingChannel?
     private let cancellation = ChannelCancellation()
     private let unixMilliseconds: @Sendable () -> UInt64
     private let elapsedMilliseconds: @Sendable () -> UInt64
@@ -106,30 +111,73 @@ public actor MacPairingSession {
               rootConfiguration.accountID == transportConfiguration.accountID,
               rootConfiguration.ownerUID == transportConfiguration.ownerUID,
               rootConfiguration.serviceName != transportConfiguration.serviceName else { throw MacPairingSessionError.invalidConfiguration }
-        root = try AuthorityPairingChannel(configuration: rootConfiguration)
-        transport = try TransportPairingChannel(configuration: transportConfiguration)
-        administrator = NativePairingAdministrator()
+        try self.init(openInstalledRoot: { try AuthorityPairingChannel(configuration: rootConfiguration) },
+            installedTransport: TransportPairingChannel(configuration: transportConfiguration),
+            administrator: NativePairingAdministrator(), predecessor: predecessor,
+            unixMilliseconds: { UInt64(max(0, Date().timeIntervalSince1970 * 1000)) },
+            elapsedMilliseconds: { UInt64(ProcessInfo.processInfo.systemUptime * 1000) })
+    }
+
+    // Run the installed session sequence with alternate native endpoints in the wire tests.
+    init(openInstalledRoot: @escaping @Sendable () throws -> AuthorityPairingChannel, installedTransport: TransportPairingChannel,
+         administrator: any MacPairingAdministrator, predecessor: PairedPhoneSelection? = nil,
+         unixMilliseconds: @escaping @Sendable () -> UInt64, elapsedMilliseconds: @escaping @Sendable () -> UInt64) throws {
+        rootOwner = Mutex(try openInstalledRoot() as any MacPairingRootControl)
+        self.openInstalledRoot = openInstalledRoot
+        self.installedTransport = installedTransport
+        self.transport = installedTransport
+        self.administrator = administrator
         self.predecessor = predecessor
         v2 = nil
-        unixMilliseconds = { UInt64(max(0, Date().timeIntervalSince1970 * 1000)) }
-        elapsedMilliseconds = { UInt64(ProcessInfo.processInfo.systemUptime * 1000) }
+        self.unixMilliseconds = unixMilliseconds; self.elapsedMilliseconds = elapsedMilliseconds
     }
+
     // Logical drivers cannot establish installed identity, native administrator consent or hardware custody.
     init(root: any MacPairingRootControl, transport: any MacPairingTransportControl, administrator: any MacPairingAdministrator,
          predecessor: PairedPhoneSelection? = nil, v2: MacPairingV2Control? = nil,
          unixMilliseconds: @escaping @Sendable () -> UInt64, elapsedMilliseconds: @escaping @Sendable () -> UInt64) {
-        self.root = root; self.transport = transport; self.administrator = administrator
+        rootOwner = Mutex(root); self.transport = transport; self.administrator = administrator
         self.predecessor = predecessor
         self.v2 = v2
+        openInstalledRoot = nil; installedTransport = nil
         self.unixMilliseconds = unixMilliseconds; self.elapsedMilliseconds = elapsedMilliseconds
     }
     deinit { root.abort(); transport.abort() }
+
+    private func startRoot() async throws -> AuthorityPairingContext {
+        let root = root
+        let context = try await root.start()
+        guard let openInstalledRoot, let transport = installedTransport, let channel = root as? AuthorityPairingChannel else {
+            return context
+        }
+        try active()
+        let rendezvousID: Data?
+        do { rendezvousID = try await channel.negotiateInstalledPairing() }
+        catch AuthorityPairingChannelError.setupDiscoveryUnavailable {
+            // Only the optional capability probe can lead to a fresh legacy channel.
+            await channel.close()
+            try active()
+            let legacy = try openInstalledRoot()
+            rootOwner.withLock { $0 = legacy }
+            try active()
+            return try await legacy.start()
+        }
+        if let rendezvousID {
+            v2 = MacPairingV2Control(open: { label, predecessor in
+                try await transport.prepareV2(rendezvousID: rendezvousID)
+                return try await channel.openV2(label: label, predecessor: predecessor, rendezvousID: rendezvousID)
+            }, listen: { try await transport.beginV2($0) }, stage: {
+                try await channel.stageV2($0, connection: $1, authorization: $2)
+            })
+        }
+        return context
+    }
 
     public func start(label: String) async throws -> MacPairingSessionSnapshot {
         try active(); guard phase == .idle, !busy else { throw MacPairingSessionError.invalidState }
         busy = true; phase = .connecting; defer { busy = false }
         do {
-            let context = try await root.start(); try active()
+            let context = try await startRoot(); try active()
             let invitation = try context.invitation(label: label)
             if let v2 {
                 let elapsed = elapsedMilliseconds()
@@ -322,7 +370,8 @@ public actor MacPairingSession {
         let elapsed = elapsedMilliseconds()
         let remaining = deadline.map { $0 > elapsed ? $0 - elapsed : 0 }
         return .init(phase: phase, invitation: v2 == nil ? invitation : nil, rePairInvitation: v2 == nil ? rePairInvitation : nil,
-            invitationV2: phase == .waitingForPhone ? invitationV2 : nil, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
+            invitationV2: phase == .waitingForPhone ? invitationV2 : nil,
+            usesLoopbackOnlyV2: installedTransport != nil && v2 != nil, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
             comparisonCode: try? transcript?.verificationCode(), remainingMilliseconds: remaining, phoneProofAvailable: proof != nil)
     }
 }

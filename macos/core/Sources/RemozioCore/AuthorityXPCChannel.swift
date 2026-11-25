@@ -6,6 +6,7 @@ import RemozioProtocol
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
     /// Optional bootstrap for a proof-only link. The reply carries no proof or credential.
     @objc optional func openPairingProof(reply: @escaping @Sendable (UInt64, NSXPCListenerEndpoint?) -> Void)
+    @objc optional func openPairingProofV2(_ rendezvousID: Data, reply: @escaping @Sendable (UInt64, NSXPCListenerEndpoint?) -> Void)
     /// Optional request-delivery extension. Zero means unavailable; version one uses requestFrame.
     func requestDeliveryVersion(reply: @escaping @Sendable (UInt64) -> Void)
     /// Optional discovery extension, negotiated separately from version-one frame retrieval.
@@ -48,6 +49,7 @@ protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func openPairingProof(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func openPairingProofV2(_ rendezvousID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func discoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -75,6 +77,9 @@ protocol AuthorityXPCDriver: Sendable {
 
 extension AuthorityXPCDriver {
     func openPairingProof(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.pairingProofOffer(0, nil)) }
+    func openPairingProofV2(_ rendezvousID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        reply(.pairingProofOffer(0, nil))
+    }
     func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.pairingLookupVersion(0, 0)) }
     func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.updateSchedulingVersion(0)) }
@@ -131,6 +136,10 @@ final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable {
         open { [self] version, endpoint in
             checked(.pairingProofOffer(version, endpoint), reply)
         }
+    }
+    func openPairingProofV2(_ rendezvousID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply), let open = proxy.openPairingProofV2 else { reply(.failed); return }
+        open(rendezvousID) { [self] version, endpoint in checked(.pairingProofOffer(version, endpoint), reply) }
     }
     func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
@@ -359,8 +368,9 @@ public actor AuthorityXPCChannel {
         return bytes
     }
 
-    func openPairingProof() async throws -> NSXPCListenerEndpoint? {
-        guard case let .pairingProofOffer(version, endpoint) = try await perform(.pairingProofOffer) else {
+    func openPairingProof(rendezvousID: Data? = nil) async throws -> NSXPCListenerEndpoint? {
+        guard rendezvousID?.count == 16 || rendezvousID == nil,
+              case let .pairingProofOffer(version, endpoint) = try await perform(.pairingProofOffer, query: rendezvousID) else {
             throw AuthorityXPCError.invalidMessage
         }
         guard version == 1 else { return nil }
@@ -591,7 +601,9 @@ public actor AuthorityXPCChannel {
                     case .recovery: driver.recovery(binding!, frame: query!, reply)
                     case .registrationVersion: driver.registrationVersion(reply)
                     case .registration: driver.registration(binding!, frame: query!, reply)
-                    case .pairingProofOffer: driver.openPairingProof(reply)
+                    case .pairingProofOffer:
+                        if let query { driver.openPairingProofV2(query, reply) }
+                        else { driver.openPairingProof(reply) }
                     case .pairingLookupVersion: driver.pairingLookupVersion(reply)
                     case .pairingLookup: driver.pairingLookup(query!, reply)
                     case .receiptVersion: driver.receiptVersion(reply)
