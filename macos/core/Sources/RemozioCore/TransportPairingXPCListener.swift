@@ -22,12 +22,18 @@ public final class TransportPairingXPCListener: NSObject, NSXPCListenerDelegate,
     private var retired: [UUID: TransportPairingXPCEndpoint] = [:]
     private var started = false
     private var closed = false
-    public init(configuration: TransportPairingControlConfiguration, identity: SecIdentity) throws {
+    public convenience init(configuration: TransportPairingControlConfiguration, identity: SecIdentity) throws {
+        try self.init(configuration: configuration, identity: identity, installedAuthority: nil)
+    }
+
+    public init(configuration: TransportPairingControlConfiguration, identity: SecIdentity,
+                installedAuthority: ApprovalTransportConfiguration?) throws {
         try DedicatedServiceAccount.requireCurrent(serviceUID: configuration.transportUID, ownerUID: configuration.ownerUID)
         let holder = TransportPairingListenerIdentity(identity)
         let rePairAdmission = TransportRePairAdmission()
         ownerFactory = {
-            try TransportPairingSetupOwner(configuration: configuration, identity: holder.value, rePairAdmission: rePairAdmission)
+            try TransportPairingSetupOwner(configuration: configuration, identity: holder.value, rePairAdmission: rePairAdmission,
+                                           installedAuthority: installedAuthority)
         }
         policy = configuration.appPolicy
         registry = try AuthorityConnectionRegistry(maximum: 1, timeoutMilliseconds: configuration.timeoutMilliseconds)

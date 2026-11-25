@@ -15,7 +15,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
     }
 
     /// An anonymous bootstrap listener pins the running test binary. No installed service is used.
-    private final class Fixture: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
+    final class Fixture: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         let listener = NSXPCListener.anonymous()
         let links: AuthorityPairingProofLinks
         final class Events: Sendable {
@@ -32,7 +32,8 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         private let enableProofs: Bool
 
         init(timeout: Duration = .seconds(5), peerPIDOffset: pid_t = 0, enableProofs: Bool = true,
-             rejectProofSignature: Bool = false, bindReservations: AuthorityPairingProofLinks.BindReservations? = nil) throws {
+             rejectProofSignature: Bool = false, bindReservations: AuthorityPairingProofLinks.BindReservations? = nil,
+             lookupRendezvous: @escaping @Sendable (Data) -> AuthorityPairingRendezvous? = { _ in nil }) throws {
             self.peerPIDOffset = peerPIDOffset
             self.enableProofs = enableProofs
             var code: SecCode?, staticCode: SecStaticCode?, info: CFDictionary?
@@ -58,7 +59,7 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                configureConnection: {
                    $0.setCodeSigningRequirement(proofRequirement)
                    events.acceptedProofLinks.withLock { $0 += 1 }
-               }, bindReservations: bindReservations)
+               }, bindReservations: bindReservations, lookupRendezvous: lookupRendezvous)
             super.init()
             try registry.start()
             listener.setConnectionCodeSigningRequirement(requirement)

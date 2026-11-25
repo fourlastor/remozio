@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Network
 import RemozioProtocol
 import Security
 
@@ -100,6 +101,8 @@ final class TransportRePairAdmission: @unchecked Sendable {
 public actor TransportPairingSetupOwner {
     typealias OpenProofClient = @Sendable (ApprovalTransportConfiguration, Data, @escaping @Sendable () -> Void)
         async throws -> AuthorityPairingProofClient
+    typealias PrepareProofClient = @Sendable (ApprovalTransportConfiguration, Data, @escaping @Sendable () -> Void)
+        async throws -> AuthorityPairingProofClient.Prepared
     typealias Factory = @Sendable (PairingInvitation, @escaping @Sendable (DirectListenerEvent) -> Void,
         @escaping @Sendable (any TransportPairingPeer) async throws -> Void) throws -> any TransportPairingIngress
     private final class Entry {
@@ -117,6 +120,10 @@ public actor TransportPairingSetupOwner {
     private let factory: Factory
     private let verifyAccount: @Sendable () throws -> Void
     private let openProofClient: OpenProofClient
+    private let prepareProofClient: PrepareProofClient
+    private let installedIdentity: PairingIdentityHolder?
+    private let installedAuthority: ApprovalTransportConfiguration?
+    private var preparedProof: (id: Data, link: AuthorityPairingProofClient.Prepared)?
     private let publicationTime: @Sendable () -> ContinuousClock.Instant
     private let lifetime = PairingControlLifetime()
     private var invitation: PairingInvitation?
@@ -128,6 +135,7 @@ public actor TransportPairingSetupOwner {
     private var rePairReservation: DeliveryRecipient?
     private var ingress: (any TransportPairingIngress)?
     private var port: UInt16?
+    var listenerLocalEndpoint: NWEndpoint? { (ingress as? NativePairingIngress)?.listener.requiredLocalEndpoint }
     private var opening: CheckedContinuation<UInt16, any Error>?
     private var openingTimer: Task<Void, Never>?
     private var entries: [UUID: Entry] = [:]
@@ -135,18 +143,28 @@ public actor TransportPairingSetupOwner {
     private var drainTask: Task<Void, Never>?
     private var started = false
     private var closed = false
+    nonisolated var supportsInstalledV2: Bool { installedAuthority != nil && installedIdentity != nil }
+
+    private static func prepareNativeProof(_ configuration: ApprovalTransportConfiguration, _ id: Data,
+                                           _ onClose: @escaping @Sendable () -> Void) async throws -> AuthorityPairingProofClient.Prepared {
+        try await AuthorityPairingProofClient.prepare(configuration: configuration, rendezvousID: id, onClose: onClose)
+    }
+
     public init(configuration: TransportPairingControlConfiguration, identity: SecIdentity) throws {
         try self.init(configuration: configuration, identity: identity, rePairAdmission: TransportRePairAdmission())
     }
 
     init(configuration: TransportPairingControlConfiguration, identity: SecIdentity,
-         rePairAdmission: TransportRePairAdmission) throws {
+         rePairAdmission: TransportRePairAdmission, installedAuthority: ApprovalTransportConfiguration? = nil) throws {
         try DedicatedServiceAccount.requireCurrent(serviceUID: configuration.transportUID, ownerUID: configuration.ownerUID)
         self.configuration = configuration
         self.rePairAdmission = rePairAdmission
         openProofClient = AuthorityPairingProofClient.open(configuration:windowID:onClose:)
+        prepareProofClient = Self.prepareNativeProof
         publicationTime = { ContinuousClock.now }
         let holder = PairingIdentityHolder(identity), processID = getpid(), uid = configuration.transportUID
+        installedIdentity = holder
+        self.installedAuthority = installedAuthority
         factory = { invitation, event, handler in
             try NativePairingIngress(identity: holder.identity, invitation: invitation, configuration: configuration, event: event, handler: handler)
         }
@@ -158,17 +176,24 @@ public actor TransportPairingSetupOwner {
     init(configuration: TransportPairingControlConfiguration, rePairAdmission: TransportRePairAdmission = TransportRePairAdmission(),
          factory: @escaping Factory, verifyAccount: @escaping @Sendable () throws -> Void = {},
          openProofClient: @escaping OpenProofClient = AuthorityPairingProofClient.open(configuration:windowID:onClose:),
+         installedAuthority: ApprovalTransportConfiguration? = nil, installedIdentity: SecIdentity? = nil,
+         prepareProofClient: @escaping PrepareProofClient = TransportPairingSetupOwner.prepareNativeProof,
          publicationTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         self.configuration = configuration; self.factory = factory; self.verifyAccount = verifyAccount
         self.rePairAdmission = rePairAdmission; self.openProofClient = openProofClient; self.publicationTime = publicationTime
+        self.installedIdentity = installedIdentity.map(PairingIdentityHolder.init)
+        self.installedAuthority = installedAuthority
+        self.prepareProofClient = prepareProofClient
     }
     deinit { openingTimer?.cancel(); lifetime.close() }
     public func begin(_ invitation: PairingInvitation) async throws -> UInt16 {
-        try await begin(invitation, rePair: nil)
+        guard preparedProof == nil, !openingProofLink else { throw TransportPairingControlError.busy }
+        return try await begin(invitation, rePair: nil)
     }
 
     public func begin(rePair: RePairInvitation) async throws -> UInt16 {
-        try await begin(rePair.invitation, rePair: rePair)
+        guard preparedProof == nil, !openingProofLink else { throw TransportPairingControlError.busy }
+        return try await begin(rePair.invitation, rePair: rePair)
     }
 
     func waitForRePairDrain(_ invitation: RePairInvitation) async throws {
@@ -185,7 +210,38 @@ public actor TransportPairingSetupOwner {
         return DeliveryRecipient(phoneID: invitation.predecessor.phoneID, enrollmentEpoch: invitation.predecessor.epoch)
     }
 
-    // The installed XPC owner uses the v1 entry points until v2 is enabled explicitly.
+    func prepareInstalledV2(_ rendezvousID: Data) async throws {
+        try active()
+        guard rendezvousID.count == 16, !started, !openingProofLink, preparedProof == nil, proofClient == nil,
+              let installedAuthority, installedAuthority.macID == configuration.macID,
+              installedAuthority.accountID == configuration.accountID, installedAuthority.serviceUID == configuration.transportUID else {
+            throw TransportPairingControlError.invalidMessage
+        }
+        openingProofLink = true
+        defer { openingProofLink = false }
+        let prepared = try await prepareProofClient(installedAuthority, rendezvousID, { [weak self] in self?.abort() })
+        do {
+            try active()
+            preparedProof = (rendezvousID, prepared)
+        } catch { prepared.close(); throw error }
+    }
+
+    func beginInstalledV2(_ window: MacPairingV2PublicWindow, rendezvousID: Data) async throws -> UInt16 {
+        try active()
+        guard !started, !openingProofLink, proofClient == nil, let installedIdentity,
+              let preparedProof, preparedProof.id == rendezvousID else { throw TransportPairingControlError.invalidMessage }
+        openingProofLink = true
+        defer { self.preparedProof = nil; openingProofLink = false }
+        let client = try await preparedProof.link.finish(windowID: window.id)
+        do {
+            try active()
+            proofClient = client
+            let ingress = PairingSetupV2Ingress(windowID: window.id, lifetimeMilliseconds: window.lifetimeMilliseconds, authority: client)
+            return try await beginV2(window, identity: installedIdentity.identity, ingress: ingress)
+        } catch { client.close(); throw error }
+    }
+
+    // Component fixtures can supply their own proof reservation owner.
     func beginV2(_ window: MacPairingV2PublicWindow, identity: SecIdentity,
                  reserve: @escaping @Sendable (PairingSetupV2Proof) throws -> Void,
                  disconnect: @escaping @Sendable (UUID) -> Void) async throws -> UInt16 {
@@ -299,6 +355,7 @@ public actor TransportPairingSetupOwner {
         if let drainTask { await drainTask.value; return }
         lifetime.close(); closed = true; settleOpening(.failure(TransportPairingControlError.closed))
         let listener = ingress; ingress = nil; listener?.close()
+        preparedProof?.link.close(); preparedProof = nil
         proofClient?.close(); proofClient = nil
         let task = Task { await self.drain(listener) }
         drainTask = task

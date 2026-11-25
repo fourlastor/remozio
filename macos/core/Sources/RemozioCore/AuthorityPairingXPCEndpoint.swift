@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import RemozioProtocol
 import Security
 import Synchronization
 
@@ -11,6 +12,15 @@ import Synchronization
     func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, authorization: Data,
                        reply: @escaping @Sendable (Data?) -> Void)
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void)
+}
+
+@objc public protocol AuthorityInstalledPairingXPCProtocol {
+    @objc(pairingSetupHelloWithMaximumVersion:reply:)
+    func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void)
+    @objc(openPairingV2:rendezvousID:predecessor:reply:)
+    func openInstalledPairingV2(_ label: String, rendezvousID: Data, predecessor: Data?, reply: @escaping @Sendable (Data?) -> Void)
+    @objc(stagePairingV2:connectionID:authorization:reply:)
+    func stageInstalledPairingV2(_ proposal: Data, connectionID: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
 }
 
 /// Optional management on the same authenticated app channel.
@@ -62,6 +72,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         deinit { close() }
     }
     private var expiryTimer: DispatchSourceTimer?
+    private weak var owners: AuthorityMaintenancePairingOwners?
+    private var rendezvous: AuthorityPairingRendezvous?
     private var v2Window: AuthorityPairingV2Window?
     private var v2Admission: AuthorityPairingSetupAccess.VersionAdmission?
     private var attemptAdmission: AuthorityPairingSetupAccess.VersionAdmission?
@@ -94,6 +106,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 operationActive: $0.busy || !$0.operations.isEmpty)
         }
     }
+    func attachInstalledPairing(to owners: AuthorityMaintenancePairingOwners) { self.owners = owners }
+
     func requireMaintenanceAdmission(_ admission: AuthorityMaintenancePairingAdmission) throws {
         guard access.maintenanceAdmission === admission else { throw RuntimePreparationError.changedScope }
     }
@@ -127,7 +141,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         replyWithPhoneManagementVersion(1, reply: reply)
     }
     func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
-        replyWithPhoneManagementVersion(min(maximumVersion, 2), reply: reply)
+        // Version 3 adds discovery for the installed setup extension. Versions 1 and 2 keep their original behavior.
+        replyWithPhoneManagementVersion(min(maximumVersion, owners == nil ? 2 : 3), reply: reply)
     }
     private func replyWithPhoneManagementVersion(_ version: UInt64, reply: (UInt64) -> Void) {
         do {
@@ -195,18 +210,60 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
 
     // Exercise v2 through the logical owner. The installed XPC protocol still negotiates v1.
+    func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void) {
+        do {
+            let completed = try work { () -> (UInt64, Data?) in
+                guard maximumVersion >= 1, let owners else { return (0, nil) }
+                guard access.requiresInstalledV2 else { return (1, nil) }
+                guard maximumVersion >= 2, rendezvous == nil, v2Window == nil, attempt == nil else { return (0, nil) }
+                let pending = AuthorityPairingRendezvous(revision: access.activationRevision)
+                owners.register(pending)
+                rendezvous = pending
+                return (2, pending.id)
+            }
+            defer { completed.completion.close() }
+            send { reply(completed.value.0, completed.value.1) }
+        } catch { close(); reply(0, nil) }
+    }
+
+    func openInstalledPairingV2(_ label: String, rendezvousID: Data, predecessor: Data?,
+                                reply: @escaping @Sendable (Data?) -> Void) {
+        respond(reply) {
+            guard let rendezvous, rendezvous.id == rendezvousID, v2Window == nil, attempt == nil else { return nil }
+            let selection = try predecessor.map(PairedPhoneSelection.decode)
+            guard try rendezvous.admitOpening(revision: access.activationRevision, {
+                try access.requestV2Activation(revision: access.activationRevision, compositionReady: true) == .active
+            }) else { return nil }
+            return try openV2Window(label: label, predecessor: selection, publish: rendezvous.publishWindow)
+        }
+    }
+
+    func stageInstalledPairingV2(_ proposal: Data, connectionID: Data, authorization: Data,
+                                 reply: @escaping @Sendable (Data?) -> Void) {
+        guard let connection = try? AuthorityPairingProofWire.identifier(connectionID) else {
+            close(); reply(nil); return
+        }
+        stagePairingV2(proposal, connection: connection, authorization: authorization, reply: reply)
+    }
+
     func openPairingV2(label: String, predecessor: PairedPhoneSelection?, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
-            guard attempt == nil, v2Window == nil else { throw AuthorityPairingSetupError.unavailable }
-            let admission = try access.admitPairingVersion(.v2)
-            retainVersionForReply(admission)
-            let window = try access.openV2Window(label: label, predecessor: predecessor)
-            let bytes = try access.exportV2Window(window)
-            v2Window = window
-            v2Admission = admission
-            startExpiryTimer()
-            return bytes
+            guard owners == nil else { throw AuthorityPairingSetupError.unavailable }
+            return try openV2Window(label: label, predecessor: predecessor)
         }
+    }
+
+    private func openV2Window(label: String, predecessor: PairedPhoneSelection?, publish: () -> Bool = { true }) throws -> Data {
+        guard attempt == nil, v2Window == nil else { throw AuthorityPairingSetupError.unavailable }
+        let admission = try access.admitPairingVersion(.v2)
+        retainVersionForReply(admission)
+        let window = try access.openV2Window(label: label, predecessor: predecessor)
+        let bytes = try access.exportV2Window(window)
+        guard publish() else { window.close(); throw AuthorityPairingSetupError.unavailable }
+        v2Window = window
+        v2Admission = admission
+        startExpiryTimer()
+        return bytes
     }
 
     func ownsProofWindow(_ id: Data) -> Bool {
@@ -216,7 +273,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     /// Bind an authenticated proof link to this app endpoint's live v2 window.
     func proofReservations(windowID: Data, link: AuthorityPairingProofLink) throws -> AuthorityPairingProofReservations {
         let window = try lock.withLock {
-            guard !closed, ready, let v2Window, v2Window.id == windowID, v2Admission != nil else {
+            guard !closed, ready, let v2Window, v2Window.id == windowID, v2Admission != nil,
+                  rendezvous?.permitsBinding(link: link) != false else {
                 throw AuthorityPairingSetupError.unavailable
             }
             return v2Window
@@ -257,14 +315,18 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private func stagePairing(_ proposal: Data, connection: UUID?, authorization: Data,
                               reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
-            guard (v2Window == nil) == (connection == nil) else { throw AuthorityPairingSetupError.unavailable }
-            guard attempt == nil, proposal.count <= 132_000,
+            guard proposal.count <= 132_000,
                   authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingSetupError.unavailable }
             let admission: AuthorityPairingSetupAccess.VersionAdmission
             if connection == nil {
-                admission = try access.admitPairingVersion(.legacy)
+                do { admission = try access.admitPairingVersion(.legacy) }
+                catch AuthorityPairingSetupAccess.LegacyAdmissionError.disabled {
+                    _ = try AuthorityPairingSetupAccess.decodeLegacyProposal(proposal)
+                    return nil
+                }
+                guard v2Window == nil, attempt == nil else { throw AuthorityPairingSetupError.unavailable }
             } else {
-                guard let v2Admission else { throw AuthorityPairingSetupError.unavailable }
+                guard attempt == nil, v2Window != nil, let v2Admission else { throw AuthorityPairingSetupError.unavailable }
                 admission = v2Admission
             }
             retainVersionForReply(admission)
@@ -314,7 +376,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         }
         catch { close(); reply(false) }
     }
-    private func respond(_ reply: @escaping @Sendable (Data?) -> Void, _ body: () throws -> Data) {
+    private func respond(_ reply: @escaping @Sendable (Data?) -> Void, _ body: () throws -> Data?) {
         do {
             let completed = try work(body)
             defer { completed.completion.close() }
@@ -361,6 +423,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         }
     }
     private func closeV2Window() {
+        if let rendezvous { owners?.retire(rendezvous); self.rendezvous = nil }
         v2Window?.close()
         clearV2Admission()
     }
@@ -404,7 +467,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
 }
 
 /// Existing presence selectors keep version 1. Pairing has an independent version handshake on the signed app channel.
-@objc public protocol AuthorityAppXPCProtocol: AuthorityPresenceXPCProtocol, AuthorityPairingXPCProtocol, AuthorityVersionedPairedPhoneXPCProtocol {}
+@objc public protocol AuthorityAppXPCProtocol: AuthorityPresenceXPCProtocol, AuthorityPairingXPCProtocol, AuthorityVersionedPairedPhoneXPCProtocol, AuthorityInstalledPairingXPCProtocol {}
 
 final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @unchecked Sendable {
     let presence: AuthorityPresenceXPCEndpoint
@@ -430,6 +493,17 @@ final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @uncheck
     func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, authorization: Data,
                        reply: @escaping @Sendable (Data?) -> Void) {
         pairing.commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, authorization: authorization, reply: reply)
+    }
+    func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void) {
+        pairing.pairingSetupHello(maximumVersion: maximumVersion, reply: reply)
+    }
+    func openInstalledPairingV2(_ label: String, rendezvousID: Data, predecessor: Data?,
+                                reply: @escaping @Sendable (Data?) -> Void) {
+        pairing.openInstalledPairingV2(label, rendezvousID: rendezvousID, predecessor: predecessor, reply: reply)
+    }
+    func stageInstalledPairingV2(_ proposal: Data, connectionID: Data, authorization: Data,
+                                 reply: @escaping @Sendable (Data?) -> Void) {
+        pairing.stageInstalledPairingV2(proposal, connectionID: connectionID, authorization: authorization, reply: reply)
     }
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) { pairing.cancelPairing(reply: reply) }
 }

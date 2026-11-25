@@ -6,6 +6,7 @@ import Security
 
 public enum AuthorityPairingChannelError: Error, Equatable {
     case wrongAccount, closed, busy, unsupportedVersion, invalidMessage, timedOut
+    case setupDiscoveryUnavailable
 }
 
 /// Public parameters from the authenticated Root endpoint. They grant no enrollment or command authority.
@@ -41,12 +42,14 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
 
 enum PairingClientCall: Sendable {
     case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel
-    case openV2(String, PairedPhoneSelection?), stageV2(Data, UUID, Data)
+    case setupHello, openV2(String, PairedPhoneSelection?, rendezvousID: Data?), stageV2(Data, UUID, Data)
     case phoneManagementHello, versionedPhoneManagementHello(UInt64)
     case managePhone(PairedPhoneOperation, Data, Data)
 }
 
-enum PairingClientReply: Sendable { case version(UInt64), bytes(Data?), cancelled(Bool), failed }
+enum PairingClientReply: Sendable {
+    case version(UInt64), setupVersion(UInt64, Data?), bytes(Data?), cancelled(Bool), failed
+}
 protocol PairingClientDriver: Sendable {
     func start(closed: @escaping @Sendable () -> Void)
     func invoke(_ call: PairingClientCall, onSend: () -> Void, reply: @escaping @Sendable (PairingClientReply) -> Void)
@@ -81,7 +84,19 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
             proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) {
                 [self] in checked(.bytes($0), reply: reply)
             }
-        case .openV2, .stageV2: reply(.failed)
+        case .setupHello:
+            proxy.pairingSetupHello(maximumVersion: 2) { [self] in checked(.setupVersion($0, $1), reply: reply) }
+        case let .openV2(label, selection, rendezvousID):
+            guard let rendezvousID else { reply(.failed); return }
+            do {
+                proxy.openInstalledPairingV2(label, rendezvousID: rendezvousID, predecessor: try selection?.encode()) {
+                    [self] in checked(.bytes($0), reply: reply)
+                }
+            } catch { reply(.failed) }
+        case let .stageV2(proposal, connectionID, authorization):
+            proxy.stageInstalledPairingV2(proposal, connectionID: AuthorityPairingProofWire.bytes(connectionID), authorization: authorization) {
+                [self] in checked(.bytes($0), reply: reply)
+            }
         case .cancel: proxy.cancelPairing { [self] in checked(.cancelled($0), reply: reply) }
         case .phoneManagementHello: proxy.pairedPhoneHello { [self] in checked(.version($0), reply: reply) }
         case .versionedPhoneManagementHello(let maximumVersion):
@@ -310,10 +325,26 @@ public actor AuthorityPairingChannel {
         return try await stage(claims, bytes: proposal.encode(), authorization: authorization)
     }
 
-    // Only the logical driver supports this path. Installed v1 selectors remain unchanged.
-    func openV2(label: String, predecessor: PairedPhoneSelection?) async throws -> PairingInvitationV2 {
+    func negotiateInstalledPairing() async throws -> Data? {
+        let compatibility: PairingClientReply
+        do { compatibility = try await perform(.versionedPhoneManagementHello(3)) }
+        catch AuthorityPairingChannelError.closed { throw AuthorityPairingChannelError.setupDiscoveryUnavailable }
+        // The previous Authority answers 2. A legacy Authority can terminate the connection on this probe.
+        switch compatibility {
+        case .version(2): return nil
+        case .version(3):
+            switch try await perform(.setupHello) {
+            case .setupVersion(1, nil): return nil
+            case .setupVersion(2, let id?) where id.count == 16: return id
+            default: throw AuthorityPairingChannelError.invalidMessage
+            }
+        default: throw AuthorityPairingChannelError.unsupportedVersion
+        }
+    }
+
+    func openV2(label: String, predecessor: PairedPhoneSelection?, rendezvousID: Data? = nil) async throws -> PairingInvitationV2 {
         guard state == .open, staged == nil else { throw AuthorityPairingChannelError.closed }
-        return try PairingInvitationV2.decode(bytes(await perform(.openV2(label, predecessor))))
+        return try PairingInvitationV2.decode(bytes(await perform(.openV2(label, predecessor, rendezvousID: rendezvousID))))
     }
 
     func stageV2(_ proposal: PairingPhoneProposal, connection: UUID, authorization: Data) async throws -> PairingTranscript {
@@ -371,7 +402,7 @@ public actor AuthorityPairingChannel {
         switch call {
         case .hello: guard state == .opening else { throw AuthorityPairingChannelError.closed }
         case .context: guard state == .opening else { throw AuthorityPairingChannelError.closed }
-        case .openV2, .stageV2, .stage, .commit, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
+        case .setupHello, .openV2, .stageV2, .stage, .commit, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
             guard state == .open else { throw AuthorityPairingChannelError.closed }
         }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }

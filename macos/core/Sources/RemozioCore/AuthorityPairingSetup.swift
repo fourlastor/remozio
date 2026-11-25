@@ -55,6 +55,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     typealias Commit = @Sendable (PairingEnrollmentAttempt, Data, Data, () throws -> Void,
                                  @Sendable (JournalTransaction) throws -> Void) throws -> Data
     enum PairingVersion: Equatable { case legacy, v2 }
+    enum LegacyAdmissionError: Error { case disabled }
     enum V2ActivationResult: Equatable { case draining, active }
 
     struct V2ActivationRevision: Equatable, Sendable {
@@ -79,7 +80,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     }
 
     private let pairingVersions: Mutex<PairingAdmissionState>
-    private let activationRevision: V2ActivationRevision
+    let activationRevision: V2ActivationRevision
     private let pairingWindowOwner = UUID()
     private let journal: AuthorityJournal
     let maintenanceAdmission: AuthorityMaintenancePairingAdmission
@@ -153,6 +154,8 @@ final class AuthorityPairingSetupAccess: Sendable {
         self.gatewayRevocations = gatewayRevocations
     }
 
+    var requiresInstalledV2: Bool { configuration.v2ActivationEnabled == true }
+
     /// Endpoints retain the admission through the attempt and its in-flight replies.
     func admitPairingVersion(_ version: PairingVersion) throws -> VersionAdmission {
         try pairingVersions.withLock { state in
@@ -160,9 +163,10 @@ final class AuthorityPairingSetupAccess: Sendable {
             case .compatibility:
                 guard state.leases.values.allSatisfy({ $0 == version }) else { throw AuthorityPairingSetupError.unavailable }
             case .draining:
+                if version == .legacy { throw LegacyAdmissionError.disabled }
                 throw AuthorityPairingSetupError.unavailable
             case .v2:
-                guard version == .v2 else { throw AuthorityPairingSetupError.unavailable }
+                guard version == .v2 else { throw LegacyAdmissionError.disabled }
             }
             let id = UUID()
             state.leases[id] = version
@@ -260,16 +264,18 @@ final class AuthorityPairingSetupAccess: Sendable {
     /// The proposal supplies phone claims only. Root chooses fresh setup identity, challenge, tag, nonce and expiry.
     /// The app and phone must compare the returned transcript before producing the biometric proof.
     func stage(_ proposalBytes: Data, authorize: () throws -> Void = {}) throws -> PairingEnrollmentAttempt {
-        let proposal: PairingPhoneProposal
+        try stage(Self.decodeLegacyProposal(proposalBytes), proposalBytes: proposalBytes, window: nil, authorize: authorize)
+    }
+
+    static func decodeLegacyProposal(_ proposalBytes: Data) throws -> PairingPhoneProposal {
         if let legacy = try? PairingTranscript.decode(proposalBytes) {
             guard legacy.replacement == nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
-            proposal = try PairingPhoneProposal(phone: legacy.phone, transportKey: legacy.transportKey,
+            return try PairingPhoneProposal(phone: legacy.phone, transportKey: legacy.transportKey,
                 decisionKey: legacy.decisionKey, biometricKey: legacy.biometricKey)
-        } else {
-            proposal = try PairingPhoneProposal.decode(proposalBytes)
-            guard proposal.replacement != nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
         }
-        return try stage(proposal, proposalBytes: proposalBytes, window: nil, authorize: authorize)
+        let proposal = try PairingPhoneProposal.decode(proposalBytes)
+        guard proposal.replacement != nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
+        return proposal
     }
 
     private func stage(_ proposal: PairingPhoneProposal, proposalBytes: Data, window: AuthorityPairingV2Window?,

@@ -48,7 +48,8 @@ actor TransportSettingsForegroundRuntime: OwnedTransportSettingsForeground {
         try configuration.requireNativeProcess(); try verifyCurrent()
         let identity = try ApprovalTransportIdentity.load(configuration: configuration)
         try verifyCurrent()
-        let pairing = try TransportPairingXPCListener(configuration: bootstrap.base.control, identity: identity)
+        let pairing = try TransportPairingXPCListener(configuration: bootstrap.base.control, identity: identity,
+                                                      installedAuthority: configuration)
         let relay = try bootstrap.base.relayPort.map { port in
             try ApprovalRelayCoordinator(listenPort: port, maximumConnections: configuration.maximumConnections,
                 timeoutMilliseconds: configuration.timeoutMilliseconds, report: reportRelay)

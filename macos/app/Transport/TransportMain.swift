@@ -89,7 +89,9 @@ struct TransportMain {
                 timeoutMilliseconds: configuration.timeoutMilliseconds, report: reportRelay)
         }
         let identity = try ApprovalTransportIdentity.load(configuration: configuration)
-        let pairingListener = try pairing.map { try TransportPairingXPCListener(configuration: $0, identity: identity) }
+        let pairingListener = try pairing.map {
+            try TransportPairingXPCListener(configuration: $0, identity: identity, installedAuthority: configuration)
+        }
         let service = try DirectApprovalTransportService(macID: configuration.macID, accountID: configuration.accountID,
             identity: identity, authorityServiceName: configuration.authorityServiceName, authorityPolicy: configuration.authorityPolicy,
             maximumConnections: configuration.maximumConnections, timeoutMilliseconds: configuration.timeoutMilliseconds,

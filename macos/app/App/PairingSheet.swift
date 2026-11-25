@@ -22,7 +22,9 @@ struct PairingPresentation {
     init() {}
     init(_ snapshot: MacPairingSessionSnapshot) {
         phase = snapshot.phase
-        if let invitation = snapshot.invitationV2 {
+        if snapshot.usesLoopbackOnlyV2 {
+            notice = String(localized: "Pairing is available only on this Mac while the local setup is being verified.")
+        } else if let invitation = snapshot.invitationV2 {
             invitationText = try? invitation.exportText()
             invitationIsCredential = true
         } else {
@@ -280,12 +282,12 @@ struct PairingSheetContent: View {
         case .idle, .connecting:
             ProgressView("Connecting to this Mac’s services…")
         case .waitingForPhone:
-            Group {
-                if rePairIdentifier != nil { Text("Open the retained Mac in Remozio on your phone and choose Re-pair.") }
-                else { Text("Open Remozio on your phone and choose Pair a Mac.") }
-            }.font(.headline)
-            Text("Keep the phone and Mac on the same network for this setup.").foregroundStyle(.primary)
             if let text = state.invitationText {
+                Group {
+                    if rePairIdentifier != nil { Text("Open the retained Mac in Remozio on your phone and choose Re-pair.") }
+                    else { Text("Open Remozio on your phone and choose Pair a Mac.") }
+                }.font(.headline)
+                Text("Keep the phone and Mac on the same network for this setup.").foregroundStyle(.primary)
                 if let image = qr(text) {
                     HStack { Spacer(); Image(nsImage: image).interpolation(.none).resizable().scaledToFit().frame(width: 220, height: 220).padding(16).background(.white, in: RoundedRectangle(cornerRadius: 8))
                         .accessibilityLabel(Text("Pairing invitation for this Mac")); Spacer() }

@@ -3,7 +3,10 @@ import Synchronization
 
 /// A native proof link. Registration and unproved cleanup can expire independently of the link.
 final class AuthorityPairingProofClient: @unchecked Sendable {
-    private enum Opening { case opening, independent, closed }
+    fileprivate enum Opening { case opening, independent, closed }
+    fileprivate final class OpeningState: Sendable {
+        fileprivate let value = Mutex(Opening.opening)
+    }
     private enum Reply: Sendable {
         case version(UInt64)
         case allowed(Bool)
@@ -36,22 +39,72 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         let configure: @Sendable (NSXPCConnection) -> Void
     }
 
+    final class Prepared: Sendable {
+        private let bootstrap: AuthorityXPCChannel
+        private let client: AuthorityPairingProofClient
+        private let opening: OpeningState
+        private let deadline: ContinuousClock.Instant
+
+        fileprivate init(bootstrap: AuthorityXPCChannel, client: AuthorityPairingProofClient,
+                         opening: OpeningState, deadline: ContinuousClock.Instant) {
+            self.bootstrap = bootstrap
+            self.client = client
+            self.opening = opening
+            self.deadline = deadline
+        }
+
+        func finish(windowID: Data) async throws -> AuthorityPairingProofClient {
+            do {
+                try await client.bindAndTransfer(windowID: windowID, deadline: deadline)
+                let handedOff = opening.value.withLock { state in
+                    guard state == .opening else { return false }
+                    state = .independent
+                    return true
+                }
+                guard handedOff else { throw AuthorityXPCError.closed }
+                await bootstrap.close()
+                return client
+            } catch { close(); throw error }
+        }
+
+        func close() {
+            let pending = opening.value.withLock { state in
+                guard state != .independent else { return false }
+                state = .closed
+                return true
+            }
+            if pending { bootstrap.abort(); client.close() }
+        }
+
+        deinit { close() }
+    }
+
+    private static func nativeBootstrap(_ configuration: ApprovalTransportConfiguration,
+                                        _ ended: @escaping @Sendable () -> Void) throws -> Bootstrap {
+        let policy = configuration.authorityPolicy
+        return try Bootstrap(channel: AuthorityXPCChannel(serviceName: configuration.authorityServiceName,
+            peerPolicy: policy, onClose: ended), policy: policy, configure: policy.configure)
+    }
+
     static func open(configuration: ApprovalTransportConfiguration, windowID: Data,
                      onClose: @escaping @Sendable () -> Void) async throws -> AuthorityPairingProofClient {
-        try await open(configuration: configuration, windowID: windowID, onClose: onClose) { supplied, ended in
-            let policy = supplied.authorityPolicy
-            return try Bootstrap(channel: AuthorityXPCChannel(serviceName: supplied.authorityServiceName,
-                peerPolicy: policy, onClose: ended), policy: policy, configure: policy.configure)
-        }
+        try await open(configuration: configuration, windowID: windowID, onClose: onClose, bootstrap: nativeBootstrap)
     }
 
     static func open(configuration: ApprovalTransportConfiguration, windowID: Data, onClose: @escaping @Sendable () -> Void,
                      bootstrap makeBootstrap: (ApprovalTransportConfiguration, @escaping @Sendable () -> Void) throws -> Bootstrap)
         async throws -> AuthorityPairingProofClient {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
-        let opening = Mutex(Opening.opening)
+        let prepared = try await prepare(configuration: configuration, rendezvousID: nil, onClose: onClose, bootstrap: makeBootstrap)
+        return try await prepared.finish(windowID: windowID)
+    }
+
+    static func prepare(configuration: ApprovalTransportConfiguration, rendezvousID: Data?, onClose: @escaping @Sendable () -> Void,
+                        bootstrap makeBootstrap: (ApprovalTransportConfiguration, @escaping @Sendable () -> Void) throws -> Bootstrap = nativeBootstrap)
+        async throws -> Prepared {
+        let opening = OpeningState()
         let peer = try makeBootstrap(configuration, {
-            let first = opening.withLock { state in
+            let first = opening.value.withLock { state in
                 guard state == .opening else { return false }
                 state = .closed
                 return true
@@ -61,24 +114,22 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         let bootstrap = peer.channel
         do {
             try await bootstrap.start()
-            guard let endpoint = try await bootstrap.openPairingProof() else { throw AuthorityXPCError.failed }
+            guard let endpoint = try await bootstrap.openPairingProof(rendezvousID: rendezvousID) else { throw AuthorityXPCError.failed }
+            let offerReceived = ContinuousClock.now
+            let helloDeadline = offerReceived.advanced(by: AuthorityPairingProofWire.bootstrapTimeout)
+            let transferDeadline = rendezvousID == nil ? helloDeadline
+                : offerReceived.advanced(by: .milliseconds(Int64(configuration.timeoutMilliseconds)))
             let client = AuthorityPairingProofClient(endpoint: endpoint, peerPolicy: peer.policy, onClose: {
-                let first = opening.withLock { state in
+                let first = opening.value.withLock { state in
                     guard state != .closed else { return false }
                     state = .closed
                     return true
                 }
                 if first { onClose() }
             }, configure: peer.configure)
-            try await client.start(windowID: windowID)
-            let handedOff = opening.withLock { state in
-                guard state == .opening else { return false }
-                state = .independent
-                return true
-            }
-            guard handedOff else { client.close(); throw AuthorityXPCError.closed }
-            await bootstrap.close()
-            return client
+            try await client.startHello(deadline: helloDeadline)
+            guard opening.value.withLock({ $0 == .opening }) else { client.close(); throw AuthorityXPCError.closed }
+            return Prepared(bootstrap: bootstrap, client: client, opening: opening, deadline: transferDeadline)
         } catch {
             await bootstrap.close()
             throw error
@@ -89,11 +140,16 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
 
     func start(windowID: Data) async throws {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
+        let deadline = ContinuousClock.now.advanced(by: AuthorityPairingProofWire.bootstrapTimeout)
+        try await startHello(deadline: deadline)
+        try await bindAndTransfer(windowID: windowID, deadline: deadline)
+    }
+
+    private func startHello(deadline: ContinuousClock.Instant) async throws {
         let ended: @Sendable () -> Void = { [weak self] in self?.close() }
         connection.interruptionHandler = ended
         connection.invalidationHandler = ended
         connection.activate()
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         guard case .version(AuthorityPairingProofWire.handoffVersion) = try await call(deadline: deadline, hello: true, send: { proxy, reply in
             proxy.hello { reply(.version($0)) }
         }) else { close(); throw AuthorityXPCError.failed }
@@ -101,6 +157,10 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
             guard !state.closed else { throw AuthorityXPCError.closed }
             state.ready = true
         }
+    }
+
+    private func bindAndTransfer(windowID: Data, deadline: ContinuousClock.Instant) async throws {
+        guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
         guard case .allowed(true) = try await call(deadline: deadline, send: { proxy, reply in
             proxy.bindWindow(windowID) { reply(.allowed($0)) }
         }) else { close(); throw AuthorityXPCError.failed }

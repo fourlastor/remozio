@@ -245,7 +245,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             pairingProofs = .init(policy: policy, timeout: handshakeTimeout, verifyCurrent: {
                 try transportAccess.verifyCurrent()
                 try access.verifyCurrent()
-            }, bindReservations: owners.proofReservations, validateTransport: transportAccess.requireCurrent)
+            }, bindReservations: owners.proofReservations, validateTransport: transportAccess.requireCurrent,
+               lookupRendezvous: owners.lookupRendezvous)
         }
     }
     public func start() throws {

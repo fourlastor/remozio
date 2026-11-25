@@ -3,6 +3,7 @@ import Synchronization
 
 enum AuthorityPairingProofWire {
     static let handoffVersion: UInt64 = 3
+    static let bootstrapTimeout: Duration = .seconds(3)
 
     static func bytes(_ id: UUID) -> Data { withUnsafeBytes(of: id.uuid) { Data($0) } }
 
@@ -74,6 +75,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         let timer: Task<Void, Never>
         var connection: NSXPCConnection?
         let proofLink: AuthorityPairingProofLink
+        let rendezvous: AuthorityPairingRendezvous?
         var reservations: AuthorityPairingProofReservations?
         var ready = false
         var retiring = false
@@ -87,6 +89,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
     private let verifyCurrent: @Sendable () throws -> Void
     private let bindReservations: BindReservations?
     private let validateTransport: @Sendable (JournalTransaction) throws -> Void
+    private let lookupRendezvous: @Sendable (Data) -> AuthorityPairingRendezvous?
     private let configureListener: @Sendable (NSXPCListener) -> Void
     private let configureConnection: @Sendable (NSXPCConnection) -> Void
     private var slot: Offer?
@@ -94,17 +97,21 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
 
     convenience init(policy: XPCPeerPolicy, timeout: Duration, verifyCurrent: @escaping @Sendable () throws -> Void,
                      bindReservations: BindReservations? = nil,
-                     validateTransport: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in }) {
+                     validateTransport: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in },
+                     lookupRendezvous: @escaping @Sendable (Data) -> AuthorityPairingRendezvous? = { _ in nil }) {
         self.init(policy: policy, timeout: timeout, verifyCurrent: verifyCurrent, configureListener: policy.configure,
-                  configureConnection: policy.configure, bindReservations: bindReservations, validateTransport: validateTransport)
+                  configureConnection: policy.configure, bindReservations: bindReservations, validateTransport: validateTransport,
+                  lookupRendezvous: lookupRendezvous)
     }
 
     // Native test fixtures pin their disposable test binary without using the installed Authority configuration.
     init(policy: XPCPeerPolicy, timeout: Duration, verifyCurrent: @escaping @Sendable () throws -> Void,
          configureListener: @escaping @Sendable (NSXPCListener) -> Void,
          configureConnection: @escaping @Sendable (NSXPCConnection) -> Void, bindReservations: BindReservations? = nil,
-         validateTransport: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in }) {
+         validateTransport: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in },
+         lookupRendezvous: @escaping @Sendable (Data) -> AuthorityPairingRendezvous? = { _ in nil }) {
         self.policy = policy
+        self.lookupRendezvous = lookupRendezvous
         self.bindReservations = bindReservations
         self.validateTransport = validateTransport
         self.timeout = timeout
@@ -115,13 +122,25 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
 
     deinit { close() }
 
-    func offer(bootstrap: AuthorityPairingProofBootstrap, peer: XPCPeerCredentials) throws -> NSXPCListenerEndpoint {
+    func offer(bootstrap: AuthorityPairingProofBootstrap, peer: XPCPeerCredentials,
+               rendezvousID: Data? = nil) throws -> NSXPCListenerEndpoint {
+        let rendezvous: AuthorityPairingRendezvous?
+        if let rendezvousID {
+            guard rendezvousID.count == 16, let pending = lookupRendezvous(rendezvousID) else {
+                throw AuthorityXPCEndpointError.unavailable
+            }
+            rendezvous = pending
+        } else { rendezvous = nil }
         _ = try policy.credentials(processID: peer.processID, userID: peer.userID, auditSessionID: peer.auditSessionID)
         try verifyCurrent()
         return try lock.withLock {
             guard !closed, slot == nil, bootstrap.acceptsOffer else { throw AuthorityXPCEndpointError.unavailable }
             let listener = NSXPCListener.anonymous()
-            let id = UUID(), expires = ContinuousClock.now.advanced(by: timeout)
+            let id = UUID()
+            let expires = ContinuousClock.now.advanced(by: timeout)
+            if let rendezvous {
+                guard bindReservations != nil, rendezvous.claim(offer: id) else { throw AuthorityXPCEndpointError.unavailable }
+            }
             configureListener(listener)
             listener.delegate = self
             let timer = Task { [weak self] in
@@ -136,7 +155,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
                 try validateTransport(transaction)
             })
             slot = Offer(id: id, bootstrap: bootstrap, peer: peer, listener: listener,
-                         expires: expires, timer: timer, proofLink: proofLink)
+                         expires: expires, timer: timer, proofLink: proofLink, rendezvous: rendezvous)
             listener.activate()
             return listener.endpoint
         }
@@ -171,6 +190,9 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         try lock.withLock {
             guard !closed, let current = slot, current.id == id, !current.ready, !current.retiring, current.bootstrap.permits(current.id),
                   ContinuousClock.now < current.expires else { throw AuthorityXPCEndpointError.unavailable }
+            if let rendezvous = current.rendezvous {
+                guard rendezvous.acceptHello(offer: id, link: current.proofLink, offerDeadline: current.expires) else { throw AuthorityXPCEndpointError.unavailable }
+            }
             slot?.ready = true
             if bindReservations == nil { current.timer.cancel() }
             reply(bindReservations == nil ? 1 : AuthorityPairingProofWire.handoffVersion)
@@ -204,7 +226,10 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
 
     private func bindWindow(id: UUID, windowID: Data) throws {
         try perform(id: id, binding: true) { current in
-            guard let bindReservations else { throw AuthorityXPCEndpointError.unavailable }
+            guard let bindReservations,
+                  current.rendezvous?.permitsBinding(link: current.proofLink) != false else {
+                throw AuthorityXPCEndpointError.unavailable
+            }
             let reservations = try bindReservations(windowID, current.proofLink)
             let retained = lock.withLock {
                 guard slot?.id == id, slot?.retiring == false else { return false }
@@ -223,6 +248,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         try lock.withLock {
             guard !closed, let current = slot, current.id == id, current.ready, !current.retiring,
                   current.reservations != nil, current.activeWork == 0, ContinuousClock.now < current.expires,
+                  current.rendezvous?.permitsBinding(link: current.proofLink) != false,
                   current.bootstrap.transfer(id) else { throw AuthorityXPCEndpointError.unavailable }
             current.timer.cancel()
         }
@@ -263,6 +289,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
     private func clear(_ matches: (Offer) -> Bool) {
         let retired = lock.withLock { () -> Offer? in
             guard let current = slot, !current.retiring, matches(current) else { return nil }
+            current.rendezvous?.retire()
             slot?.retiring = true
             current.timer.cancel()
             return current

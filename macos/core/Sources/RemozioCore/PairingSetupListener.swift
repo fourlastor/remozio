@@ -58,6 +58,7 @@ public final class PairingSetupListener: @unchecked Sendable {
         }
     }
     private let listener: NWListener
+    var requiredLocalEndpoint: NWEndpoint? { listener.parameters.requiredLocalEndpoint }
     private let queue = DispatchQueue(label: "dev.remozio.pairing-listener")
     private let lock = NSLock()
     private let invitation: PairingInvitation

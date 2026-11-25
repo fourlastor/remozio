@@ -5,6 +5,20 @@ import Synchronization
 final class AuthorityMaintenancePairingOwners: Sendable {
     let admission: AuthorityMaintenancePairingAdmission
     private let endpoints = Mutex<[UUID: AuthorityPairingXPCEndpoint]>([:])
+    private let rendezvous = Mutex<[Data: AuthorityPairingRendezvous]>([:])
+
+    func register(_ pending: AuthorityPairingRendezvous) {
+        rendezvous.withLock { $0[pending.id] = pending }
+    }
+
+    func retire(_ pending: AuthorityPairingRendezvous) {
+        pending.retire()
+        rendezvous.withLock { _ = $0.removeValue(forKey: pending.id) }
+    }
+
+    func lookupRendezvous(_ id: Data) -> AuthorityPairingRendezvous? {
+        rendezvous.withLock { $0[id] }
+    }
     init(admission: AuthorityMaintenancePairingAdmission) { self.admission = admission }
     func retain(_ endpoint: AuthorityPairingXPCEndpoint, id: UUID) throws {
         try endpoint.requireMaintenanceAdmission(admission)
