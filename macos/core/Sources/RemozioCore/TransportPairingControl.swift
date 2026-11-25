@@ -3,7 +3,7 @@ import Foundation
 import RemozioProtocol
 
 public enum TransportPairingControlError: Error, Equatable {
-    case invalidConfiguration, wrongAccount, invalidMessage, closed, busy, timedOut, unsupportedVersion
+    case invalidConfiguration, wrongAccount, invalidMessage, closed, busy, timedOut, unsupportedVersion, unavailableInterface
 }
 
 /// Protected metadata for the app-to-transport setup channel. It grants no enrollment authority.

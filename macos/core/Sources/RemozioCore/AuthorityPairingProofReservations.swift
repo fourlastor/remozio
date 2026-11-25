@@ -119,6 +119,7 @@ final class AuthorityPairingProofReservations: Sendable {
     private let state = Mutex(State())
 
     var pendingCount: Int { pending.count }
+    var windowDeadline: UInt64 { window.deadline }
 
     init(window: AuthorityPairingV2Window, authorityOwner: UUID, link: AuthorityPairingProofLink,
          now: @escaping @Sendable () throws -> AuthorityMoment, makeChallenge: @escaping @Sendable () throws -> Data,

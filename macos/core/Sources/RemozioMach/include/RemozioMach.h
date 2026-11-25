@@ -33,4 +33,5 @@ OSStatus remozio_copy_dynamic_signing_information(SecCodeRef _Nonnull code,
     CFDictionaryRef _Nullable * _Nonnull CF_RETURNS_RETAINED information);
 bool remozio_code_is_adhoc(uint32_t flags);
 #include "RemozioAuthorityBootstrap.h"
+#include "RemozioPairingInterface.h"
 #endif

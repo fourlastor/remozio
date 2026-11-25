@@ -10,6 +10,7 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
     private enum Reply: Sendable {
         case version(UInt64)
         case allowed(Bool)
+        case lanBinding(Data?)
         case challenge(Data?, Data?)
     }
 
@@ -39,23 +40,30 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         let configure: @Sendable (NSXPCConnection) -> Void
     }
 
+    struct Binding: Sendable {
+        let client: AuthorityPairingProofClient
+        let lan: PairingLANBinding?
+    }
+
     final class Prepared: Sendable {
         private let bootstrap: AuthorityXPCChannel
         private let client: AuthorityPairingProofClient
         private let opening: OpeningState
         private let deadline: ContinuousClock.Instant
+        private let version: UInt64
 
         fileprivate init(bootstrap: AuthorityXPCChannel, client: AuthorityPairingProofClient,
-                         opening: OpeningState, deadline: ContinuousClock.Instant) {
+                         opening: OpeningState, deadline: ContinuousClock.Instant, version: UInt64) {
             self.bootstrap = bootstrap
             self.client = client
             self.opening = opening
             self.deadline = deadline
+            self.version = version
         }
 
-        func finish(windowID: Data) async throws -> AuthorityPairingProofClient {
+        func finish(windowID: Data) async throws -> Binding {
             do {
-                try await client.bindAndTransfer(windowID: windowID, deadline: deadline)
+                let lan = try await client.bindAndTransfer(windowID: windowID, version: version, deadline: deadline)
                 let handedOff = opening.value.withLock { state in
                     guard state == .opening else { return false }
                     state = .independent
@@ -63,7 +71,7 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
                 }
                 guard handedOff else { throw AuthorityXPCError.closed }
                 await bootstrap.close()
-                return client
+                return Binding(client: client, lan: lan)
             } catch { close(); throw error }
         }
 
@@ -96,7 +104,7 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         async throws -> AuthorityPairingProofClient {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
         let prepared = try await prepare(configuration: configuration, rendezvousID: nil, onClose: onClose, bootstrap: makeBootstrap)
-        return try await prepared.finish(windowID: windowID)
+        return try await prepared.finish(windowID: windowID).client
     }
 
     static func prepare(configuration: ApprovalTransportConfiguration, rendezvousID: Data?, onClose: @escaping @Sendable () -> Void,
@@ -127,9 +135,9 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
                 }
                 if first { onClose() }
             }, configure: peer.configure)
-            try await client.startHello(deadline: helloDeadline)
+            let version = try await client.startHello(deadline: helloDeadline, permitsLAN: rendezvousID != nil)
             guard opening.value.withLock({ $0 == .opening }) else { client.close(); throw AuthorityXPCError.closed }
-            return Prepared(bootstrap: bootstrap, client: client, opening: opening, deadline: transferDeadline)
+            return Prepared(bootstrap: bootstrap, client: client, opening: opening, deadline: transferDeadline, version: version)
         } catch {
             await bootstrap.close()
             throw error
@@ -141,32 +149,45 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
     func start(windowID: Data) async throws {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
         let deadline = ContinuousClock.now.advanced(by: AuthorityPairingProofWire.bootstrapTimeout)
-        try await startHello(deadline: deadline)
-        try await bindAndTransfer(windowID: windowID, deadline: deadline)
+        let version = try await startHello(deadline: deadline, permitsLAN: false)
+        _ = try await bindAndTransfer(windowID: windowID, version: version, deadline: deadline)
     }
 
-    private func startHello(deadline: ContinuousClock.Instant) async throws {
+    private func startHello(deadline: ContinuousClock.Instant, permitsLAN: Bool) async throws -> UInt64 {
         let ended: @Sendable () -> Void = { [weak self] in self?.close() }
         connection.interruptionHandler = ended
         connection.invalidationHandler = ended
         connection.activate()
-        guard case .version(AuthorityPairingProofWire.handoffVersion) = try await call(deadline: deadline, hello: true, send: { proxy, reply in
+        guard case .version(let version) = try await call(deadline: deadline, hello: true, send: { proxy, reply in
             proxy.hello { reply(.version($0)) }
-        }) else { close(); throw AuthorityXPCError.failed }
+        }), version == AuthorityPairingProofWire.handoffVersion || (permitsLAN && version == AuthorityPairingProofWire.lanHandoffVersion)
+        else { close(); throw AuthorityXPCError.failed }
         try lock.withLock {
             guard !state.closed else { throw AuthorityXPCError.closed }
             state.ready = true
         }
+        return version
     }
 
-    private func bindAndTransfer(windowID: Data, deadline: ContinuousClock.Instant) async throws {
+    private func bindAndTransfer(windowID: Data, version: UInt64, deadline: ContinuousClock.Instant) async throws -> PairingLANBinding? {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
-        guard case .allowed(true) = try await call(deadline: deadline, send: { proxy, reply in
-            proxy.bindWindow(windowID) { reply(.allowed($0)) }
-        }) else { close(); throw AuthorityXPCError.failed }
+        let lan: PairingLANBinding?
+        if version == AuthorityPairingProofWire.lanHandoffVersion {
+            guard case .lanBinding(let bytes?) = try await call(deadline: deadline, send: { proxy, reply in
+                if let bind = proxy.bindLANWindow { bind(windowID) { reply(.lanBinding($0)) } }
+                else { reply(.lanBinding(nil)) }
+            }) else { close(); throw AuthorityXPCError.failed }
+            lan = try PairingLANBinding.decode(bytes, windowID: windowID)
+        } else {
+            guard case .allowed(true) = try await call(deadline: deadline, send: { proxy, reply in
+                proxy.bindWindow(windowID) { reply(.allowed($0)) }
+            }) else { close(); throw AuthorityXPCError.failed }
+            lan = nil
+        }
         guard case .allowed(true) = try await call(deadline: deadline, send: { proxy, reply in
             proxy.finishBootstrap { reply(.allowed($0)) }
         }) else { close(); throw AuthorityXPCError.failed }
+        return lan
     }
 
     func register(connectionID: UUID, acceptedAt: UInt64, peerPoint: Data, exporter: Data,

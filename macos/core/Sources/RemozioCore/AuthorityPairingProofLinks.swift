@@ -3,6 +3,7 @@ import Synchronization
 
 enum AuthorityPairingProofWire {
     static let handoffVersion: UInt64 = 3
+    static let lanHandoffVersion: UInt64 = 4
     static let bootstrapTimeout: Duration = .seconds(3)
 
     static func bytes(_ id: UUID) -> Data { withUnsafeBytes(of: id.uuid) { Data($0) } }
@@ -18,6 +19,7 @@ enum AuthorityPairingProofWire {
     /// Each link can complete hello once. A repeated hello retires the link.
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
     func bindWindow(_ windowID: Data, reply: @escaping @Sendable (Bool) -> Void)
+    @objc optional func bindLANWindow(_ windowID: Data, reply: @escaping @Sendable (Data?) -> Void)
     func finishBootstrap(reply: @escaping @Sendable (Bool) -> Void)
     func registerCandidate(_ connectionID: Data, acceptedAt: UInt64, peerPoint: Data, exporter: Data,
                            reply: @escaping @Sendable (Data?, Data?) -> Void)
@@ -133,6 +135,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         } else { rendezvous = nil }
         _ = try policy.credentials(processID: peer.processID, userID: peer.userID, auditSessionID: peer.auditSessionID)
         try verifyCurrent()
+        clear { $0.rendezvous?.isRetired == true && !$0.bootstrap.transferred($0.id) }
         return try lock.withLock {
             guard !closed, slot == nil, bootstrap.acceptsOffer else { throw AuthorityXPCEndpointError.unavailable }
             let listener = NSXPCListener.anonymous()
@@ -195,7 +198,8 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
             }
             slot?.ready = true
             if bindReservations == nil { current.timer.cancel() }
-            reply(bindReservations == nil ? 1 : AuthorityPairingProofWire.handoffVersion)
+            if current.rendezvous?.lanScope != nil { reply(AuthorityPairingProofWire.lanHandoffVersion) }
+            else { reply(bindReservations == nil ? 1 : AuthorityPairingProofWire.handoffVersion) }
         }
     }
 
@@ -224,9 +228,10 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         return result
     }
 
-    private func bindWindow(id: UUID, windowID: Data) throws {
+    private func bindWindow(id: UUID, windowID: Data, wantsLAN: Bool) throws -> Data? {
         try perform(id: id, binding: true) { current in
-            guard let bindReservations,
+            let scope = current.rendezvous?.lanScope
+            guard wantsLAN == (scope != nil), let bindReservations,
                   current.rendezvous?.permitsBinding(link: current.proofLink) != false else {
                 throw AuthorityXPCEndpointError.unavailable
             }
@@ -240,6 +245,11 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
                 reservations.retire()
                 throw AuthorityXPCEndpointError.unavailable
             }
+            if let scope, let rendezvous = current.rendezvous {
+                return try PairingLANBinding(windowID: windowID, revision: rendezvous.revision,
+                    scope: scope, expiresAtMilliseconds: reservations.windowDeadline).encode()
+            }
+            return nil
         }
     }
 
@@ -328,8 +338,13 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         }
 
         func bindWindow(_ windowID: Data, reply: @escaping @Sendable (Bool) -> Void) {
-            do { try checkedOwner().bindWindow(id: id, windowID: windowID); reply(true) }
-            catch { reply(false) }
+            do { _ = try checkedOwner().bindWindow(id: id, windowID: windowID, wantsLAN: false); reply(true) }
+            catch { reply(false); owner?.retire(id: id) }
+        }
+
+        func bindLANWindow(_ windowID: Data, reply: @escaping @Sendable (Data?) -> Void) {
+            do { reply(try checkedOwner().bindWindow(id: id, windowID: windowID, wantsLAN: true)) }
+            catch { reply(nil); owner?.retire(id: id) }
         }
 
         func finishBootstrap(reply: @escaping @Sendable (Bool) -> Void) {

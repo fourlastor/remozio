@@ -5,7 +5,7 @@ import Synchronization
 public enum MacPairingSessionError: Error { case invalidConfiguration, invalidState, closed, expired, changedCandidate, ineligiblePredecessor }
 public enum MacPairingSessionPhase: Sendable {
     case idle, connecting, waitingForPhone, authorizing, comparing, waitingForBiometric, committing
-    case registeredOnMac, receiptSent, expired, unavailable, outcomeUnknown, closed
+    case registeredOnMac, receiptSent, expired, unavailable, unavailableInterface, outcomeUnknown, closed
 }
 
 /// Display data only. A receipt write never claims that the phone activated its enrollment.
@@ -83,6 +83,7 @@ public actor MacPairingSession {
     private let administrator: any MacPairingAdministrator
     private let predecessor: PairedPhoneSelection?
     private var v2: MacPairingV2Control?
+    private var installedLAN = false
     private let openInstalledRoot: (@Sendable () throws -> AuthorityPairingChannel)?
     private let installedTransport: TransportPairingChannel?
     private let cancellation = ChannelCancellation()
@@ -151,8 +152,8 @@ public actor MacPairingSession {
             return context
         }
         try active()
-        let rendezvousID: Data?
-        do { rendezvousID = try await channel.negotiateInstalledPairing() }
+        let negotiation: InstalledPairingNegotiation?
+        do { negotiation = try await channel.negotiateInstalledPairing() }
         catch AuthorityPairingChannelError.setupDiscoveryUnavailable {
             // Only the optional capability probe can lead to a fresh legacy channel.
             await channel.close()
@@ -162,11 +163,13 @@ public actor MacPairingSession {
             try active()
             return try await legacy.start()
         }
-        if let rendezvousID {
+        if let negotiation {
+            let rendezvousID = negotiation.rendezvousID
+            installedLAN = negotiation.requiresLAN
             v2 = MacPairingV2Control(open: { label, predecessor in
                 try await transport.prepareV2(rendezvousID: rendezvousID)
                 return try await channel.openV2(label: label, predecessor: predecessor, rendezvousID: rendezvousID)
-            }, listen: { try await transport.beginV2($0) }, stage: {
+            }, listen: { try await transport.beginV2($0, requiresLAN: negotiation.requiresLAN) }, stage: {
                 try await channel.stageV2($0, connection: $1, authorization: $2)
             })
         }
@@ -212,7 +215,7 @@ public actor MacPairingSession {
             try active()
             self.context = context; self.invitation = invitation; phase = .waitingForPhone
             return snapshot()
-        } catch { await fail(); throw error }
+        } catch { await fail(error); throw error }
     }
     public func current() async throws -> MacPairingSessionSnapshot {
         try active()
@@ -348,11 +351,12 @@ public actor MacPairingSession {
     private func checkDeadline() throws {
         if let deadline, elapsedMilliseconds() >= deadline { throw MacPairingSessionError.expired }
     }
-    private func fail() async {
+    private func fail(_ error: (any Error)? = nil) async {
         if phase != .registeredOnMac && phase != .receiptSent {
             if commitAttempted { phase = .outcomeUnknown }
             else if !cancellation.ifActive({}) { phase = .closed }
             else if let deadline, elapsedMilliseconds() >= deadline { phase = .expired }
+            else if error as? TransportPairingControlError == .unavailableInterface { phase = .unavailableInterface }
             else { phase = .unavailable }
         }
         await releaseChannels()
@@ -371,7 +375,7 @@ public actor MacPairingSession {
         let remaining = deadline.map { $0 > elapsed ? $0 - elapsed : 0 }
         return .init(phase: phase, invitation: v2 == nil ? invitation : nil, rePairInvitation: v2 == nil ? rePairInvitation : nil,
             invitationV2: phase == .waitingForPhone ? invitationV2 : nil,
-            usesLoopbackOnlyV2: installedTransport != nil && v2 != nil, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
+            usesLoopbackOnlyV2: installedTransport != nil && v2 != nil && !installedLAN, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
             comparisonCode: try? transcript?.verificationCode(), remainingMilliseconds: remaining, phoneProofAvailable: proof != nil)
     }
 }

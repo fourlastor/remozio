@@ -112,7 +112,7 @@ final class MacPairingControls {
                             self?.working = false
                             return
                         }
-                        if [.receiptSent, .registeredOnMac, .expired, .unavailable, .outcomeUnknown, .closed].contains(current.phase) { return }
+                        if [.receiptSent, .registeredOnMac, .expired, .unavailable, .unavailableInterface, .outcomeUnknown, .closed].contains(current.phase) { return }
                         try await Task.sleep(for: .milliseconds(500))
                     }
                 } catch {
@@ -276,7 +276,7 @@ struct PairingSheetContent: View {
         copiedCredential?.clearIfOwned()
         copiedCredential = nil
     }
-    private var isFinished: Bool { [.receiptSent, .registeredOnMac, .outcomeUnknown, .expired, .unavailable, .closed].contains(state.phase) }
+    private var isFinished: Bool { [.receiptSent, .registeredOnMac, .outcomeUnknown, .expired, .unavailable, .unavailableInterface, .closed].contains(state.phase) }
     @ViewBuilder private var content: some View {
         switch state.phase {
         case .idle, .connecting:
@@ -338,6 +338,9 @@ struct PairingSheetContent: View {
         case .expired:
             Text("This setup expired.").font(.headline)
             Text("Close this sheet and start pairing again. No new enrollment was confirmed here.")
+        case .unavailableInterface:
+            Text("The network interface for pairing is unavailable.").font(.headline)
+            Text("Check that this Mac is connected on the configured network, then close this sheet and try again.")
         case .unavailable, .closed:
             Text("Pairing is unavailable.").font(.headline)
             Text("Check this Mac’s service setup, then close this sheet and try again.")

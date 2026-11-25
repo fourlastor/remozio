@@ -11,6 +11,8 @@ import RemozioProtocol
     func preparePairingV2(_ rendezvousID: Data, reply: @escaping @Sendable (Bool) -> Void)
     func beginPairingV2(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
                         reply: @escaping @Sendable (UInt64) -> Void)
+    func beginPairingV2LAN(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
+                           reply: @escaping @Sendable (UInt64) -> Void)
     func setupCandidates(reply: @escaping @Sendable (Data?) -> Void)
     func stageSetup(_ candidateID: Data, transcript: Data, reply: @escaping @Sendable (Bool) -> Void)
     func deliverSetupReceipt(_ candidateID: Data, signature: Data, reply: @escaping @Sendable (Bool) -> Void)
@@ -26,6 +28,7 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
     private let onHandshake: @Sendable () -> Void
     private var ready = false
     private var closed = false
+    private var invalidated = false
     private var jobs: [UUID: Task<Void, Never>] = [:]
     private var busy = false
     private var cleanup: Task<Void, Never>?
@@ -42,13 +45,19 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
         self.owner = owner; self.verify = verify; self.invalidate = invalidate; self.onHandshake = onHandshake
     }
     deinit { owner.abort() }
-    func close() {
+    func close() { close(invalidateConnection: true) }
+
+    private func close(invalidateConnection: Bool) {
         let notify = lock.withLock {
-            guard !closed else { return false }; closed = true; ready = false
-            owner.abort()
-            let owned = Array(jobs.values), owner = owner
-            for task in owned { task.cancel() }
-            cleanup = Task { await owner.closeAndWait(); for task in owned { await task.value } }
+            if !closed {
+                closed = true; ready = false
+                owner.abort()
+                let owned = Array(jobs.values), owner = owner
+                for task in owned { task.cancel() }
+                cleanup = Task { await owner.closeAndWait(); for task in owned { await task.value } }
+            }
+            guard invalidateConnection, !invalidated else { return false }
+            invalidated = true
             return true
         }
         if notify { invalidate() }
@@ -97,6 +106,18 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
 
     func beginPairingV2(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
                         reply: @escaping @Sendable (UInt64) -> Void) {
+        beginV2(rendezvousID, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetimeMilliseconds,
+                requiresLAN: false, reply: reply)
+    }
+
+    func beginPairingV2LAN(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
+                           reply: @escaping @Sendable (UInt64) -> Void) {
+        beginV2(rendezvousID, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetimeMilliseconds,
+                requiresLAN: true, reply: reply)
+    }
+
+    private func beginV2(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
+                         requiresLAN: Bool, reply: @escaping @Sendable (UInt64) -> Void) {
         launch(failed: { reply(0) }) { owner in
             guard rendezvousID.count == 16, windowID.count == 16,
                   (1...AuthorityPairingSetupConfiguration.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds) else {
@@ -106,8 +127,17 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
             let publicInvitation = try rePair?.invitation ?? PairingInvitation.decode(invitation)
             let window = MacPairingV2PublicWindow(id: windowID, invitation: publicInvitation,
                 replacement: rePair?.predecessor, lifetimeMilliseconds: lifetimeMilliseconds)
-            let port = try await owner.beginInstalledV2(window, rendezvousID: rendezvousID)
-            return { reply(UInt64(port)) }
+            do {
+                let port = try await owner.beginInstalledV2(window, rendezvousID: rendezvousID, requiresLAN: requiresLAN)
+                return { reply(UInt64(port)) }
+            } catch TransportPairingControlError.unavailableInterface where requiresLAN {
+                await owner.closeAndWait()
+                return { [weak self] in
+                    // Retire the endpoint while the App receives its terminal reply and closes the connection.
+                    self?.close(invalidateConnection: false)
+                    reply(TransportPairingLANStartReply.unavailableInterface.rawValue)
+                }
+            }
         }
     }
 

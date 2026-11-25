@@ -15,18 +15,21 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
     public let transportPublicKey: Data
     public let lifetimeMilliseconds: UInt64
     public let v2ActivationEnabled: Bool?
+    public let lanScope: PairingLANScope?
     public let canonicalBytes: Data
     public var description: String { "AuthorityPairingSetupConfiguration(redacted)" }
     public init(transportPublicKey: Data, lifetimeMilliseconds: UInt64 = 120_000,
-                v2ActivationEnabled: Bool? = nil) throws {
+                v2ActivationEnabled: Bool? = nil, lanScope: PairingLANScope? = nil) throws {
         guard transportPublicKey.count == 65, transportPublicKey.first == 4,
               (try? P256.Signing.PublicKey(x963Representation: transportPublicKey)) != nil,
-              (1...Self.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds) else { throw AuthorityPairingSetupError.invalidConfiguration }
+              (1...Self.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds),
+              lanScope == nil || v2ActivationEnabled == true else { throw AuthorityPairingSetupError.invalidConfiguration }
         self.transportPublicKey = transportPublicKey; self.lifetimeMilliseconds = lifetimeMilliseconds
-        self.v2ActivationEnabled = v2ActivationEnabled
-        var fields: [UInt64: CBORValue] = [0: .unsigned(v2ActivationEnabled == nil ? 1 : 2), 1: .bytes(transportPublicKey),
-            2: .unsigned(lifetimeMilliseconds)]
+        self.v2ActivationEnabled = v2ActivationEnabled; self.lanScope = lanScope
+        let version: UInt64 = lanScope != nil ? 3 : v2ActivationEnabled == nil ? 1 : 2
+        var fields: [UInt64: CBORValue] = [0: .unsigned(version), 1: .bytes(transportPublicKey), 2: .unsigned(lifetimeMilliseconds)]
         if let v2ActivationEnabled { fields[3] = .boolean(v2ActivationEnabled) }
+        if let lanScope { fields[4] = lanScope.cborValue }
         canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
     public static func decode(_ bytes: Data) throws -> Self {
@@ -35,19 +38,23 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
             throw AuthorityPairingSetupError.invalidConfiguration
         }
         let activation: Bool?
+        let lanScope: PairingLANScope?
         switch fields[0] {
         case .unsigned(1) where Set(fields.keys) == Set(UInt64(0)...2):
-            activation = nil
+            activation = nil; lanScope = nil
         case .unsigned(2) where Set(fields.keys) == Set(UInt64(0)...3):
             guard case .boolean(let flag) = fields[3] else { throw AuthorityPairingSetupError.invalidConfiguration }
-            activation = flag
+            activation = flag; lanScope = nil
+        case .unsigned(3) where Set(fields.keys) == Set(UInt64(0)...4):
+            guard fields[3] == .boolean(true), let scope = fields[4] else { throw AuthorityPairingSetupError.invalidConfiguration }
+            activation = true; lanScope = try PairingLANScope.decode(scope)
         default:
             throw AuthorityPairingSetupError.invalidConfiguration
         }
-        let result = try Self(transportPublicKey: key, lifetimeMilliseconds: lifetime, v2ActivationEnabled: activation)
+        let result = try Self(transportPublicKey: key, lifetimeMilliseconds: lifetime, v2ActivationEnabled: activation, lanScope: lanScope)
         guard result.canonicalBytes == bytes else { throw AuthorityPairingSetupError.invalidConfiguration }; return result
     }
-    private static var limits: CBORLimits { get throws { try .init(maxBytes: 512, maxDepth: 1, maxItems: 9) } }
+    private static var limits: CBORLimits { get throws { try .init(maxBytes: 512, maxDepth: 2, maxItems: 13) } }
 }
 
 /// Trusted local app access to the existing authority. It owns no database, key creation or network listener.
@@ -155,6 +162,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     }
 
     var requiresInstalledV2: Bool { configuration.v2ActivationEnabled == true }
+    var lanScope: PairingLANScope? { configuration.lanScope }
 
     /// Endpoints retain the admission through the attempt and its in-flight replies.
     func admitPairingVersion(_ version: PairingVersion) throws -> VersionAdmission {
