@@ -50,53 +50,94 @@ enum JournalContinuityDigest {
     }
 
     private static func digest(_ db: OpaquePointer, tables: [String], domain: String, schema: Int64 = 12) throws -> Data {
-        var hash = SHA256()
-        field(Data("remozio/journal-continuity/v1/schema\(schema)/\(domain)".utf8), into: &hash)
+        var encoder = DigestEncoder()
+        encoder.field(Data("remozio/journal-continuity/v1/schema\(schema)/\(domain)".utf8))
         for table in tables.sorted() {
-            field(Data(table.utf8), into: &hash)
+            encoder.field(Data(table.utf8))
             var columns = [String]()
             try rows(db, "PRAGMA main.table_info('\(table)')") { row in
                 guard let name = sqlite3_column_text(row, 1) else { throw JournalDatabaseError.incompatibleStore }
                 columns.append(String(cString: name))
             }
             guard !columns.isEmpty else { throw JournalDatabaseError.incompatibleStore }
-            number(UInt64(columns.count), into: &hash)
-            for column in columns { field(Data(column.utf8), into: &hash) }
+            encoder.number(UInt64(columns.count))
+            for column in columns { encoder.field(Data(column.utf8)) }
             // Ordinals avoid interpreting column names as SQL. Sorting every value also handles composite keys.
             let order = (1...columns.count).map(String.init).joined(separator: ",")
             try rows(db, "SELECT * FROM main.\(table) ORDER BY \(order)") { row in
-                hash.update(data: Data([1]))
+                encoder.byte(1)
                 for index in columns.indices {
                     let column = Int32(index)
-                    switch sqlite3_column_type(row, column) {
-                    case SQLITE_NULL: hash.update(data: Data([0]))
+                    let type = sqlite3_column_type(row, column)
+                    switch type {
+                    case SQLITE_NULL: encoder.byte(0)
                     case SQLITE_INTEGER:
-                        hash.update(data: Data([1]))
-                        number(UInt64(bitPattern: sqlite3_column_int64(row, column)), into: &hash)
+                        encoder.byte(1)
+                        encoder.number(UInt64(bitPattern: sqlite3_column_int64(row, column)))
                     case SQLITE_TEXT, SQLITE_BLOB:
-                        let text = sqlite3_column_type(row, column) == SQLITE_TEXT
-                        hash.update(data: Data([text ? 2 : 3]))
+                        let text = type == SQLITE_TEXT
+                        encoder.byte(text ? 2 : 3)
                         let pointer = text ? sqlite3_column_text(row, column).map(UnsafeRawPointer.init) : sqlite3_column_blob(row, column)
                         let size = Int(sqlite3_column_bytes(row, column))
                         guard size == 0 || pointer != nil else { throw JournalDatabaseError.storage(SQLITE_NOMEM) }
-                        field(size == 0 ? Data() : Data(bytes: pointer!, count: size), into: &hash)
+                        encoder.field(UnsafeRawBufferPointer(start: pointer, count: size))
                     default: throw JournalDatabaseError.incompatibleStore
                     }
                 }
             }
-            hash.update(data: Data([0]))
+            encoder.byte(0)
         }
-        return Data(hash.finalize())
+        return encoder.finish()
     }
 
-    private static func field(_ data: Data, into hash: inout SHA256) {
-        number(UInt64(data.count), into: &hash)
-        hash.update(data: data)
+    private struct DigestEncoder {
+        private static let capacity = 16_384
+        private var hash = SHA256()
+        private var buffer = [UInt8]()
+
+        init() { buffer.reserveCapacity(Self.capacity) }
+
+        mutating func byte(_ value: UInt8) {
+            if buffer.count == Self.capacity { flush() }
+            buffer.append(value)
+        }
+
+        mutating func number(_ value: UInt64) {
+            var bigEndian = value.bigEndian
+            withUnsafeBytes(of: &bigEndian) { append($0) }
+        }
+
+        mutating func field(_ data: Data) {
+            data.withUnsafeBytes { field($0) }
+        }
+
+        mutating func field(_ bytes: UnsafeRawBufferPointer) {
+            number(UInt64(bytes.count))
+            append(bytes)
+        }
+
+        mutating func finish() -> Data {
+            flush()
+            return Data(hash.finalize())
+        }
+
+        private mutating func append(_ bytes: UnsafeRawBufferPointer) {
+            if bytes.count > Self.capacity - buffer.count { flush() }
+            if bytes.count >= Self.capacity {
+                // The bytes are consumed while the SQLite row still owns them.
+                hash.update(bufferPointer: bytes)
+            } else {
+                buffer.append(contentsOf: bytes)
+            }
+        }
+
+        private mutating func flush() {
+            guard !buffer.isEmpty else { return }
+            buffer.withUnsafeBytes { hash.update(bufferPointer: $0) }
+            buffer.removeAll(keepingCapacity: true)
+        }
     }
-    private static func number(_ value: UInt64, into hash: inout SHA256) {
-        var bigEndian = value.bigEndian
-        withUnsafeBytes(of: &bigEndian) { hash.update(data: Data($0)) }
-    }
+
     private static func rows(_ db: OpaquePointer, _ sql: String, _ body: (OpaquePointer) throws -> Void) throws {
         var statement: OpaquePointer?
         let result = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
