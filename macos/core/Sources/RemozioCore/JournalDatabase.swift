@@ -88,6 +88,9 @@ public final class JournalDatabase {
             _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096, max((gatewayPolicy?.payloadLimits.maxBytes ?? 0) + 32768, 136096))))
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
+            guard try integer(SQLiteSchemaCatalog.containsUnsupportedObjectsSQL) == 0 else {
+                throw JournalDatabaseError.incompatibleStore
+            }
             if initialize { try requireEmptyStore() }
             else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion) }
             if readOnlyForCutover { try exec("PRAGMA query_only=ON") }

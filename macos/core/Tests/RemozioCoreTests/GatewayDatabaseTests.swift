@@ -48,6 +48,41 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertThrowsError(try action(), file: file, line: line) { XCTAssertEqual($0 as? GatewayDatabaseError, expected, file: file, line: line) }
     }
 
+    func testOpenRejectsUnsupportedSchemaObjectsWithoutChangingTheStore() throws {
+        let unsupportedObjects = [
+            "CREATE TRIGGER fixture_trigger BEFORE UPDATE ON gateway_identity_v1 BEGIN SELECT 1; END",
+            "CREATE VIEW fixture_view AS SELECT 1 AS value",
+            "CREATE VIRTUAL TABLE fixture_search USING fts5(value)",
+        ]
+        for sql in unsupportedObjects {
+            let fixture = try Fixture()
+            let db = try open(fixture, initialize: true)
+            _ = try admit(db)
+            try db.close()
+            try fixture.sql(sql)
+            let file = URL(fileURLWithPath: fixture.path)
+            let before = try Data(contentsOf: file)
+            for health in [false, true] {
+                XCTAssertThrowsError(try open(fixture, health: health), sql) {
+                    XCTAssertEqual($0 as? GatewayDatabaseError, .incompatibleStore, sql)
+                }
+                XCTAssertEqual(try Data(contentsOf: file), before, sql)
+                let lease = try fixture.lease()
+                lease.close()
+            }
+        }
+    }
+
+    func testOpenAllowsAdditionalOrdinaryTablesAndIndexes() throws {
+        let fixture = try Fixture()
+        try open(fixture, initialize: true).close()
+        try fixture.sql("CREATE TABLE fixture_auxiliary(value INTEGER)")
+        try fixture.sql("CREATE INDEX fixture_auxiliary_value ON fixture_auxiliary(value)")
+        let reopened = try open(fixture)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.head(), 0)
+    }
+
     func testCommittedReceiptHeadAndHistoricalRetrySurviveReopenWithoutPendingToken() throws {
         let fixture = try Fixture()
         XCTAssertThrowsError(try open(fixture))

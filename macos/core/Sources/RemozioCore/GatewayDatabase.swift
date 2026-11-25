@@ -98,6 +98,9 @@ public final class GatewayDatabase {
             _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
             _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(payloadLimits.maxBytes + 32768))
             try exec("PRAGMA trusted_schema=OFF"); try exec("PRAGMA foreign_keys=ON")
+            guard try scalar(SQLiteSchemaCatalog.containsUnsupportedObjectsSQL) == 0 else {
+                throw GatewayDatabaseError.incompatibleStore
+            }
             if initialize { try requireEmpty() } else { try validateIdentity(allowLegacy: migrateLegacyStore) }
             if !readOnlyForUpdateHealth { try exec("PRAGMA journal_mode=DELETE") }
             try exec("PRAGMA synchronous=EXTRA"); try exec("PRAGMA fullfsync=ON")

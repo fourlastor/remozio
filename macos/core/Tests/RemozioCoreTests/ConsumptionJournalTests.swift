@@ -209,6 +209,7 @@ final class ConsumptionJournalTests: XCTestCase {
             })
             if automatic { XCTAssertThrowsError(try database.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) } }
             try database.close()
+            if automatic { try fixture.sql("DROP TRIGGER fail_write") }
             let reopened = try open(fixture)
             XCTAssertNil(try reopened.read { try $0.consumption(requestID: id(4)) })
             XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 0)
@@ -613,6 +614,7 @@ final class ConsumptionJournalTests: XCTestCase {
                                                                       eventID: 12, head: automatic ? 2 : 1) })
             XCTAssertThrowsError(try database.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
             try database.close()
+            if automatic { try fixture.sql("DROP TRIGGER fail_outcome") }
             let reopened = try open(fixture)
             XCTAssertEqual(try reopened.read { try $0.consumptionOutcome(requestID: id(4)) }, before)
             XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 2)

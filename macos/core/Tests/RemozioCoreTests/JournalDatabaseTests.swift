@@ -22,15 +22,48 @@ final class JournalDatabaseTests: XCTestCase {
             reason: .none, droppedEventCount: nil, peerDeviceID: nil).encode(limits: bounds)
     }
     private func open(_ fixture: Fixture, initialize: Bool = false, mac: UInt8 = 1, account: UInt8 = 2,
-                      busy: UInt32 = 100, maximumSubmissions: Int = 1_000_000) throws -> JournalDatabase {
+                      busy: UInt32 = 100, maximumSubmissions: Int = 1_000_000, readOnly: Bool = false) throws -> JournalDatabase {
         try JournalDatabase(lease: fixture.lease(), macID: id(mac), accountID: id(account),
-                            recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: busy, initialize: initialize, maximumCommandSubmissions: maximumSubmissions)
+                            recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: busy, initialize: initialize, maximumCommandSubmissions: maximumSubmissions,
+                            readOnlyForCutover: readOnly)
     }
 
     private func submissionReservation(_ value: UInt8 = 7, nonce: UInt8? = nil, mac: UInt8 = 1, account: UInt8 = 2) throws -> CommandSubmissionReservation {
         try CommandSubmissionReservation(macID: id(mac), accountID: id(account),
             submission: CapturedSubmission(id: id(value), nonce: Data(repeating: nonce ?? value, count: 32), callerBinding: id(8)),
             captureDigest: Data(repeating: 9, count: 32))
+    }
+
+    func testOpenRejectsUnsupportedSchemaObjectsWithoutChangingTheStore() throws {
+        let unsupportedObjects = [
+            "CREATE TRIGGER fixture_trigger BEFORE UPDATE ON journal_identity_v1 BEGIN SELECT 1; END",
+            "CREATE VIEW fixture_view AS SELECT 1 AS value",
+            "CREATE VIRTUAL TABLE fixture_search USING fts5(value)",
+        ]
+        for sql in unsupportedObjects {
+            let fixture = try Fixture()
+            try open(fixture, initialize: true).close()
+            try fixture.sql(sql)
+            let file = URL(fileURLWithPath: fixture.path)
+            let before = try Data(contentsOf: file)
+            for readOnly in [false, true] {
+                XCTAssertThrowsError(try open(fixture, readOnly: readOnly), sql) {
+                    XCTAssertEqual($0 as? JournalDatabaseError, .incompatibleStore, sql)
+                }
+                XCTAssertEqual(try Data(contentsOf: file), before, sql)
+                let lease = try fixture.lease()
+                lease.close()
+            }
+        }
+    }
+
+    func testOpenAllowsAdditionalOrdinaryTablesAndIndexes() throws {
+        let fixture = try Fixture()
+        try open(fixture, initialize: true).close()
+        try fixture.sql("CREATE TABLE fixture_auxiliary(value INTEGER)")
+        try fixture.sql("CREATE INDEX fixture_auxiliary_value ON fixture_auxiliary(value)")
+        let reopened = try open(fixture)
+        try reopened.close()
     }
 
     func testStorageSchemaObservationTracksProtectedMigrationWithoutChangingContinuity() throws {

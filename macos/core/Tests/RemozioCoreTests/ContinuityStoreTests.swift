@@ -12,8 +12,42 @@ final class ContinuityStoreTests: XCTestCase {
             ledgerDigest: Data(repeating: UInt8(generation), count: 32), journalEpoch: Data(repeating: 4, count: 16),
             journalHead: generation, authorityGeneration: 1)
     }
-    private func open(_ fixture: Fixture, initial: ContinuityCheckpoint? = nil) throws -> ContinuityStore {
-        try ContinuityStore(lease: fixture.acquire(), macID: mac, accountID: account, initialize: initial)
+    private func open(_ fixture: Fixture, initial: ContinuityCheckpoint? = nil, readOnly: Bool = false) throws -> ContinuityStore {
+        try ContinuityStore(lease: fixture.acquire(), macID: mac, accountID: account, initialize: initial, readOnlyForCutover: readOnly)
+    }
+
+    func testOpenRejectsUnsupportedSchemaObjectsWithoutChangingTheStore() throws {
+        let unsupportedObjects = [
+            "CREATE TRIGGER fixture_trigger BEFORE UPDATE ON continuity_v1 BEGIN SELECT 1; END",
+            "CREATE VIEW fixture_view AS SELECT 1 AS value",
+            "CREATE VIRTUAL TABLE fixture_search USING fts5(value)",
+        ]
+        for sql in unsupportedObjects {
+            let fixture = try Fixture()
+            try open(fixture, initial: checkpoint(1)).close()
+            try fixture.sql(sql)
+            let file = URL(fileURLWithPath: fixture.path("continuity/continuity.sqlite"))
+            let before = try Data(contentsOf: file)
+            for readOnly in [false, true] {
+                XCTAssertThrowsError(try open(fixture, readOnly: readOnly), sql) {
+                    XCTAssertEqual($0 as? ContinuityStoreError, .incompatibleStore, sql)
+                }
+                XCTAssertEqual(try Data(contentsOf: file), before, sql)
+                let lease = try fixture.acquire()
+                lease.close()
+            }
+        }
+    }
+
+    func testOpenAllowsAdditionalOrdinaryTablesAndIndexes() throws {
+        let fixture = try Fixture()
+        let initial = try checkpoint(1)
+        try open(fixture, initial: initial).close()
+        try fixture.sql("CREATE TABLE fixture_auxiliary(value INTEGER)")
+        try fixture.sql("CREATE INDEX fixture_auxiliary_value ON fixture_auxiliary(value)")
+        let reopened = try open(fixture)
+        defer { reopened.close() }
+        XCTAssertEqual(try reopened.read().committed, initial)
     }
 
     func testPreparationAndFinalizationSurviveReopen() throws {
@@ -91,9 +125,9 @@ final class ContinuityStoreTests: XCTestCase {
             XCTAssertThrowsError(try mutate(store)) { XCTAssertEqual($0 as? ContinuityStoreError, .storage(SQLITE_CONSTRAINT)) }
             XCTAssertEqual(try store.read(), before)
             store.close()
+            try fixture.sql("DROP TRIGGER fail_update")
             store = try open(fixture)
             XCTAssertEqual(try store.read(), before)
-            try fixture.sql("DROP TRIGGER fail_update")
             try mutate(store)
             XCTAssertNotEqual(try store.read(), before)
             store.close()
@@ -233,10 +267,10 @@ final class ContinuityStoreTests: XCTestCase {
         XCTAssertEqual(try store.read(), previous)
         XCTAssertNil(try store.historyRecovery())
         store.close()
+        try fixture.sql("DROP TRIGGER fail_update")
         store = try open(fixture)
         defer { store.close() }
         XCTAssertEqual(try store.read(), previous)
-        try fixture.sql("DROP TRIGGER fail_update")
         try store.prepareHistoryRecovery(intent)
         XCTAssertEqual(try store.historyRecovery(), intent)
     }
@@ -251,11 +285,11 @@ final class ContinuityStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: intent, candidate: candidate))
         XCTAssertEqual(try store.historyRecovery(), intent)
         store.close()
+        try fixture.sql("DROP TRIGGER fail_update")
         store = try open(fixture)
         defer { store.close() }
         XCTAssertEqual(try store.historyRecovery(), intent)
         XCTAssertThrowsError(try store.read())
-        try fixture.sql("DROP TRIGGER fail_update")
         try store.finalizeHistoryRecovery(expected: intent, candidate: candidate)
         XCTAssertEqual(try store.read().committed, candidate)
     }
@@ -319,10 +353,10 @@ final class ContinuityStoreTests: XCTestCase {
         try fixture.sql("CREATE TRIGGER fail_update BEFORE UPDATE ON continuity_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate))
         store.close()
+        try fixture.sql("DROP TRIGGER fail_update")
         store = try open(fixture)
         XCTAssertEqual(try store.historyRecovery(), intent)
         XCTAssertNil(try store.historyRecoveryCandidate())
-        try fixture.sql("DROP TRIGGER fail_update")
         try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate)
         store.close()
         store = try open(fixture)
@@ -407,11 +441,11 @@ final class ContinuityStoreTests: XCTestCase {
             XCTAssertThrowsError(try store.supersedeHistoryRecovery(expected: intent,
                 expectedCandidate: prepared ? candidate : nil, replacement: next))
             store.close()
+            try fixture.sql("DROP TRIGGER fail_update")
             store = try open(fixture)
             XCTAssertEqual(try store.historyRecovery(), intent)
             XCTAssertEqual(try store.historyRecoveryCandidate(), prepared ? candidate : nil)
             XCTAssertNil(try store.supersededHistoryRecovery(epoch: intent.recoveryEpoch))
-            try fixture.sql("DROP TRIGGER fail_update")
             try store.supersedeHistoryRecovery(expected: intent, expectedCandidate: prepared ? candidate : nil, replacement: next)
             XCTAssertEqual(try store.historyRecovery(), next)
             store.close()
