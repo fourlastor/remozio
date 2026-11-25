@@ -19,7 +19,7 @@ final class PairingSetupV2RegistrationLaneTests: XCTestCase, @unchecked Sendable
         defer { release.continuation.finish() }
         let timeline = Mutex<[Int]>([])
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
-        let first = Task {
+        let first = Task { @Sendable in
             try await lane.withTurn(until: deadline) {
                 timeline.withLock { $0.append(1) }
                 firstEntered.fulfill()
@@ -27,10 +27,14 @@ final class PairingSetupV2RegistrationLaneTests: XCTestCase, @unchecked Sendable
             }
         }
         await fulfillment(of: [firstEntered], timeout: 2)
-        let second = Task { try await lane.withTurn(until: deadline) { timeline.withLock { $0.append(2) } } }
+        let second = Task { @Sendable in
+            try await lane.withTurn(until: deadline) { timeline.withLock { $0.append(2) } }
+        }
         let secondQueued = try await reaches(1, on: lane)
         XCTAssertTrue(secondQueued)
-        let third = Task { try await lane.withTurn(until: deadline) { timeline.withLock { $0.append(3) } } }
+        let third = Task { @Sendable in
+            try await lane.withTurn(until: deadline) { timeline.withLock { $0.append(3) } }
+        }
         let thirdQueued = try await reaches(2, on: lane)
         XCTAssertTrue(thirdQueued)
         XCTAssertEqual(timeline.withLock { $0 }, [1])
