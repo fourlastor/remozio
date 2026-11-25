@@ -98,7 +98,9 @@ The executable accepts `--configuration /absolute/protected/configuration.cbor` 
 
 Each mode loads its protected configuration and opens the existing journal without initialization or migration. The presence mode restores the pinned hardware signer, starts request and presence listeners, and owns independent wake recovery. It has no trust-only fallback.
 
-SIGTERM and SIGINT stop the listener before closing the journal. Startup diagnostics omit identifiers, paths, and raw errors.
+SIGTERM and SIGINT stop the listener before closing the journal. The daemons install their shared handler before opening service resources. Argument parsing and early Root checks can run before installation.
+Before installation, a signal can terminate the process with the operating system's default action. At that point the daemon owns no service resources.
+After installation, the daemon retains a stop request through worker startup and waits for acquired resources to close. Startup diagnostics omit identifiers, paths, and raw errors.
 
 The trust-query service uses storage ceilings of 16 MiB, depth 32, and 262,144 CBOR items, with a five-second SQLite busy timeout and a one-million consumption-row ceiling. These are startup bounds for the current read-only RPC surface. Approval execution and configurable storage policy remain follow-up work.
 

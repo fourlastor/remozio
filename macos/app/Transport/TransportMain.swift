@@ -8,14 +8,18 @@ struct TransportMain {
         guard CommandLine.arguments.count == 3, ["--configuration", "--wake-configuration", "--remote-configuration", "--pairing-configuration", "--settings-host"].contains(CommandLine.arguments[1]) else {
             fail("Usage: RemozioTransport --configuration PATH or --wake-configuration PATH or --remote-configuration PATH or --pairing-configuration PATH or --settings-host PATH", code: EX_USAGE)
         }
+        let termination: DaemonTermination
+        do { termination = try DaemonTermination() }
+        catch { fail("Transport could not install its termination handler.", code: EX_OSERR) }
         if CommandLine.arguments[1] == "--settings-host" {
-            await settingsHost(path: CommandLine.arguments[2]); return
+            await settingsHost(path: CommandLine.arguments[2], termination: termination); return
         }
         let configuration: ApprovalTransportConfiguration
         let wake: TransportWakeStartupConfiguration?
         let relayPort: UInt16?
         let pairing: TransportPairingControlConfiguration?
         do {
+            try termination.checkCancellation()
             if CommandLine.arguments[1] == "--pairing-configuration" {
                 let value = try TransportPairingStartupConfiguration.load(path: CommandLine.arguments[2])
                 configuration = value.transport; wake = value.wake; relayPort = value.relayPort; pairing = value.control
@@ -29,17 +33,14 @@ struct TransportMain {
                 configuration = try ApprovalTransportConfiguration.load(path: CommandLine.arguments[2]); wake = nil; relayPort = nil; pairing = nil
             }
         }
+        catch is CancellationError { exit(EX_OK) }
         catch { fail("Transport startup requires protected configuration and the configured service account.", code: EX_CONFIG) }
         let optionalWakePath = CommandLine.arguments[1] == "--pairing-configuration" && wake == nil ? CommandLine.arguments[2] : nil
-        let task = Task { try await run(configuration, wake: wake, relayPort: relayPort, pairing: pairing, optionalWakePath: optionalWakePath) }
-        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
-        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        termination.setEventHandler { task.cancel() }; interruption.setEventHandler { task.cancel() }
-        termination.resume(); interruption.resume()
-        defer { termination.cancel(); interruption.cancel() }
         do {
-            try await task.value
+            try await termination.run {
+                try await run(configuration, wake: wake, relayPort: relayPort, pairing: pairing,
+                              optionalWakePath: optionalWakePath, termination: termination)
+            }
         } catch is CancellationError {
             exit(EX_OK)
         } catch ApprovalTransportStartupError.invalidIdentity {
@@ -49,32 +50,32 @@ struct TransportMain {
         }
     }
 
-    private static func settingsHost(path: String) async {
+    private static func settingsHost(path: String, termination: DaemonTermination) async {
         let host: GatewaySettingsTransportHost
-        do { host = try .open(path: path, reportDirect: report, reportRelay: reportRelay, reportWake: reportWake) }
+        do {
+            try termination.checkCancellation()
+            host = try .open(path: path, reportDirect: report, reportRelay: reportRelay, reportWake: reportWake)
+        } catch is CancellationError { exit(EX_OK) }
         catch { fail("Transport control requires protected configuration, the dedicated account and the signed release.", code: EX_CONFIG) }
-        let task = Task {
-            do {
+        var failed = false
+        do {
+            try await termination.run {
                 try await host.start()
-                while true { try Task.checkCancellation(); try await host.poll(); try await Task.sleep(for: .milliseconds(250)) }
-            } catch {
-                let failure = error, cleanup = Task { try await host.close() }
-                try await cleanup.value; throw failure
+                while true {
+                    try termination.checkCancellation()
+                    try await host.poll()
+                    try await Task.sleep(for: .milliseconds(250))
+                }
             }
-        }
-        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
-        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        termination.setEventHandler { task.cancel() }; interruption.setEventHandler { task.cancel() }
-        termination.resume(); interruption.resume()
-        defer { termination.cancel(); interruption.cancel() }
-        do { try await task.value }
-        catch is CancellationError { exit(EX_OK) }
-        catch { fail("Transport control is unavailable. Restart requires fresh protected configuration and authority authentication.", code: EX_TEMPFAIL) }
+        } catch is CancellationError {} catch { failed = true }
+        do { try await host.close() }
+        catch { failed = true }
+        if failed { fail("Transport control is unavailable. Restart requires fresh protected configuration and authority authentication.", code: EX_TEMPFAIL) }
+        exit(EX_OK)
     }
 
-    private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?, relayPort: UInt16?, pairing: TransportPairingControlConfiguration?, optionalWakePath: String?) async throws {
-        try Task.checkCancellation()
+    private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?, relayPort: UInt16?, pairing: TransportPairingControlConfiguration?, optionalWakePath: String?, termination: DaemonTermination) async throws {
+        try termination.checkCancellation()
         let recovery: TransportWakeRunner?
         do {
             if let wake { recovery = try TransportWakeRunner(configuration: wake, report: reportWake) }
@@ -98,10 +99,14 @@ struct TransportMain {
             refreshMilliseconds: configuration.refreshMilliseconds, requestDeliveryTimeoutMilliseconds: configuration.timeoutMilliseconds,
             requestRefreshMilliseconds: configuration.refreshMilliseconds)
         do {
+            try termination.checkCancellation()
             try await service.start()
+            try termination.checkCancellation()
             try pairingListener?.start()
+            try termination.checkCancellation()
             if let recovery {
                 do { try await recovery.start() }
+                catch is CancellationError { throw CancellationError() }
                 catch {
                     await recovery.close()
                     log("Wake delivery is unavailable. Direct approvals remain available.")
@@ -109,8 +114,9 @@ struct TransportMain {
             }
             var previous: DirectHostState?
             while true {
-                try Task.checkCancellation()
+                try termination.checkCancellation()
                 let state = await service.state
+                try termination.checkCancellation()
                 if previous != state { report(state); previous = state }
                 try await relay?.update(state)
                 switch state {
