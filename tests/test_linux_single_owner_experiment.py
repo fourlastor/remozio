@@ -28,10 +28,38 @@ EXPERIMENT_DOC = SCRIPT.parents[1] / "docs/experiments/linux-single-owner.md"
 START = b'{"ownerCapabilitiesExact":"yes","generation":"yes","authorityAccepted":"yes"}'
 DISPATCH = (b'{"dispatch":"1","admitted":"yes","permit":"yes","finalCheck":"yes","result":"dispatched",'
             b'"execErrno":"none","requesterLostAfterCheck":"no","goWritten":"yes","killedAtDeadline":"no",'
-            b'"reported":"yes"}')
+            b'"reported":"yes","kSetup":"ok","restartLogComplete":"yes"}')
 PROBE = (b'{"capPrm":"0000000000000000","capEff":"0000000000000000","capInh":"0000000000000000",'
          b'"capAmb":"0000000000000000","capBnd":"000001ffffffffff","noNewPrivs":"0","uid":"1000 1000 1000 1000",'
-         b'"gid":"1000 1000 1000 1000","umask":"0027","nofileSoft":"777","sessionLeader":"yes","dumpable":"1"}\n')
+         b'"gid":"1000 1000 1000 1000","umask":"0027","nofileSoft":"777","sessionLeader":"yes","dumpable":"1",'
+         b'"groups":"1000 27","limits":"' + b",".join([b"inf/inf"] * 16) + b'"}\n')
+
+
+# A /proc/<pid>/limits file captured on Linux 6.17, rebuilt with the kernel's own format
+# ("%-25s %-20s %-20s %-10s\n" in proc_pid_limits(), fs/proc/base.c), so the trailing padding stays.
+LIMITS_ROWS = (
+    ("Max cpu time", "unlimited", "unlimited", "seconds"),
+    ("Max file size", "unlimited", "unlimited", "bytes"),
+    ("Max data size", "unlimited", "unlimited", "bytes"),
+    ("Max stack size", "8388608", "unlimited", "bytes"),
+    ("Max core file size", "0", "unlimited", "bytes"),
+    ("Max resident set", "unlimited", "unlimited", "bytes"),
+    ("Max processes", "247316", "247316", "processes"),
+    ("Max open files", "524288", "524288", "files"),
+    ("Max locked memory", "8388608", "8388608", "bytes"),
+    ("Max address space", "unlimited", "unlimited", "bytes"),
+    ("Max file locks", "unlimited", "unlimited", "locks"),
+    ("Max pending signals", "247316", "247316", "signals"),
+    ("Max msgqueue size", "819200", "819200", "bytes"),
+    ("Max nice priority", "0", "0", ""),
+    ("Max realtime priority", "0", "0", ""),
+    ("Max realtime timeout", "unlimited", "unlimited", "us"),
+)
+LIMITS_SAMPLE = "".join("%-25s %-20s %-20s %-10s\n" % row
+                        for row in (("Limit", "Soft Limit", "Hard Limit", "Units"), *LIMITS_ROWS))
+LIMITS_PARSED = ("inf/inf,inf/inf,inf/inf,8388608/inf,0/inf,inf/inf,247316/247316,524288/524288,"
+                 "8388608/8388608,inf/inf,inf/inf,247316/247316,819200/819200,0/0,0/0,inf/inf")
+LINUX = platform.system() == "Linux"
 
 
 def compiler():
@@ -131,7 +159,7 @@ class CaseTableTests(unittest.TestCase):
     def test_every_case_uses_the_closed_vocabulary(self):
         for case, spec in EXPERIMENT.CASES.items():
             self.assertIn(spec["mode"], EXPERIMENT.MODES, case)
-            self.assertIn(spec["owner"], {"owner", "owner-thread", "owner-nocaps"}, case)
+            self.assertIn(spec["owner"], {"owner", "owner-thread", "owner-nocaps", "owner-lowlimit"}, case)
             for barrier, action in spec["actions"]:
                 self.assertIn(barrier, EXPERIMENT.BARRIERS, case)
                 self.assertIn(action, EXPERIMENT.ACTIONS, case)
@@ -175,8 +203,13 @@ class ReportTests(unittest.TestCase):
                 EXPERIMENT.owner_lines(raw)
 
     def test_probe_checks_publish_booleans_only(self):
-        checks = EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40)
+        limits = ",".join(["inf/inf"] * 16)
+        checks = EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [27, 1000, 27], limits)
         self.assertEqual(checks, {**EXPERIMENT.PROBE_OK, "boundingFull": "yes", "commandDumpable": "1"})
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [1000], limits)["groupsExact"], "no")
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [27, 1000], None)["limitsInherited"], "no")
+        lowered = ",".join(["inf/inf"] * 7 + ["777/1024"] + ["inf/inf"] * 8)
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [27, 1000], lowered)["limitsInherited"], "no")
         changed = PROBE.replace(b'"capAmb":"0000000000000000"', b'"capAmb":"0000000000200000"')
         self.assertEqual(EXPERIMENT.probe_checks(changed, 1000, 1000, 40)["capsEmpty"], "no")
         self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1001, 1000, 40)["uidsExact"], "no")
@@ -184,9 +217,38 @@ class ReportTests(unittest.TestCase):
                          ["umaskInherited"], "no")
         self.assertEqual(set(EXPERIMENT.probe_checks(b"", 1000, 1000, 40).values()), {"not-reported"})
         for raw in (PROBE + PROBE, PROBE.replace(b'"capPrm":"0000000000000000"', b'"capPrm":"zz"'),
-                    PROBE.replace(b'"dumpable":"1"', b'"dumpable":"7"')):
+                    PROBE.replace(b'"dumpable":"1"', b'"dumpable":"7"'),
+                    PROBE.replace(b'"groups":"1000 27"', b'"groups":"wheel"'),
+                    PROBE.replace(b'"limits":"inf/inf,', b'"limits":"')):
             with self.assertRaises(ValueError):
                 EXPERIMENT.probe_checks(raw, 1000, 1000, 40)
+
+    def test_limits_parse_the_kernel_format(self):
+        self.assertEqual(EXPERIMENT.parse_limits(LIMITS_SAMPLE), LIMITS_PARSED)
+        self.assertTrue(EXPERIMENT.limits_cover(LIMITS_PARSED, LIMITS_PARSED))
+        lower = LIMITS_PARSED.replace("524288/524288", "512/512")
+        self.assertFalse(EXPERIMENT.limits_cover(lower, LIMITS_PARSED))
+        self.assertTrue(EXPERIMENT.limits_cover(LIMITS_PARSED, lower))
+        for broken in (LIMITS_SAMPLE.replace("8388608  ", "8388608x "), "\n".join(LIMITS_SAMPLE.splitlines()[:10]),
+                       LIMITS_SAMPLE.replace("Max open files            524288", "Max open files 524288")):
+            with self.assertRaises(ValueError):
+                EXPERIMENT.parse_limits(broken)
+
+    @unittest.skipUnless(LINUX and compiler(), "needs Linux and a C compiler")
+    def test_owner_parses_the_same_limits_as_the_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary, sample = Path(directory) / "owner", Path(directory) / "limits"
+            subprocess.run([compiler(), *EXPERIMENT.CC_FLAGS, "-DRMZSO_LIMITS_SELFTEST", "-o", str(binary),
+                            str(EXPERIMENT.OWNER)], check=True, capture_output=True)
+            sample.write_text(LIMITS_SAMPLE)
+            output = subprocess.run([str(binary), "--parse-limits", str(sample)], capture_output=True, text=True,
+                                    check=True).stdout
+            self.assertEqual(",".join(line.replace(" ", "/") for line in output.splitlines()), LIMITS_PARSED)
+            sample.write_text(LIMITS_SAMPLE.replace("Max open files            524288", "Max open files 524288"))
+            self.assertEqual(subprocess.run([str(binary), "--parse-limits", str(sample)]).returncode, 5)
+            live = subprocess.run([str(binary), "--parse-limits", "/proc/self/limits"], capture_output=True,
+                                  text=True, check=True).stdout
+            self.assertEqual(len(live.splitlines()), 16)
 
     def test_restart_log_allows_no_restart_before_the_go_byte(self):
         clean = EXPERIMENT.restart_log_clean
@@ -318,6 +380,79 @@ class MeasureTests(unittest.TestCase):
                 run.run_case("caller-attaches-to-k", 40)
         self.assertEqual(restored, [1])
 
+    def sysctl_run(self, directory):
+        files = {}
+        for name, value in (("suidDumpable", "2"), ("ptraceScope", "1")):
+            files[name] = Path(directory) / name
+            files[name].write_text(value + "\n")
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.allow_sysctl, run.saved_sysctls, run.timeout, run.attach_enabled = True, {}, 5, False
+        run.paths, run.operator, run.groups = {}, SimpleNamespace(pw_uid=1, pw_gid=1), []
+        return run, files
+
+    def test_sysctls_are_saved_before_any_write_and_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            with patch.dict(EXPERIMENT.SYSCTLS, files):
+                run.enable_attach_sysctls()
+                self.assertEqual(run.saved_sysctls, {"suidDumpable": "2", "ptraceScope": "1"})
+                self.assertEqual({name: path.read_text() for name, path in files.items()},
+                                 {"suidDumpable": "1", "ptraceScope": "0"})
+                self.assertTrue(run.attach_enabled)
+                self.assertTrue(run.restore_sysctls())
+            self.assertEqual({name: path.read_text().strip() for name, path in files.items()},
+                             {"suidDumpable": "2", "ptraceScope": "1"})
+
+    def test_a_missing_sysctl_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            files["ptraceScope"].unlink()
+            with patch.dict(EXPERIMENT.SYSCTLS, files), self.assertRaisesRegex(RuntimeError, "unavailable"):
+                run.enable_attach_sysctls()
+            self.assertEqual(files["suidDumpable"].read_text(), "2\n")
+            self.assertFalse(run.attach_enabled)
+
+    def test_a_partial_write_is_still_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            real_write = Path.write_text
+            def write(path, value, *arguments, **options):
+                if path == files["ptraceScope"] and value == "0":
+                    raise OSError("refused")  # the first write landed, the second did not
+                return real_write(path, value, *arguments, **options)
+            with patch.dict(EXPERIMENT.SYSCTLS, files):
+                with patch.object(Path, "write_text", write), self.assertRaises(OSError):
+                    run.enable_attach_sysctls()
+                self.assertEqual(files["suidDumpable"].read_text(), "1")
+                self.assertTrue(run.restore_sysctls())
+            self.assertEqual({name: path.read_text().strip() for name, path in files.items()},
+                             {"suidDumpable": "2", "ptraceScope": "1"})
+
+    def test_a_failed_restore_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            with patch.dict(EXPERIMENT.SYSCTLS, files):
+                run.enable_attach_sysctls()
+                files["ptraceScope"].unlink()
+                files["ptraceScope"].mkdir()  # the restore cannot write it
+                self.assertFalse(run.restore_sysctls())
+
+    def test_allow_sysctl_runs_the_attach_case_and_restores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            seen = []
+            def drive(case, host, *_arguments):
+                seen.append((case, host.attach_enabled, files["ptraceScope"].read_text()))
+                return {"passed": True}
+            with patch.dict(EXPERIMENT.SYSCTLS, files), patch.object(EXPERIMENT, "drive_case", side_effect=drive):
+                self.assertEqual(run.run_case("caller-attaches-to-k", 40), {"passed": True})
+            self.assertEqual(seen, [("caller-attaches-to-k", True, "0")])
+            self.assertEqual(files["ptraceScope"].read_text().strip(), "1")
+        with linux_root():
+            report = EXPERIMENT.measure(allow_sysctl=True, run_factory=FakeRun)
+        self.assertEqual(report["sysctlCase"], "run")
+        self.assertTrue(FakeRun.instances[0].allow_sysctl)
+
     def test_main_publishes_no_raw_error(self):
         stderr = io.StringIO()
         with patch.object(EXPERIMENT, "measure", side_effect=RuntimeError("/home/someone secret")), \
@@ -328,7 +463,22 @@ class MeasureTests(unittest.TestCase):
         self.assertNotIn("someone", stderr.getvalue())
 
 
-LINUX = platform.system() == "Linux"
+
+
+def wait_for_members(sid, count, timeout=3):
+    deadline = time.monotonic() + timeout
+    members = EXPERIMENT._session_members(sid)
+    while len(members) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+        members = EXPERIMENT._session_members(sid)
+    return members
+
+
+def stop_session(process):
+    if process.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
 
 
 def gone(pid):
@@ -383,8 +533,9 @@ class ProcessHelperTests(unittest.TestCase):
         owner = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True)
         frontend = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True)
         k = subprocess.Popen(["sh", "-c", "sleep 30 & exec sleep 30"], start_new_session=True)
-        time.sleep(0.1)
-        members = EXPERIMENT._session_members(k.pid)
+        for process in (owner, frontend, k):
+            self.addCleanup(stop_session, process)
+        members = wait_for_members(k.pid, 2)
         self.assertGreaterEqual(len(members), 2)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.assertTrue(EXPERIMENT._retire_all(owner, frontend, {"c": 0, "k": k.pid}, [listener]))
@@ -397,10 +548,36 @@ class ProcessHelperTests(unittest.TestCase):
         self.assertTrue(all(gone(pid) for pid in members))
         k.wait()
 
+    def test_retire_all_kills_a_k_stopped_before_its_setsid(self):
+        # K still in O's session, stopped, and not this runner's child: ending O's session ends it.
+        with EXPERIMENT.PL.subreaper():
+            owner = subprocess.Popen(["sh", "-c", "sleep 30 & echo $!; wait"], stdout=subprocess.PIPE,
+                                     start_new_session=True)
+            self.addCleanup(stop_session, owner)
+            k_pid = int(owner.stdout.readline())
+            os.kill(k_pid, signal.SIGSTOP)
+            self.assertEqual(EXPERIMENT._session_members(k_pid), [])  # not a session leader
+            pids = {"c": 0, "k": k_pid, "kfd": os.pidfd_open(k_pid)}
+            self.assertTrue(EXPERIMENT._retire_all(owner, None, pids, []))
+            self.assertTrue(gone(k_pid))
+            self.assertEqual(pids["kfd"], -1)
+
+    def test_retire_all_kills_k_through_its_pidfd(self):
+        # In no session that cleanup ends (here: the test's own), stopped: only the pidfd reaches it.
+        k = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(k.wait)
+        self.addCleanup(lambda: k.poll() is None and k.kill())
+        os.kill(k.pid, signal.SIGSTOP)
+        pids = {"c": 0, "k": k.pid, "kfd": os.pidfd_open(k.pid)}
+        self.assertTrue(EXPERIMENT._retire_all(None, None, pids, []))
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(k.pid, os.WNOHANG)
+
     def test_end_session_kills_every_member(self):
         leader = subprocess.Popen(["sh", "-c", "sleep 30 & exec sleep 30"], start_new_session=True)
-        time.sleep(0.1)
-        members = EXPERIMENT._session_members(leader.pid)
+        self.addCleanup(stop_session, leader)
+        members = wait_for_members(leader.pid, 2)
+        self.assertGreaterEqual(len(members), 2)
         EXPERIMENT._end_session(leader.pid)
         leader.wait(timeout=3)
         deadline = time.monotonic() + 3
@@ -438,10 +615,36 @@ class KillUserTests(unittest.TestCase):
                 (proc / pid / "status").write_text(f"Name:\towner\nUid:\t{uids.replace(' ', chr(9))}\n")
             (proc / "105").mkdir()  # exited: no status file
             (proc / "self").mkdir()
+            (proc / "106").mkdir()  # a name that is not UTF-8
+            (proc / "106" / "status").write_bytes(b"Name:\t\xff\xfeowner\nUid:\t4242\t4242\t4242\t4242\n")
+            killed = []
+            def kill(pid, signo):
+                killed.append((pid, signo))
+                shutil.rmtree(proc / str(pid))  # the process goes away
+            with patch.object(EXPERIMENT.os, "kill", side_effect=kill):
+                self.assertTrue(EXPERIMENT._kill_user(4242, proc, reap=False))
+        self.assertEqual(sorted(killed), [(101, signal.SIGKILL), (102, signal.SIGKILL), (104, signal.SIGKILL),
+                                          (106, signal.SIGKILL)])
+
+    def test_kill_user_reports_a_process_that_does_not_go_away(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / "101").mkdir()
+            (proc / "101" / "status").write_text("Uid:\t4242\t4242\t4242\t4242\n")
             with patch.object(EXPERIMENT.os, "kill") as kill:
-                EXPERIMENT._kill_user(4242, proc)
-        self.assertEqual(sorted(call.args for call in kill.call_args_list),
-                         [(101, signal.SIGKILL), (102, signal.SIGKILL), (104, signal.SIGKILL)])
+                self.assertFalse(EXPERIMENT._kill_user(4242, proc, timeout=0.05, reap=False))
+            self.assertGreaterEqual(kill.call_count, 2)  # it kept trying until the deadline
+
+    @unittest.skipUnless(LINUX, "needs Linux procfs")
+    def test_kill_user_waits_for_and_reaps_a_real_child(self):
+        child = subprocess.Popen(["sleep", "30"])
+        uid = os.getuid()
+        with patch.object(EXPERIMENT, "_user_processes", side_effect=lambda _uid, _proc: (
+                [child.pid] if not gone(child.pid) else [])):
+            self.assertTrue(EXPERIMENT._kill_user(uid))
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
+        child.returncode = -signal.SIGKILL
 
     def test_cleanup_kills_the_service_user_then_removes_files_and_accounts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -461,11 +664,12 @@ class KillUserTests(unittest.TestCase):
             with patch.object(EXPERIMENT.pwd, "getpwnam", side_effect=getpwnam), \
                  patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("absent")), \
                  patch.object(EXPERIMENT.PL, "run_owned", side_effect=run_owned), \
-                 patch.object(EXPERIMENT, "_kill_user") as kill_user:
+                 patch.object(EXPERIMENT, "_kill_user", return_value=True) as kill_user:
                 result = run.cleanup()
             kill_user.assert_called_once_with(4242)
             self.assertEqual(removed, ["userdel"])
-            self.assertEqual(result, {"filesRemoved": True, "serviceUserRemoved": True, "sysctlsRestored": True})
+            self.assertEqual(result, {"filesRemoved": True, "serviceUserRemoved": True, "serviceProcessesGone": True,
+                                      "sysctlsRestored": True})
 
 
 class SetupLimitTests(unittest.TestCase):
@@ -484,6 +688,29 @@ class SetupLimitTests(unittest.TestCase):
                 run.setup()
             self.assertFalse(run.base.exists())
             self.assertIn("65 groups", stderr.getvalue())
+
+    @unittest.skipUnless(LINUX, "needs Linux")
+    def test_run_listeners_bind_private_then_chown_then_open_to_the_group(self):
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.operator, run.service_gid = SimpleNamespace(pw_gid=4100), 4200
+        for method, gid in ((run.listener, 4100), (run.authority_listener, 4200)):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "s.sock"
+                steps = []
+                real_chmod = os.chmod
+                chown = lambda target, uid, group: steps.append(("chown", Path(target).stat().st_mode & 0o777,
+                                                                 uid, group))
+                def chmod(target, mode):
+                    steps.append(("chmod", mode))
+                    real_chmod(target, mode)
+                with patch.object(EXPERIMENT.os, "chown", side_effect=chown), \
+                     patch.object(EXPERIMENT.os, "chmod", side_effect=chmod):
+                    listener = method(path)
+                try:
+                    self.assertEqual(steps, [("chown", 0o600, -1, gid), ("chmod", 0o660)])
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o660)
+                finally:
+                    listener.close()
 
     @unittest.skipUnless(LINUX, "needs Linux")
     def test_frontend_socket_is_group_only(self):
@@ -573,9 +800,13 @@ class FixtureHost(EXPERIMENT.Host):
         self.binaries = binaries
 
     def start_owner(self, binary, arguments, pass_fds):
-        return subprocess.Popen([str(self.binaries[binary]), *arguments], stdin=subprocess.DEVNULL,
+        # owner-nocaps: the measurement build, which wants the three capabilities this account
+        # lacks. owner-lowlimit: the fixture build with RLIMIT_NOFILE below the frontend's.
+        image = {"owner-nocaps": "owner-measure", "owner-lowlimit": "owner"}.get(binary, binary)
+        limits = EXPERIMENT.owner_limits_low if binary == "owner-lowlimit" else None
+        return subprocess.Popen([str(self.binaries[image]), *arguments], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds,
-                                start_new_session=True)
+                                start_new_session=True, preexec_fn=limits)
 
     def start_frontend(self, socket_path):
         return subprocess.Popen([str(self.binaries["frontend"]), str(socket_path)], stdin=subprocess.DEVNULL,
@@ -603,6 +834,9 @@ class FixtureCaseTests(unittest.TestCase):
             subprocess.run([compiler(), *EXPERIMENT.CC_FLAGS, *extra, *EXPERIMENT.FIXTURE_FLAGS[name], "-o",
                             str(output), str(source)], check=True, capture_output=True)
             cls.binaries[name] = output
+        cls.binaries["owner-measure"] = base / "owner-measure"
+        subprocess.run([compiler(), *EXPERIMENT.CC_FLAGS, "-o", str(cls.binaries["owner-measure"]),
+                        str(EXPERIMENT.OWNER)], check=True, capture_output=True)
         for name in ("cases", "markers"):
             (base / name).mkdir()
         cls.paths = {"cases": base / "cases", "markers": base / "markers", "probe": cls.binaries["probe"]}
@@ -616,7 +850,7 @@ class FixtureCaseTests(unittest.TestCase):
         last_cap = int(Path("/proc/sys/kernel/cap_last_cap").read_text())
         with EXPERIMENT.PL.subreaper():
             for case, spec in EXPERIMENT.CASES.items():
-                if spec["rootOnly"]:
+                if spec["rootOnly"] and case != "owner-without-capabilities":
                     continue
                 with self.subTest(case=case):
                     result = EXPERIMENT.drive_case(case, FixtureHost(self.binaries), self.paths, identity, 15,
@@ -641,9 +875,55 @@ class FixtureCaseTests(unittest.TestCase):
         self.assertEqual(processes_mentioning(str(self.paths["markers"] / case)), [])
         self.assertEqual(processes_mentioning(str(self.paths["cases"] / case)), [])
 
-    def test_runner_loss_cases_ran(self):
-        self.assertIn("runner-lost-before-go", EXPERIMENT.CASES)
-        self.assertIn("drop-runner", EXPERIMENT.ACTIONS)
+    def drive(self, case, host):
+        """One case in its own directories, so a test may drive a case that another one also drives."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        paths = {"cases": base / "cases", "markers": base / "markers", "probe": self.binaries["probe"]}
+        for name in ("cases", "markers"):
+            paths[name].mkdir()
+        identity = (os.getuid(), os.getgid(), os.getgroups())
+        with EXPERIMENT.PL.subreaper():
+            return EXPERIMENT.drive_case(case, host, paths, identity, 15, 40)
+
+    def test_runner_loss_cases(self):
+        """Both runner-loss cases: O starts no command once its barrier fails, and exits."""
+        cases = sorted(case for case, spec in EXPERIMENT.CASES.items()
+                       if any(action == "drop-runner" for _barrier, action in spec["actions"]))
+        self.assertEqual(cases, ["runner-lost-after-go", "runner-lost-before-go"])
+        for case in cases:
+            with self.subTest(case=case):
+                result = self.drive(case, FixtureHost(self.binaries))
+                self.assertTrue(result["passed"], json.dumps(result, sort_keys=True))
+                # Before the go byte no command starts; after it, the command that started finishes.
+                self.assertEqual(result["observed"]["markerLines"], "0" if case.endswith("before-go") else "1")
+
+    def test_a_restart_log_write_error_fails_the_case(self):
+        """O cannot write its restart log (a read-only descriptor, then a full device): the report
+        says the log is incomplete, and the case fails even though the command ran."""
+        for device, flags in (("/dev/null", os.O_RDONLY), ("/dev/full", os.O_WRONLY)):
+            class BrokenLogHost(FixtureHost):
+                def start_owner(self, binary, arguments, pass_fds):
+                    broken = os.open(device, flags | os.O_CLOEXEC)
+                    try:
+                        os.dup2(broken, int(arguments[3]), inheritable=False)
+                    finally:
+                        os.close(broken)
+                    return super().start_owner(binary, arguments, pass_fds)
+            with self.subTest(device=device):
+                result = self.drive("dispatch-normal", BrokenLogHost(self.binaries))
+                self.assertFalse(result["passed"])
+                self.assertIn("restartLogComplete", result["mismatches"])
+                self.assertEqual(result["observed"]["restartLogComplete"], "no")
+                self.assertEqual(result["observed"]["restartLogClean"], "n/a")  # an empty log
+                self.assertEqual(result["observed"]["markerLines"], "1")
+                self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+
+    def test_a_limit_above_the_owner_is_a_reported_setup_failure(self):
+        result = self.drive("caller-limit-above-owner", FixtureHost(self.binaries))
+        self.assertTrue(result["passed"], json.dumps(result, sort_keys=True))
+        self.assertEqual((result["observed"]["kSetup"], result["observed"]["result"]), ("limits", "notStarted"))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <grp.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/prctl.h>
@@ -65,11 +66,31 @@ int main(int argc, char **argv) {
     struct rlimit nofile;
     if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) return 6;
     int dumpable = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+    /* Supplementary groups, and every limit as soft/hard (inf for RLIM_INFINITY). */
+    gid_t groups[64];
+    int count = getgroups(64, groups);
+    if (count < 0) return 6;
+    char group_text[64 * 11 + 1] = "", limit_text[16 * 44 + 1] = "";
+    size_t used = 0;
+    for (int i = 0; i < count; i++)
+        used += (size_t)snprintf(group_text + used, sizeof group_text - used, "%s%u", i ? " " : "",
+                                 (unsigned)groups[i]);
+    used = 0;
+    for (int i = 0; i < 16; i++) {
+        struct rlimit limit;
+        if (getrlimit(i, &limit) != 0) return 6;
+        char soft[24], hard[24];
+        if (limit.rlim_cur == RLIM_INFINITY) snprintf(soft, sizeof soft, "inf");
+        else snprintf(soft, sizeof soft, "%llu", (unsigned long long)limit.rlim_cur);
+        if (limit.rlim_max == RLIM_INFINITY) snprintf(hard, sizeof hard, "inf");
+        else snprintf(hard, sizeof hard, "%llu", (unsigned long long)limit.rlim_max);
+        used += (size_t)snprintf(limit_text + used, sizeof limit_text - used, "%s%s/%s", i ? "," : "", soft, hard);
+    }
     printf("{\"capPrm\":\"%s\",\"capEff\":\"%s\",\"capInh\":\"%s\",\"capAmb\":\"%s\",\"capBnd\":\"%s\","
            "\"noNewPrivs\":\"%s\",\"uid\":\"%s\",\"gid\":\"%s\",\"umask\":\"%04o\",\"nofileSoft\":\"%llu\","
-           "\"sessionLeader\":\"%s\",\"dumpable\":\"%d\"}\n",
+           "\"sessionLeader\":\"%s\",\"dumpable\":\"%d\",\"groups\":\"%s\",\"limits\":\"%s\"}\n",
            prm, eff, inh, amb, bnd, nnp, uid, gid, (unsigned)mask, (unsigned long long)nofile.rlim_cur,
-           getsid(0) == getpid() ? "yes" : "no", dumpable);
+           getsid(0) == getpid() ? "yes" : "no", dumpable, group_text, limit_text);
     fflush(stdout);
     if (strcmp(argv[1], "sleep") == 0)
         for (;;) {

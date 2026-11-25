@@ -24,12 +24,21 @@ The fixtures are in `experiments/linux-single-owner/`:
   the go byte to an append-only log. K follows the S3 to S5 steps of the design. O
   reports to the runner on stdout, one JSON line for its start and one for the
   dispatch, with closed-set values only.
+- O logs `GO` only after the go byte reached the pipe. A failed or short log write
+  sets `restartLogComplete` to `no`, and every admitted case then fails: an
+  incomplete log proves nothing about the stop.
+- If K fails a setup step before it reports ready, it writes the step (limits,
+  credentials, capabilities, other) to the status pipe before it exits. O reports
+  it as `kSetup`, so a refused limit is a visible setup failure and not a silent
+  `notStarted`.
 - `frontend.c` is C. It sets umask `027` and a soft `RLIMIT_NOFILE` of 777, sends a
   fixed hello and its three standard descriptors, and blocks until O closes the
   connection.
 - `probe.c` is the command. It appends one line to a marker file and prints its
-  capability sets, `NoNewPrivs:`, IDs, umask, `RLIMIT_NOFILE`, session and dumpable
-  value. The runner reduces these values to booleans.
+  capability sets, `NoNewPrivs:`, IDs, supplementary groups, umask, all 16 limits,
+  session and dumpable value. The runner reduces these values to booleans: the
+  groups must equal the permit's groups, and the limits must equal C's limits as
+  the runner read them at `s1`.
 
 O stops at named barriers and waits for the runner on a control socket: `start`,
 `s1`, `after-fork`, `k-ready`, `before-go`, `after-check`, `after-go`, `k-paused`
@@ -40,7 +49,10 @@ Two build options exist for tests only. `RMZSO_TEST_THREAD` starts a second thre
 in O, so O must refuse before the fork. `RMZSO_FIXTURE_UNPRIVILEGED` (O) and
 `RMZSO_FIXTURE_PTRACER` (C) let the tests run every case as one account, without
 capabilities. Those runs prove the protocol and the evaluation. They do not measure
-the design.
+the design. The tests also start the measurement build of O without capabilities,
+so `owner-without-capabilities` runs without Root too. `RMZSO_LIMITS_SELFTEST` adds
+a mode that parses a saved `/proc/<pid>/limits` file, so a test compares O's parser
+with the runner's on a captured sample.
 
 ## Stub authority
 
@@ -61,10 +73,14 @@ account. It creates a disposable system user `rmzso<tag>` and a directory under
 `/var/lib`, starts O as that user through
 `setpriv --reuid --regid --clear-groups --inh-caps --ambient-caps` with the three
 capabilities (this emulates `AmbientCapabilities=`), and starts C and the
-caller-side faults as the operator account. Cleanup runs in `finally` blocks, also
+caller-side faults as the operator account. Before `setpriv`, Root sets every limit
+of O to its maximum (unlimited, and `RLIMIT_NOFILE` at `fs.nr_open`), as the unit's
+`Limit*=` settings will. O has no `CAP_SYS_RESOURCE`, so K can set a caller limit
+only when O's hard limit is at least as high. Each case records
+`ownerLimitsCoverCaller`. Cleanup runs in `finally` blocks, also
 when a case fails or the operator cancels: it kills every process of the
-disposable user, removes the directory, the user and its group, and restores any
-sysctl that it changed.
+disposable user and waits until none is left, removes the directory, the user and
+its group, and restores any sysctl that it changed.
 
 `--allow-sysctl` runs the attach case. The runner saves `fs.suid_dumpable` and
 `kernel.yama.ptrace_scope`, sets them to 1 and 0, and restores them after the case.
@@ -100,8 +116,9 @@ Without the flag the case reports `not-run` and no sysctl changes.
 | `runner-lost-before-go` | The runner stops answering at `before-go` | O kills K, `notStarted`, no `PTRACE_DETACH`, O exits and C dies with it |
 | `runner-lost-after-go` | The runner stops answering at `after-go` | `dispatched` once, no `PTRACE_DETACH`, O exits and C dies with it |
 | `owner-thread-refused` | O built with a second thread | `ownerThreads` before the fork, marker 0 |
-| `owner-without-capabilities` | O started with no ambient capabilities; Root run only | O refuses at start |
-| `caller-attaches-to-k` | `PTRACE_ATTACH` from the caller to K before and after the go byte; `--allow-sysctl` only | `EPERM` both times |
+| `caller-limit-above-owner` | O's hard `RLIMIT_NOFILE` below the caller's | `ownerLimitsCoverCaller` no, `kSetup` limits, `notStarted`, marker 0 |
+| `owner-without-capabilities` | O started with no ambient capabilities | O refuses at start |
+| `caller-attaches-to-k` | `PTRACE_ATTACH` from the caller to K before and after the go byte; `--allow-sysctl` only | `EPERM` both times, K not dumpable at each attempt |
 
 Every case records O's exit, C's exit, the marker count, the authority's
 `beginDispatch` and outcome, and whether O's restart log shows a restart call
@@ -127,6 +144,19 @@ unit, AppArmor, the `sudo` child and the composed fixture's race case) are PR2.
 - The S6 end-of-file row checks `/proc/<pid>/exe` of K before it accepts "still
   alive" as `dispatched`, as the design now states. Without that check a K that
   dies between the go byte and `execve` could be read as `dispatched`.
+- O's stop check does not take a queued stop report from C. It calls `waitid` with
+  `WNOWAIT`, which shows a pending event and leaves it queued. It takes (reaps) the
+  event only when C has exited. Then it reads `/proc/<pid>/status`: state `t`, O as
+  `TracerPid` and one thread.
+- O also checks that the pidfd from `SO_PEERPIDFD` names the PID from
+  `SO_PEERCRED`, as the protected launch does, and refuses the connection if not.
+- When O reports `dispatched` for a command that is still running, the runner waits
+  until the command ends before it reads the marker.
+- Cleanup kills K through a pidfd that the runner opens when K's PID first reaches
+  it, and also ends O's session. Before its `setsid()` K is still in O's session,
+  so killing only K's own session would miss a K that stops there.
+- O's listening sockets are bound at mode `0600`, given their group, and only then
+  set to `0660`.
 - After the result, O also checks C again. A dispatch that ends without a command
   (`notStarted`) also releases C after S6.
 - The report publishes booleans, categories and errno names only. PIDs, UIDs and

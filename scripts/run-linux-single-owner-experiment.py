@@ -22,6 +22,7 @@ from pathlib import Path
 import platform
 import pwd
 import re
+import resource
 import secrets
 import selectors
 import shutil
@@ -59,6 +60,10 @@ ATTACH_SYSCTLS = {"suidDumpable": "1", "ptraceScope": "0"}
 # Builds: (source, extra flags). The fixture flags make an unprivileged build for the tests.
 BUILDS = {"owner": (OWNER, ()), "owner-thread": (OWNER, ("-DRMZSO_TEST_THREAD", "-pthread")),
           "frontend": (FRONTEND, ()), "probe": (PROBE, ())}
+# O's start variants: owner-nocaps is the owner image with no ambient capabilities, owner-lowlimit the
+# owner image with RLIMIT_NOFILE lowered below the caller's hard limit.
+OWNER_ALIASES = {"owner-nocaps": "owner", "owner-lowlimit": "owner"}
+LOW_NOFILE = 512
 FIXTURE_FLAGS = {"owner": ("-DRMZSO_FIXTURE_UNPRIVILEGED",), "owner-thread": ("-DRMZSO_FIXTURE_UNPRIVILEGED",),
                  "frontend": ("-DRMZSO_FIXTURE_PTRACER",), "probe": ()}
 
@@ -70,7 +75,9 @@ ERRNO = frozenset({"none", "ok", "EPERM", "EACCES", "ENOENT", "ENOEXEC", "ESRCH"
 OWNER_START_KEYS = {"ownerCapabilitiesExact": YES_NO, "generation": YES_NO, "authorityAccepted": YES_NO}
 OWNER_DISPATCH_KEYS = {"dispatch": frozenset({"1"}), "admitted": YES_NO, "permit": YES_NO, "finalCheck": YES_NO,
                        "result": RESULTS, "execErrno": ERRNO, "requesterLostAfterCheck": YES_NO,
-                       "goWritten": YES_NO, "killedAtDeadline": YES_NO, "reported": YES_NO}
+                       "goWritten": YES_NO, "killedAtDeadline": YES_NO | {"failed"}, "reported": YES_NO,
+                       "kSetup": frozenset({"ok", "limits", "credentials", "capabilities", "other", "unknown", NA}),
+                       "restartLogComplete": YES_NO}
 # Every case publishes exactly these keys; NA where the case does not reach the step.
 OBSERVED = {
     **{key: values | {NA} for key, values in OWNER_START_KEYS.items()},
@@ -82,26 +89,32 @@ OBSERVED = {
     "restartLogClean": YES_NO | {NA}, "restartLogDetach": YES_NO | {NA},
     "kExit": frozenset({"reserved", "signaled", "other", "running", "not-observed"}),
     "commandAliveAfterOwner": YES_NO | {NA},
+    # O's hard limits, read at S1, are at least the caller's: K can then set every caller limit.
+    "ownerLimitsCoverCaller": YES_NO | {NA},
     "callerSignal": frozenset({"sent", "failed", NA}),
     "attachBeforeGo": ERRNO | {"not-run", NA}, "attachAfterGo": ERRNO | {"not-run", NA},
+    # K's dumpable flag at each attach: /proc/<k> belongs to Root only while K is not dumpable.
+    # The attach result means something only when K was not dumpable ("0") at every attempt.
+    "kDumpableAtAttach": frozenset({"0", "1", NA}),
     **{key: YES_NO | {"not-reported"} for key in (
         "capsEmpty", "boundingFull", "noNewPrivsClear", "uidsExact", "gidsExact", "umaskInherited",
-        "nofileInherited", "sessionLeader")},
+        "nofileInherited", "limitsInherited", "groupsExact", "sessionLeader")},
     "commandDumpable": frozenset({"0", "1", "not-reported"}),
 }
 # Recorded, never required.
 OBSERVED_ONLY = frozenset({"commandDumpable", "boundingFull"})
 PROBE_KEYS = ("capPrm", "capEff", "capInh", "capAmb", "capBnd", "noNewPrivs", "uid", "gid", "umask",
-              "nofileSoft", "sessionLeader", "dumpable")
+              "nofileSoft", "sessionLeader", "dumpable", "groups", "limits")
 # The frontend fixture sets these before it connects; the command must inherit them.
 FIXTURE_UMASK, FIXTURE_NOFILE = "0027", "777"
 
 PROBE_OK = {"capsEmpty": "yes", "noNewPrivsClear": "yes", "uidsExact": "yes", "gidsExact": "yes",
-            "umaskInherited": "yes", "nofileInherited": "yes", "sessionLeader": "yes"}
+            "umaskInherited": "yes", "nofileInherited": "yes", "limitsInherited": "yes", "groupsExact": "yes",
+            "sessionLeader": "yes"}
 STARTED = {"ownerCapabilitiesExact": "yes", "generation": "yes", "authorityAccepted": "yes"}
 ADMITTED = {**STARTED, "admitted": "yes", "permit": "yes", "finalCheck": "yes", "restartLogClean": "yes",
-            "authorityBegin": "yes"}
-DISPATCHED = {**ADMITTED, "result": "dispatched", "goWritten": "yes", "requesterLostAfterCheck": "no",
+            "restartLogComplete": "yes", "authorityBegin": "yes", "ownerLimitsCoverCaller": "yes"}
+DISPATCHED = {**ADMITTED, "kSetup": "ok", "result": "dispatched", "goWritten": "yes", "requesterLostAfterCheck": "no",
               "killedAtDeadline": "no", "reported": "yes", "authorityOutcome": "dispatched", "markerLines": "1",
               "ownerExit": "ok", "frontendExit": "closed"}
 NOT_STARTED = {**ADMITTED, "result": "notStarted", "goWritten": "no", "reported": "yes",
@@ -184,6 +197,10 @@ CASES = {
     "runner-lost-after-go": _case(actions=[("after-go", "drop-runner")],
                                   expect={**DISPATCHED, "restartLogDetach": "no", "ownerExit": "refused",
                                           "frontendExit": "SIGKILL"}),
+    # The design's limit row: a caller hard limit above O's own. K cannot raise it, reports
+    # the limit step and exits; O reports notStarted. The runner lowers O's RLIMIT_NOFILE.
+    "caller-limit-above-owner": _case(owner="owner-lowlimit",
+                                      expect={**NOT_STARTED, "ownerLimitsCoverCaller": "no", "kSetup": "limits"}),
     "owner-thread-refused": _case(owner="owner-thread",
                                   expect={**ADMITTED, "result": "ownerThreads", "goWritten": "no",
                                           "authorityOutcome": "notStarted", "markerLines": "0", "ownerExit": "ok",
@@ -194,7 +211,8 @@ CASES = {
                                                 "markerLines": "0"}),
     "caller-attaches-to-k": _case("kpause", [("k-ready", "caller-attach-k"), ("k-paused", "caller-attach-k"),
                                              ("k-paused", "kill-k")], sysctl=True, root_only=True,
-                                  expect={**UNKNOWN, "attachBeforeGo": "EPERM", "attachAfterGo": "EPERM"}),
+                                  expect={**UNKNOWN, "attachBeforeGo": "EPERM", "attachAfterGo": "EPERM",
+                                          "kDumpableAtAttach": "0"}),
 }
 MODES = frozenset({"normal", "short", "sleep", "missing", "khang", "kpause"})
 ACTIONS = frozenset({"kill-k", "kill-owner", "kill-authority", "drop-runner", "caller-stop-k", "caller-term-k",
@@ -240,8 +258,11 @@ def _hex_mask(value):
     return int(value, 16)
 
 
-def probe_checks(raw, uid, gid, last_cap):
-    """The command's inherited state, reduced to booleans. raw is b"" when no report came."""
+def probe_checks(raw, uid, gid, last_cap, groups=(), limits=None):
+    """The command's inherited state, reduced to booleans. raw is b"" when no report came.
+
+    groups are the permit's supplementary groups; limits are C's limits as read at S1, in the
+    probe's "soft/hard,..." form, or None when C was never read."""
     if not raw:
         return {key: "not-reported" for key in (*PROBE_OK, "boundingFull", "commandDumpable")}
     lines = [line for line in raw.split(b"\n") if line]
@@ -252,7 +273,10 @@ def probe_checks(raw, uid, gid, last_cap):
         raise ValueError("invalid probe report")
     caps = {key: _hex_mask(report[key]) for key in ("capPrm", "capEff", "capInh", "capAmb", "capBnd")}
     yes = lambda condition: "yes" if condition else "no"
-    if report["dumpable"] not in ("0", "1") or report["sessionLeader"] not in YES_NO:
+    if (report["dumpable"] not in ("0", "1") or report["sessionLeader"] not in YES_NO
+            or not re.fullmatch(r"[0-9]{1,10}( [0-9]{1,10}){0,63}|", report["groups"])
+            or not re.fullmatch(r"(inf|[0-9]{1,20})/(inf|[0-9]{1,20})(,(inf|[0-9]{1,20})/(inf|[0-9]{1,20})){15}",
+                                report["limits"])):
         raise ValueError("invalid probe report")
     return {"capsEmpty": yes(not (caps["capPrm"] or caps["capEff"] or caps["capInh"] or caps["capAmb"])),
             "boundingFull": yes(caps["capBnd"] == (1 << (last_cap + 1)) - 1),
@@ -261,7 +285,37 @@ def probe_checks(raw, uid, gid, last_cap):
             "gidsExact": yes(report["gid"] == " ".join([str(gid)] * 4)),
             "umaskInherited": yes(report["umask"] == FIXTURE_UMASK),
             "nofileInherited": yes(report["nofileSoft"] == FIXTURE_NOFILE),
+            "limitsInherited": yes(limits is not None and report["limits"] == limits),
+            "groupsExact": yes(sorted(int(g) for g in report["groups"].split()) == sorted(set(groups))),
             "sessionLeader": report["sessionLeader"], "commandDumpable": report["dumpable"]}
+
+
+def read_limits(pid):
+    return parse_limits(Path(f"/proc/{pid}/limits").read_text())
+
+
+def parse_limits(text):
+    """A /proc/<pid>/limits file as the probe prints its own limits: "soft/hard" pairs, RLIMIT_* order.
+
+    proc_pid_limits() in fs/proc/base.c prints a header, then "%-25s %-20s %-20s %-10s" per
+    limit: the soft value starts at column 26 and the hard one at 47 (owner.c reads the same)."""
+    lines = text.splitlines()[1:17]
+    if len(lines) != 16:
+        raise ValueError("unexpected limits file")
+    pairs = []
+    for line in lines:
+        soft, hard = line[26:46].strip(), line[47:67].strip()
+        if not all(re.fullmatch(r"unlimited|[0-9]{1,20}", value) for value in (soft, hard)):
+            raise ValueError("unexpected limits line")
+        pairs.append("/".join("inf" if value == "unlimited" else value for value in (soft, hard)))
+    return ",".join(pairs)
+
+
+def limits_cover(owner, caller):
+    """Every hard limit of O is at least the caller's hard limit."""
+    as_number = lambda value: math.inf if value == "inf" else int(value)
+    return all(as_number(o.split("/")[1]) >= as_number(c.split("/")[1])
+               for o, c in zip(owner.split(","), caller.split(",")))
 
 
 def restart_log_clean(raw):
@@ -433,27 +487,27 @@ class Host:
 
     attach_enabled = False
 
-    def listener(self, path):
-        """C's way to O: a stream socket that the caller can reach."""
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+    @staticmethod
+    def _bind(kind, path, gid):
+        """Bind at 0600, give the socket its group, and only then open it to that group (0660)."""
+        listener = socket.socket(socket.AF_UNIX, kind | socket.SOCK_CLOEXEC)
         previous = os.umask(0o177)
         try:
             listener.bind(str(path))
         finally:
             os.umask(previous)
+        if gid is not None:
+            os.chown(path, -1, gid)
         os.chmod(path, 0o660)
         listener.listen(4)
         return listener
 
+    def listener(self, path):
+        """C's way to O."""
+        return self._bind(socket.SOCK_STREAM, path, None)
+
     def authority_listener(self, path):
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC)
-        previous = os.umask(0o177)
-        try:
-            listener.bind(str(path))
-        finally:
-            os.umask(previous)
-        listener.listen(4)
-        return listener
+        return self._bind(socket.SOCK_SEQPACKET, path, None)
 
     def start_owner(self, binary, arguments, pass_fds):
         raise NotImplementedError
@@ -483,7 +537,8 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
         observed.update(attachBeforeGo="not-run", attachAfterGo="not-run")
     deadline = time.monotonic() + timeout
     owner = frontend = None
-    pids = {"c": 0, "k": 0}
+    pids = {"c": 0, "k": 0, "kfd": -1}
+    caller_limits = None
     owner_out, frontend_out = bytearray(), bytearray()
     sockets = []
     error, clean = None, False
@@ -562,8 +617,16 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
                             name = match[1].decode()
                             if int(match[3]):
                                 pids["c"] = int(match[3])
-                            if int(match[4]):
+                            if int(match[4]) and not pids["k"]:
                                 pids["k"] = int(match[4])
+                                # A pidfd lets cleanup kill K directly, also before K's setsid.
+                                with contextlib.suppress(OSError):
+                                    pids["kfd"] = os.pidfd_open(pids["k"])
+                            if name == "s1" and pids["c"]:
+                                with contextlib.suppress(OSError, ValueError):
+                                    caller_limits = read_limits(pids["c"])
+                                    observed["ownerLimitsCoverCaller"] = (
+                                        "yes" if limits_cover(read_limits(owner.pid), caller_limits) else "no")
                             resume = True
                             if any(barrier == name and action == "drop-runner" for barrier, action in spec["actions"]):
                                 # The runner goes away without an answer: O sees end of file on its barrier.
@@ -591,11 +654,18 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
                     if killed_owner:
                         observed["commandAliveAfterOwner"] = "yes" if _alive(pids["k"]) else "no"
                 if killed_owner and pids["k"]:
-                    observed["kExit"] = _reap_k(pids["k"], min(deadline, time.monotonic() + 3))
+                    # A command that outlived O is still running: no wait for its exit.
+                    alive = spec["mode"] == "sleep" and _alive(pids["k"])
+                    observed["kExit"] = "running" if alive else _reap_k(pids["k"], min(deadline, time.monotonic() + 3))
                 if spec["mode"] in ("sleep", "kpause", "khang"):
                     _end_session(pids["k"])
                 while "frontend" in open_streams:
                     _drain(selector, frontend_out, open_streams, deadline)
+                if pids["k"] and spec["mode"] not in ("sleep", "kpause", "khang") and not killed_owner:
+                    # O may report "dispatched" while the command still runs. The marker is
+                    # complete only once the command has ended, so wait for it before cleanup.
+                    if not _reap(pids["k"], deadline):
+                        raise TimeoutError()
             if frontend is not None:
                 frontend.wait(timeout=max(0.1, deadline - time.monotonic()))
         except (TimeoutError, subprocess.TimeoutExpired):
@@ -613,10 +683,11 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
         start, dispatch = owner_lines(bytes(owner_out))
         observed.update(start)
         observed.update(dispatch)
-        observed.update(probe_checks(bytes(frontend_out), identity[0], identity[1], last_cap))
+        observed.update(probe_checks(bytes(frontend_out), identity[0], identity[1], last_cap, identity[2],
+                                     caller_limits))
         log = log_path.read_bytes()
         observed["restartLogClean"] = restart_log_clean(log) if log else NA
-        observed["restartLogDetach"] = ("yes" if log.endswith(b" DETACH\n") else "no") if log else NA
+        observed["restartLogDetach"] = ("yes" if b" DETACH\n" in log else "no") if log else NA
     except (ValueError, UnicodeDecodeError):
         return {"passed": False, "error_type": "InvalidReport", "cleanupReapedAllFixtureProcesses": clean}
     observed["ownerExit"] = _exit_category(owner.returncode, owner=True)
@@ -661,8 +732,6 @@ def _act(action, host, owner, pids, observed, selector, sockets):
         if pids["k"]:
             os.kill(pids["k"], signal.SIGKILL)
         return True
-    if action == "drop-runner":
-        return False  # handled by drive_case, which owns the control socket
     if action == "kill-authority":
         for item in list(sockets):
             if item.family == socket.AF_UNIX and item.type == socket.SOCK_SEQPACKET and item.fileno() >= 0:
@@ -679,6 +748,12 @@ def _act(action, host, owner, pids, observed, selector, sockets):
         return True
     if action == "caller-attach-k":
         key = "attachBeforeGo" if observed["attachBeforeGo"] == NA else "attachAfterGo"
+        try:
+            dumpable = "0" if os.stat(f"/proc/{pids['k']}").st_uid == 0 else "1"
+        except OSError:
+            dumpable = NA
+        if observed["kDumpableAtAttach"] != "1":
+            observed["kDumpableAtAttach"] = dumpable
         observed[key] = host.caller_attach(pids["k"]) if host.attach_enabled else "not-run"
         return True
     raise ValueError("unknown action")
@@ -733,6 +808,12 @@ def _retire_all(owner, frontend, pids, sockets):
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
         if process is owner:
+            # Before its setsid K is still in O's session; after it, it leads its own.
+            if owner is not None:
+                _end_session(owner.pid)
+            if pids.get("kfd", -1) >= 0:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    signal.pidfd_send_signal(pids["kfd"], signal.SIGKILL)
             _end_session(pids["k"])
     for process in (owner, frontend):
         if process is None:
@@ -746,6 +827,9 @@ def _retire_all(owner, frontend, pids, sockets):
     if pids["k"]:
         _end_session(pids["k"])
         clean = _reap(pids["k"], time.monotonic() + 3) and clean
+    if pids.get("kfd", -1) >= 0:
+        os.close(pids["kfd"])
+        pids["kfd"] = -1
     for item in sockets:
         item.close()
     return clean
@@ -817,26 +901,24 @@ class Run(Host):
 
     def listener(self, path):
         """Only the operator's primary group reaches O's socket; C runs with it."""
-        listener = Host.listener(self, path)
-        os.chown(path, 0, self.operator.pw_gid)
-        return listener
+        return self._bind(socket.SOCK_STREAM, path, self.operator.pw_gid)
 
     def authority_listener(self, path):
         """Only O's service group reaches the authority."""
-        listener = Host.authority_listener(self, path)
-        os.chown(path, 0, self.service_gid)
-        os.chmod(path, 0o660)
-        return listener
+        return self._bind(socket.SOCK_SEQPACKET, path, self.service_gid)
 
     def start_owner(self, binary, arguments, pass_fds):
         """setpriv emulates AmbientCapabilities=: O starts with the three capabilities ambient."""
         capabilities = [] if binary == "owner-nocaps" else ["--inh-caps", OWNER_CAPS, "--ambient-caps", OWNER_CAPS]
-        image = self.base / "run" / ("owner" if binary == "owner-nocaps" else binary)
+        image = self.base / "run" / OWNER_ALIASES.get(binary, binary)
+        # Root sets O's limits before setpriv, as the unit's Limit*= settings would: the maximum,
+        # or for owner-lowlimit an RLIMIT_NOFILE below the caller's. The runner is single-threaded.
+        limits = owner_limits_low if binary == "owner-lowlimit" else owner_limits_max
         return subprocess.Popen(
             [self.setpriv, "--reuid", str(self.service_uid), "--regid", str(self.service_gid),
              "--clear-groups", *capabilities, "--", str(image), *arguments],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds,
-            env={}, cwd="/", start_new_session=True)
+            env={}, cwd="/", start_new_session=True, preexec_fn=limits)
 
     def _caller(self):
         return {"user": self.operator.pw_uid, "group": self.operator.pw_gid, "extra_groups": self.groups,
@@ -900,10 +982,14 @@ class Run(Host):
         """Ends every process of the service user, removes files, then the user; restores sysctls.
         Each step runs even when an earlier one fails; only state this run created is touched."""
         sysctls = self.restore_sysctls() if self.saved_sysctls else True
+        gone = True
         if self.service_created:
             with contextlib.suppress(KeyError):
                 uid = pwd.getpwnam(self.service_name).pw_uid
-                PL._attempt(_kill_user, uid)
+                try:
+                    gone = _kill_user(uid)
+                except OSError:
+                    gone = False
         if self.base_created:
             PL._attempt(shutil.rmtree, self.base)
         if self.service_created and not PL._absent(pwd.getpwnam, self.service_name):
@@ -913,25 +999,65 @@ class Run(Host):
         return {"filesRemoved": not self.base.exists(),
                 "serviceUserRemoved": PL._absent(pwd.getpwnam, self.service_name)
                 and PL._absent(grp.getgrnam, self.service_name),
-                "sysctlsRestored": sysctls}
+                "serviceProcessesGone": gone, "sysctlsRestored": sysctls}
 
 
-def _kill_user(uid, proc=Path("/proc")):
-    """SIGKILL every process whose real, effective or saved UID is uid.
+def owner_limits_max():
+    """Every limit at its maximum: unlimited, and RLIMIT_NOFILE at fs.nr_open. Needs Root."""
+    for number in range(16):
+        try:
+            resource.setrlimit(number, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+        except (ValueError, OSError):
+            with contextlib.suppress(ValueError, OSError):
+                top = int(Path("/proc/sys/fs/nr_open").read_text())
+                resource.setrlimit(number, (top, top))
 
-    /proc/<pid> itself belongs to Root for a process that is not dumpable (O after setpriv), so the
-    owner of the directory does not name the account; the Uid: line of the status file does."""
+
+def owner_limits_low():
+    """RLIMIT_NOFILE below the caller's hard limit; the other limits as they are."""
+    soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(soft, LOW_NOFILE), LOW_NOFILE))
+
+
+def _user_processes(uid, proc):
+    found = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            text = (entry / "status").read_text()
+            text = (entry / "status").read_bytes()  # a process name need not be UTF-8
         except OSError:
             continue
-        match = re.search(r"^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)", text, re.MULTILINE)
+        match = re.search(rb"^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)", text, re.MULTILINE)
         if match and uid in (int(match[1]), int(match[2]), int(match[3])):
+            found.append(int(entry.name))
+    return found
+
+
+def _kill_user(uid, proc=Path("/proc"), timeout=3, reap=True):
+    """SIGKILL every process whose real, effective or saved UID is uid, until none is left.
+
+    /proc/<pid> itself belongs to Root for a process that is not dumpable (O after setpriv), so the
+    owner of the directory does not name the account; the Uid: line of the status file does. The
+    runner is a subreaper, so it reaps the killed processes that were reparented to it. Returns
+    True once no such process is left, before the timeout."""
+    deadline = time.monotonic() + timeout
+    while True:
+        found = _user_processes(uid, proc)
+        for pid in found:
             with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(int(entry.name), signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
+        while reap:
+            try:
+                if os.waitpid(-1, os.WNOHANG)[0] == 0:
+                    break
+            except ChildProcessError:
+                break
+        if not found:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
 
 
 def last_capability():

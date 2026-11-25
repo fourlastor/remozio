@@ -37,9 +37,9 @@ into one of those inputs, or back, still requires a cold build. A future build t
 consumes `docs/` must revisit this policy.
 
 The second narrow exemption is the helper's explicit `LINUX_ONLY_INPUT_MODES`
-table of 84 entries: 69 existing files in the Linux approval-command, composed caller-command,
+table: the existing files in the Linux approval-command, composed caller-command,
 OS-capture, pairing-peer, native-TPM/TLS, caller, caller-monitor, storage-lease, placement-validator,
-protected-launch, monitor-confinement, single-owner and TPM/TLS experiments, plus their 15 dedicated Linux
+protected-launch, monitor-confinement, single-owner and TPM/TLS experiments, plus their dedicated Linux
 check/coordinator/runner scripts.
 A repository test requires every entry to be tracked at its recorded mode, so a move
 or deletion fails instead of silently narrowing the table. These exact regular files, at their recorded

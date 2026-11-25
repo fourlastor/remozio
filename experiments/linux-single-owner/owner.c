@@ -17,6 +17,8 @@
  *   RMZSO_FIXTURE_UNPRIVILEGED  run without capabilities as one account: O expects empty
  *                               capability sets and K skips setgroups. Not a measurement.
  *   RMZSO_TEST_THREAD           start a second thread, so O must refuse before the fork.
+ *   RMZSO_LIMITS_SELFTEST       "owner --parse-limits <file>" prints the parsed limits of a
+ *                               saved /proc/<pid>/limits file, for the tests.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -176,11 +178,15 @@ static int random_hex(char *out) {
     return 0;
 }
 
-/* The append-only restart log: every ptrace request and the go byte, with a monotonic time. */
+/* The append-only restart log: every ptrace request and the go byte, with a monotonic time.
+ * A failed or short write makes the log incomplete, and the report says so: an incomplete
+ * log proves nothing about the stop. */
+static int log_failed = 0;
+
 static void log_event(int dispatch, const char *what) {
     char line[128];
     int n = snprintf(line, sizeof line, "%lld %d %s\n", now_ns(), dispatch, what);
-    if (n > 0 && log_fd >= 0 && write(log_fd, line, (size_t)n) != n) { /* the runner sees the gap */ }
+    if (n <= 0 || (size_t)n >= sizeof line || log_fd < 0 || write(log_fd, line, (size_t)n) != n) log_failed = 1;
 }
 
 static long traced(int dispatch, const char *name, enum __ptrace_request request, pid_t pid, long data) {
@@ -277,7 +283,11 @@ static int make_generation(struct generation *g) {
 static int authority_connect(const char *path) {
     int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     struct sockaddr_un address = {.sun_family = AF_UNIX};
-    if (fd < 0 || strlen(path) >= sizeof address.sun_path) return -1;
+    if (fd < 0) return -1;
+    if (strlen(path) >= sizeof address.sun_path) {
+        close(fd);
+        return -1;
+    }
     strcpy(address.sun_path, path);
     if (connect(fd, (struct sockaddr *)&address, sizeof address) != 0) { close(fd); return -1; }
     return fd;
@@ -328,11 +338,19 @@ static int parse_permit(char *reply, struct permit *p) {
 
 /* ---------------------------------------------------------------- the frontend under the stop */
 
-/* C is in O's stop: no pending wait event, procfs state 't' and O as its tracer. */
+/* C is in O's stop: not exited, procfs state 't', one thread and O as its tracer.
+ * waitid with WNOWAIT looks at a pending event without taking it, so a queued stop report
+ * stays queued. Only an exit is taken (reaped), because C is then gone for good. */
 static int in_stop(pid_t pid) {
-    int status;
-    pid_t waited = waitpid(pid, &status, WNOHANG | __WALL);
-    if (waited != 0) return 0;
+    siginfo_t info;
+    memset(&info, 0, sizeof info);
+    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WSTOPPED | WNOHANG | WNOWAIT | __WALL) != 0) return 0;
+    if (info.si_pid == pid && (info.si_code == CLD_EXITED || info.si_code == CLD_KILLED ||
+                               info.si_code == CLD_DUMPED)) {
+        int status;
+        waitpid(pid, &status, WNOHANG | __WALL);
+        return 0;
+    }
     char text[8192];
     char path[64];
     snprintf(path, sizeof path, "/proc/%d/status", (int)pid);
@@ -360,8 +378,24 @@ static int parse_limit(const char *text, rlim_t *out) {
     return 0;
 }
 
-/* The caller's umask and limits, read while C is in O's stop. The kernel prints the
- * limits in RLIMIT_* order, one per line after the header, value columns at 26 and 47. */
+/* Parses /proc/<pid>/limits. proc_pid_limits() in fs/proc/base.c prints a header line,
+ * then one line per limit in RLIMIT_* order (RLIMIT_CPU = 0 ... RLIMIT_RTTIME = 15) with
+ * the format "%-25s %-20s %-20s %-10s\n" (name, soft, hard, units), and "unlimited" for
+ * RLIM_INFINITY. The soft value therefore starts at column 26 and the hard one at 47. */
+static int parse_limits_text(char *text, struct rlimit *limits) {
+    char *line = strchr(text, '\n');
+    for (int i = 0; i < LIMITS; i++) {
+        if (!line) return -1;
+        line++;
+        char *next = strchr(line, '\n');
+        if (!next || next - line < 47 || line[25] != ' ' || line[46] != ' ') return -1;
+        if (parse_limit(line + 26, &limits[i].rlim_cur) || parse_limit(line + 47, &limits[i].rlim_max)) return -1;
+        line = next;
+    }
+    return 0;
+}
+
+/* The caller's umask and limits, read while C is in O's stop. */
 static int read_inherited(pid_t pid, struct inherited *inherited) {
     char path[64], text[8192];
     snprintf(path, sizeof path, "/proc/%d/status", (int)pid);
@@ -371,18 +405,7 @@ static int read_inherited(pid_t pid, struct inherited *inherited) {
     inherited->umask = (mode_t)mask;
     snprintf(path, sizeof path, "/proc/%d/limits", (int)pid);
     if (read_file(AT_FDCWD, path, text, sizeof text) <= 0) return -1;
-    char *line = strchr(text, '\n');
-    for (int i = 0; i < LIMITS; i++) {
-        if (!line) return -1;
-        line++;
-        char *next = strchr(line, '\n');
-        if (!next || next - line < 47) return -1;
-        if (parse_limit(line + 26, &inherited->limits[i].rlim_cur) ||
-            parse_limit(line + 47, &inherited->limits[i].rlim_max))
-            return -1;
-        line = next;
-    }
-    return 0;
+    return parse_limits_text(text, inherited->limits);
 }
 
 /* ---------------------------------------------------------------- K */
@@ -404,48 +427,58 @@ static void k_exit(int status_write, int code, int error) {
     _exit(code);
 }
 
+/* A setup failure before readiness: K writes 'S' and the step, then exits with the reserved
+ * code. O reports the step, so a refused limit is visible and not a silent notStarted. */
+static void k_fail(int status_write, char step, int code) {
+    char record[2] = {'S', step};
+    if (write(status_write, record, sizeof record) != (ssize_t)sizeof record) { /* O sees end of file */ }
+    _exit(code);
+}
+
 /* Runs in K only. Every call here is async-signal-safe. */
 static void run_child(const struct child_plan *plan) {
+    int sw = plan->status_write;
     struct sigaction action;
     memset(&action, 0, sizeof action);
     action.sa_handler = SIG_DFL;
     for (int signo = 1; signo < NSIG; signo++) sigaction(signo, &action, NULL); /* KILL/STOP fail: fine */
     sigset_t empty;
     sigemptyset(&empty);
-    if (sigprocmask(SIG_SETMASK, &empty, NULL) != 0) _exit(K_SETUP_FAILED);
-    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) _exit(K_SETUP_FAILED);
+    if (sigprocmask(SIG_SETMASK, &empty, NULL) != 0) k_fail(sw, 'O', K_SETUP_FAILED);
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) k_fail(sw, 'O', K_SETUP_FAILED);
 
     /* Move the five kept descriptors above every target number, then into place. */
     int kept[6] = {plan->streams[0], plan->streams[1], plan->streams[2], plan->go_read, plan->status_write,
                    plan->cwd};
     int high[6];
     for (int i = 0; i < 6; i++)
-        if ((high[i] = fcntl(kept[i], F_DUPFD_CLOEXEC, 64)) < 0) _exit(K_SETUP_FAILED);
+        if ((high[i] = fcntl(kept[i], F_DUPFD_CLOEXEC, 64)) < 0) k_fail(sw, 'O', K_SETUP_FAILED);
     for (int i = 0; i < 5; i++)
-        if (dup2(high[i], i) != i) _exit(K_SETUP_FAILED);
+        if (dup2(high[i], i) != i) k_fail(sw, 'O', K_SETUP_FAILED);
     int status_write = 4;
-    if (fcntl(3, F_SETFD, FD_CLOEXEC) != 0 || fcntl(4, F_SETFD, FD_CLOEXEC) != 0) _exit(K_SETUP_FAILED);
-    if (fchdir(high[5]) != 0) _exit(K_SETUP_FAILED);
-    if (syscall(SYS_close_range, 5, ~0U, 0) != 0) _exit(K_SETUP_FAILED);
+    sw = 4;
+    if (fcntl(3, F_SETFD, FD_CLOEXEC) != 0 || fcntl(4, F_SETFD, FD_CLOEXEC) != 0) k_fail(sw, 'O', K_SETUP_FAILED);
+    if (fchdir(high[5]) != 0) k_fail(sw, 'O', K_SETUP_FAILED);
+    if (syscall(SYS_close_range, 5, ~0U, 0) != 0) k_fail(sw, 'O', K_SETUP_FAILED);
 
     umask(plan->inherited.umask);
     for (int i = 0; i < LIMITS; i++)
-        if (setrlimit(i, &plan->inherited.limits[i]) != 0) _exit(K_SETUP_FAILED);
-    if (setsid() < 0) _exit(K_SETUP_FAILED);
+        if (setrlimit(i, &plan->inherited.limits[i]) != 0) k_fail(sw, 'L', K_SETUP_FAILED);
+    if (setsid() < 0) k_fail(sw, 'O', K_SETUP_FAILED);
     const struct permit *p = &plan->permit;
 #ifndef RMZSO_FIXTURE_UNPRIVILEGED
-    if (setgroups((size_t)p->group_count, p->groups) != 0) _exit(K_SETUP_FAILED);
+    if (setgroups((size_t)p->group_count, p->groups) != 0) k_fail(sw, 'C', K_SETUP_FAILED);
 #endif
-    if (setresgid(p->gid, p->gid, p->gid) != 0) _exit(K_SETUP_FAILED);
+    if (setresgid(p->gid, p->gid, p->gid) != 0) k_fail(sw, 'C', K_SETUP_FAILED);
     /* The saved UID stays O's until the go byte, so O can end K without CAP_KILL. */
-    if (setresuid(p->uid, p->uid, plan->owner_uid) != 0) _exit(K_SETUP_FAILED);
-    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) _exit(K_SETUP_FAILED);
-    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0 || set_caps(0) != 0) _exit(K_CAPS_NOT_EMPTY);
+    if (setresuid(p->uid, p->uid, plan->owner_uid) != 0) k_fail(sw, 'C', K_SETUP_FAILED);
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) k_fail(sw, 'O', K_SETUP_FAILED);
+    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0 || set_caps(0) != 0) k_fail(sw, 'P', K_CAPS_NOT_EMPTY);
     struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
     struct __user_cap_data_struct data[2];
     if (syscall(SYS_capget, &header, data) != 0 || data[0].permitted || data[1].permitted || data[0].effective ||
         data[1].effective || data[0].inheritable || data[1].inheritable)
-        _exit(K_CAPS_NOT_EMPTY);
+        k_fail(sw, 'P', K_CAPS_NOT_EMPTY);
 
     if (strcmp(p->mode, "khang") == 0)
         for (;;) {
@@ -485,7 +518,8 @@ static void run_child(const struct child_plan *plan) {
 /* ---------------------------------------------------------------- one dispatch */
 
 struct result {
-    const char *admitted, *permit, *final_check, *result, *exec_errno, *lost, *go, *deadline_kill, *reported;
+    const char *admitted, *permit, *final_check, *result, *exec_errno, *lost, *go, *deadline_kill, *reported,
+        *k_setup;
 };
 
 static void report(int dispatch, const struct result *r) {
@@ -493,15 +527,26 @@ static void report(int dispatch, const struct result *r) {
     snprintf(line, sizeof line,
              "{\"dispatch\":\"%d\",\"admitted\":\"%s\",\"permit\":\"%s\",\"finalCheck\":\"%s\",\"result\":\"%s\","
              "\"execErrno\":\"%s\",\"requesterLostAfterCheck\":\"%s\",\"goWritten\":\"%s\","
-             "\"killedAtDeadline\":\"%s\",\"reported\":\"%s\"}",
+             "\"killedAtDeadline\":\"%s\",\"reported\":\"%s\",\"kSetup\":\"%s\",\"restartLogComplete\":\"%s\"}",
              dispatch, r->admitted, r->permit, r->final_check, r->result, r->exec_errno, r->lost, r->go,
-             r->deadline_kill, r->reported);
+             r->deadline_kill, r->reported, r->k_setup, log_failed ? "no" : "yes");
     out_line(line);
 }
 
 static int k_state(pid_t pid, char *state) { return stat_fields(pid, state, NULL); }
 
-static void kill_k(int pidfd) { syscall(SYS_pidfd_send_signal, pidfd, SIGKILL, NULL, 0); }
+/* 0 when the kernel accepted the SIGKILL. Before the go byte a failed kill still starts no
+ * command: O closes the go pipe at the end of the dispatch, and K exits on end of file. */
+static int kill_k(int pidfd) { return (int)syscall(SYS_pidfd_send_signal, pidfd, SIGKILL, NULL, 0); }
+
+/* The PID that a pidfd names, from its fdinfo. */
+static pid_t pidfd_pid(int pidfd) {
+    char path[64], text[1024];
+    unsigned long long value = 0;
+    snprintf(path, sizeof path, "/proc/self/fdinfo/%d", pidfd);
+    if (read_file(AT_FDCWD, path, text, sizeof text) <= 0 || status_u64(text, "Pid:", &value, 10)) return -1;
+    return (pid_t)value;
+}
 
 /* waitid without reaping: 0 alive, 1 exited normally (code), 2 killed or reserved, -1 error. */
 static int k_outcome(int pidfd, int *code) {
@@ -574,7 +619,7 @@ static void close_fd(int *fd) {
  * permit exists, the report goes to the runner, and every descriptor is closed. */
 static void dispatch_one(int dispatch, int listen_fd, int authority, int deadline_ms, const char *command,
                          const char *marker) {
-    struct result r = {"no", "no", "no", "refused", "none", "no", "no", "no", "no"};
+    struct result r = {"no", "no", "no", "refused", "none", "no", "no", "no", "no", "n/a"};
     int conn = -1, c_pidfd = -1, cwd = -1, go_write = -1, status_read = -1, k_pidfd = -1;
     int streams[3] = {-1, -1, -1};
     pid_t c_pid = 0, k_pid = 0;
@@ -600,12 +645,17 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
                       : -1;
     struct cmsghdr *header = got > 0 ? CMSG_FIRSTHDR(&message) : NULL;
     if (header && header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
-        header->cmsg_len == CMSG_LEN(3 * sizeof(int)))
-        memcpy(streams, CMSG_DATA(header), sizeof streams); /* kept so that done: closes them */
+        header->cmsg_len >= CMSG_LEN(0)) {
+        /* Keep every received descriptor (at most three fit), so that done: closes them all. */
+        size_t count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        memcpy(streams, CMSG_DATA(header), (count > 3 ? 3 : count) * sizeof(int));
+    }
     if (got != 7 || streams[2] < 0 || memcmp(hello, "RMZSO1\n", 7) ||
         (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)))
         goto done;
     c_pid = cred.pid;
+    /* The peer pidfd must name the PID that SO_PEERCRED gives, as in the protected launch. */
+    if (c_pidfd < 0 || pidfd_pid(c_pidfd) != c_pid) goto done;
     long options = PTRACE_O_EXITKILL | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK |
                    PTRACE_O_TRACEEXEC;
     int status = 0;
@@ -677,16 +727,25 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
         long long left = deadline - now_ms();
         if (left <= 0) break;
         if (poll(&watch, 1, (int)left) == 1) {
-            char byte;
-            k_ready = read(status_read, &byte, 1) == 1 && byte == 'R';
-            if (!k_ready) break; /* K ended before readiness */
+            char record[2] = {0, 0};
+            ssize_t n = read(status_read, record, 1);
+            k_ready = n == 1 && record[0] == 'R';
+            if (k_ready) {
+                r.k_setup = "ok";
+            } else {
+                /* K ended before readiness: with a setup record, or with none. */
+                r.k_setup = "unknown";
+                if (n == 1 && record[0] == 'S' && read(status_read, record + 1, 1) == 1)
+                    r.k_setup = record[1] == 'L'   ? "limits"
+                                : record[1] == 'C' ? "credentials"
+                                : record[1] == 'P' ? "capabilities"
+                                                   : "other";
+                break;
+            }
         }
     }
     if (!k_ready) {
-        if (now_ms() >= deadline) {
-            kill_k(k_pidfd);
-            r.deadline_kill = "yes";
-        }
+        if (now_ms() >= deadline) r.deadline_kill = kill_k(k_pidfd) == 0 ? "yes" : "failed";
         reached_s6 = 1;
         goto done;
     }
@@ -704,8 +763,7 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
         }
         if (state == 'S') break;
         if (now_ms() >= deadline) {
-            kill_k(k_pidfd);
-            r.deadline_kill = "yes";
+            r.deadline_kill = kill_k(k_pidfd) == 0 ? "yes" : "failed";
             reached_s6 = 1;
             goto done;
         }
@@ -728,8 +786,8 @@ static void dispatch_one(int dispatch, int listen_fd, int authority, int deadlin
         goto done;
     }
     char byte = GO_BYTE;
-    log_event(dispatch, "GO");
     int written = write(go_write, &byte, 1) == 1;
+    if (written) log_event(dispatch, "GO"); /* only a go byte that reached the pipe is logged */
     close_fd(&go_write);
     reached_s6 = 1;
     if (!written) goto done; /* EPIPE: K is gone (SIGPIPE is ignored) */
@@ -769,6 +827,20 @@ static void *idle(void *unused) {
 #endif
 
 int main(int argc, char **argv) {
+#ifdef RMZSO_LIMITS_SELFTEST
+    if (argc == 3 && strcmp(argv[1], "--parse-limits") == 0) {
+        char text[8192];
+        struct rlimit limits[LIMITS];
+        if (read_file(AT_FDCWD, argv[2], text, sizeof text) <= 0 || parse_limits_text(text, limits) != 0) return 5;
+        for (int i = 0; i < LIMITS; i++) {
+            if (limits[i].rlim_cur == RLIM_INFINITY) printf("inf ");
+            else printf("%llu ", (unsigned long long)limits[i].rlim_cur);
+            if (limits[i].rlim_max == RLIM_INFINITY) printf("inf\n");
+            else printf("%llu\n", (unsigned long long)limits[i].rlim_max);
+        }
+        return 0;
+    }
+#endif
     uint32_t listen_fd, control, log, dispatches, deadline_ms;
     if (argc != 9 || parse_u32(argv[1], &listen_fd) || parse_u32(argv[3], &control) || parse_u32(argv[4], &log) ||
         parse_u32(argv[5], &dispatches) || parse_u32(argv[6], &deadline_ms) || dispatches < 1 || dispatches > 4 ||

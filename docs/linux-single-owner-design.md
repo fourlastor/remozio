@@ -345,8 +345,9 @@ and no sysctl change by default. The
 - Kill K before the go byte, and between the go byte and `execve`.
 - A K that hangs before the go byte.
 - A multi-threaded O.
-- The capability sets, `NoNewPrivs:`, the identity, the umask, `RLIMIT_NOFILE`
-  and the session of the command, with O started through `setpriv` with the three
+- A caller hard limit above O's own: K reports the limit step and nothing starts.
+- The capability sets, `NoNewPrivs:`, the identity, the supplementary groups, the
+  umask, every limit and the session of the command, with O started through `setpriv` with the three
   capabilities in its ambient set, as `AmbientCapabilities=` would. The `sudo`
   child is PR2.
 - Attach to K from the caller's account: only with `--allow-sysctl`, which saves
