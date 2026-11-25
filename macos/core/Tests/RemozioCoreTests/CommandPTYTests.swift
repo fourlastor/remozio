@@ -40,6 +40,86 @@ final class CommandPTYTests: XCTestCase {
         }
         XCTAssertEqual((0...2).map { fcntl(Int32($0), F_GETFL) }, before)
     }
+    private func slaveMetadata(_ descriptor: Int32) throws -> stat {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0 else { throw RetainedCommandPTYError.native(errno) }
+        return metadata
+    }
+    private func defaultSlaveMetadata() throws -> stat {
+        let pty = try RetainedCommandPTY()
+        defer { pty.close() }
+        return try pty.withBorrowedSlave { try slaveMetadata($0) }
+    }
+    func testRootTargetKeepsAllocatorOwnershipAndMode() throws {
+        let baseline = try defaultSlaveMetadata()
+        let pty = try RetainedCommandPTY(target: (0, getegid()))
+        defer { pty.close() }
+        let observed = try pty.withBorrowedSlave { try slaveMetadata($0) }
+        XCTAssertEqual(observed.st_uid, baseline.st_uid)
+        XCTAssertEqual(observed.st_gid, baseline.st_gid)
+        XCTAssertEqual(observed.st_mode, baseline.st_mode)
+    }
+    func testNonRootTargetGetsAnOwnerOnlySlave() throws {
+        let uid = geteuid(), gid = getegid()
+        guard uid != 0 else { throw XCTSkip("Requires an ordinary allocator") }
+        let pty = try RetainedCommandPTY(target: (uid, gid))
+        defer { pty.close() }
+        let observed = try pty.withBorrowedSlave { try slaveMetadata($0) }
+        XCTAssertEqual(observed.st_uid, uid)
+        XCTAssertEqual(observed.st_gid, gid)
+        XCTAssertEqual(observed.st_mode & 0o7777, 0o600)
+    }
+    func testDeniedOwnershipReturnsNoPrivateTerminal() throws {
+        let uid = geteuid()
+        guard uid != 0 else { throw XCTSkip("Requires an ordinary allocator") }
+        var handle: OpaquePointer?
+        let status = remozio_command_pty_create_for_target(nil, nil, uid == 1 ? 2 : 1, getegid(), &handle)
+        defer { remozio_command_pty_close(handle) }
+        XCTAssertEqual(status, EPERM)
+        XCTAssertNil(handle)
+    }
+    func testPrivilegedPTYTransfersOwnershipAndTargetCanReopenSlave() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let uidValue = environment["REMOZIO_CREDENTIAL_FIXTURE_UID"]
+        let gidValue = environment["REMOZIO_CREDENTIAL_FIXTURE_GID"]
+        guard uidValue != nil || gidValue != nil else { throw XCTSkip("Requires the privileged credential fixture") }
+        let uid = try XCTUnwrap(uidValue.flatMap { uid_t($0) })
+        let gid = try XCTUnwrap(gidValue.flatMap { gid_t($0) })
+        guard getuid() == 0, geteuid() == 0, uid > 0, gid > 0 else {
+            return XCTFail("The privileged fixture requires a separate target")
+        }
+        let baseline = try defaultSlaveMetadata()
+        XCTAssertEqual(baseline.st_uid, 0)
+        XCTAssertNotEqual(baseline.st_gid, gid)
+        let rootPTY = try RetainedCommandPTY(target: (0, gid))
+        defer { rootPTY.close() }
+        let rootSlave = try rootPTY.withBorrowedSlave { try slaveMetadata($0) }
+        XCTAssertEqual(rootSlave.st_uid, baseline.st_uid)
+        XCTAssertEqual(rootSlave.st_gid, baseline.st_gid)
+        XCTAssertEqual(rootSlave.st_mode, baseline.st_mode)
+
+        let pty = try RetainedCommandPTY(target: (uid, gid))
+        defer { pty.close() }
+        try pty.withBorrowedSlave { descriptor in
+            let original = try slaveMetadata(descriptor)
+            XCTAssertEqual(original.st_uid, uid)
+            XCTAssertEqual(original.st_gid, gid)
+            XCTAssertEqual(original.st_mode & 0o7777, 0o600)
+            var path = [CChar](repeating: 0, count: Int(PATH_MAX))
+            let status = path.withUnsafeMutableBufferPointer { ttyname_r(descriptor, $0.baseAddress!, $0.count) }
+            guard status == 0 else { throw RetainedCommandPTYError.native(status) }
+            try CommandFilesystemCaller(userID: uid, groupID: gid).withIdentity {
+                let reopened = path.withUnsafeBufferPointer { Darwin.open($0.baseAddress!, O_RDWR | O_NOCTTY | O_CLOEXEC) }
+                guard reopened >= 0 else { throw RetainedCommandPTYError.native(errno) }
+                defer { _ = Darwin.close(reopened) }
+                let metadata = try slaveMetadata(reopened)
+                XCTAssertEqual(metadata.st_dev, original.st_dev)
+                XCTAssertEqual(metadata.st_ino, original.st_ino)
+                XCTAssertEqual(metadata.st_rdev, original.st_rdev)
+            }
+        }
+        try CommandFilesystemCaller.requireProcessIdentity()
+    }
     func testForegroundQueryHasNoGroupBeforePrivateSessionOwnershipAndCannotReuseAClosedOwner() throws {
         let pty = try rawPTY()
         let before = (0...2).map { fcntl(Int32($0), F_GETFL) }

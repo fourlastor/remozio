@@ -22,10 +22,26 @@ static int private_descriptor(int descriptor, bool nonblocking) {
     }
     return 0;
 }
-int remozio_command_pty_create(const struct termios *attributes, const struct winsize *size,
-    remozio_command_pty_t **output) {
+static bool same_terminal(const struct stat *first, const struct stat *second) {
+    return S_ISCHR(first->st_mode) && S_ISCHR(second->st_mode) &&
+        first->st_dev == second->st_dev && first->st_ino == second->st_ino && first->st_rdev == second->st_rdev;
+}
+static int set_slave_owner(int descriptor, uid_t uid, gid_t gid) {
+    struct stat original, current;
+    if (fstat(descriptor, &original)) return errno;
+    if (!S_ISCHR(original.st_mode) || !isatty(descriptor)) return ENOTTY;
+    const mode_t owner_only = S_IRUSR | S_IWUSR;
+    if (fchmod(descriptor, owner_only) || fchown(descriptor, uid, gid)) return errno;
+    if (fstat(descriptor, &current)) return errno;
+    if (!same_terminal(&original, &current) || current.st_uid != uid || current.st_gid != gid ||
+        (current.st_mode & ALLPERMS) != owner_only) return ESTALE;
+    return 0;
+}
+int remozio_command_pty_create_for_target(const struct termios *attributes, const struct winsize *size,
+    uid_t uid, gid_t gid, remozio_command_pty_t **output) {
     if (!output) return EINVAL;
     *output = NULL;
+    if (uid == (uid_t)-1 || gid == (gid_t)-1) return EINVAL;
     remozio_command_pty_t *pty = calloc(1, sizeof(*pty));
     if (!pty) return ENOMEM;
     pty->master = pty->slave = -1;
@@ -36,8 +52,13 @@ int remozio_command_pty_create(const struct termios *attributes, const struct wi
     if (openpty(&pty->master, &pty->slave, NULL, attributes ? &copied_attributes : NULL, size ? &copied_size : NULL)) error = errno;
     if (!error) error = private_descriptor(pty->master, true);
     if (!error) error = private_descriptor(pty->slave, false);
+    if (!error && uid != 0) error = set_slave_owner(pty->slave, uid, gid);
     if (error) { remozio_command_pty_close(pty); return error; }
     *output = pty; return 0;
+}
+int remozio_command_pty_create(const struct termios *attributes, const struct winsize *size,
+    remozio_command_pty_t **output) {
+    return remozio_command_pty_create_for_target(attributes, size, 0, 0, output);
 }
 int remozio_command_pty_borrow_slave(remozio_command_pty_t *pty, int *descriptor) {
     if (!pty || !descriptor) return EINVAL;
@@ -103,10 +124,6 @@ int remozio_command_pty_eof_sequence(remozio_command_pty_t *pty, unsigned char b
     return 0;
 }
 
-static bool same_terminal(const struct stat *first, const struct stat *second) {
-    return S_ISCHR(first->st_mode) && S_ISCHR(second->st_mode) &&
-        first->st_dev == second->st_dev && first->st_ino == second->st_ino && first->st_rdev == second->st_rdev;
-}
 int remozio_command_pty_copy_stream(remozio_command_pty_t *pty, uint32_t access, uint32_t semantic_flags, int *output) {
     if (!output) return EINVAL;
     *output = -1;

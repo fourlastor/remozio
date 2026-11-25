@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <termios.h>
 
 #define REMOZIO_PTY_MAX_CHUNK 65536
@@ -11,6 +12,9 @@ typedef struct remozio_command_pty remozio_command_pty_t;
 /* Creates only a private terminal. No caller, child, execution or control permission is established. */
 int remozio_command_pty_create(const struct termios * _Nullable attributes, const struct winsize * _Nullable size,
     remozio_command_pty_t * _Nullable * _Nonnull output);
+/* For a checked non-Root target, set ownership and 0600 on the fresh slave before returning it. */
+int remozio_command_pty_create_for_target(const struct termios * _Nullable attributes, const struct winsize * _Nullable size,
+    uid_t uid, gid_t gid, remozio_command_pty_t * _Nullable * _Nonnull output);
 /* Borrow the slave only for spawning the bound child; never close or retain this descriptor. */
 int remozio_command_pty_borrow_slave(remozio_command_pty_t * _Nonnull pty, int * _Nonnull descriptor);
 /* Own a separate description of this private slave. Access tags are read 0,

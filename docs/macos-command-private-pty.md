@@ -22,6 +22,10 @@ The product frontend and installed service still need integration.
 
 Both descriptors have close-on-exec protection. Only the private master has nonblocking status.
 The child retains blocking slave streams. Original stdin, stdout and stderr flags remain unchanged.
+Before spawn, the controller gives the verified non-Root target ownership of the fresh slave and sets mode `0600`.
+That mode is stricter than the usual login terminal mode `0620`, which grants the `tty` group write permission.
+Group-based delivery from `write` and `wall` cannot reach this private terminal.
+Root targets keep the system's default ownership and mode.
 The controller borrows the slave while spawning, then seals its own slave descriptor.
 The actual child owns separate copies; retaining a parent copy would hide stream EOF.
 
