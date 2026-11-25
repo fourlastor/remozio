@@ -45,6 +45,9 @@ public final class ContinuityStore {
             _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
             _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, 8192)
             try exec("PRAGMA trusted_schema=OFF")
+            guard try scalar(SQLiteSchemaCatalog.containsUnsupportedObjectsSQL) == 0 else {
+                throw ContinuityStoreError.incompatibleStore
+            }
             if initialize != nil {
                 try requireEmptyStore()
             } else {
