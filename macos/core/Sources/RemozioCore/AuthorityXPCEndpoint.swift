@@ -25,8 +25,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let invalidate: () -> Void
     private let onHandshake: @Sendable () -> Void
     private var pairingProofs: AuthorityPairingProofLinks?
-    private let pairingProofBootstrap = UUID()
-    private let proofBootstrapLifetime = ChannelCancellation()
+    private let pairingProofBootstrap = AuthorityPairingProofBootstrap()
     private let verifyProofPeer: (() throws -> XPCPeerCredentials)?
     private let snapshot: @Sendable () throws -> DirectApprovalTrust
     private let validate: @Sendable (AuthorityPeerBinding) throws -> Bool
@@ -125,7 +124,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
         self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting; self.updateSchedulingExchange = phoneUpdateScheduling
     }
     deinit {
-        proofBootstrapLifetime.cancel()
+        pairingProofBootstrap.close()
         pairingProofs?.retire(bootstrap: pairingProofBootstrap)
     }
 
@@ -142,7 +141,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             guard !closed else { return false }
             closed = true
             ready = false
-            proofBootstrapLifetime.cancel()
+            pairingProofBootstrap.close()
             if pairingLookupAdmitted {
                 pairingLookupAdmitted = false
                 pairingLookupBudget?.release()
@@ -160,9 +159,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             let completed = try work {
                 guard let pairingProofs, let verifyProofPeer else { return (UInt64(0), nil as NSXPCListenerEndpoint?) }
                 let peer = try verifyProofPeer()
-                let endpoint = try? pairingProofs.offer(bootstrap: pairingProofBootstrap, peer: peer) { [proofBootstrapLifetime] in
-                    proofBootstrapLifetime.ifActive({})
-                }
+                let endpoint = try? pairingProofs.offer(bootstrap: pairingProofBootstrap, peer: peer)
                 return (UInt64(1), endpoint)
             }
             defer { completed.activity?.close() }

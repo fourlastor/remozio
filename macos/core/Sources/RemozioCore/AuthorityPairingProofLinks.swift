@@ -1,6 +1,9 @@
 import Foundation
+import Synchronization
 
 enum AuthorityPairingProofWire {
+    static let handoffVersion: UInt64 = 3
+
     static func bytes(_ id: UUID) -> Data { withUnsafeBytes(of: id.uuid) { Data($0) } }
 
     static func identifier(_ data: Data) throws -> UUID {
@@ -14,11 +17,48 @@ enum AuthorityPairingProofWire {
     /// Each link can complete hello once. A repeated hello retires the link.
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
     func bindWindow(_ windowID: Data, reply: @escaping @Sendable (Bool) -> Void)
+    func finishBootstrap(reply: @escaping @Sendable (Bool) -> Void)
     func registerCandidate(_ connectionID: Data, acceptedAt: UInt64, peerPoint: Data, exporter: Data,
                            reply: @escaping @Sendable (Data?, Data?) -> Void)
     func verifyCandidate(_ candidateID: Data, proposal: Data, tag: Data, reply: @escaping @Sendable (Bool) -> Void)
     func confirmCandidate(_ candidateID: Data, reply: @escaping @Sendable (Bool) -> Void)
     func retireCandidate(_ candidateID: Data, reply: @escaping @Sendable (Bool) -> Void)
+}
+
+/// Serialize bootstrap closure against the transfer of one exact offer.
+final class AuthorityPairingProofBootstrap: Sendable {
+    private enum State { case open, closed, handedOff(UUID) }
+    private let state = Mutex(State.open)
+
+    var acceptsOffer: Bool {
+        state.withLock { if case .open = $0 { return true }; return false }
+    }
+
+    func permits(_ offer: UUID) -> Bool {
+        state.withLock {
+            switch $0 {
+            case .open: return true
+            case .closed: return false
+            case .handedOff(let id): return id == offer
+            }
+        }
+    }
+
+    func transferred(_ offer: UUID) -> Bool {
+        state.withLock { if case .handedOff(let id) = $0 { return id == offer }; return false }
+    }
+
+    func transfer(_ offer: UUID) -> Bool {
+        state.withLock {
+            guard case .open = $0 else { return false }
+            $0 = .handedOff(offer)
+            return true
+        }
+    }
+
+    func close() {
+        state.withLock { if case .open = $0 { $0 = .closed } }
+    }
 }
 
 /// A single Transport link outside the general Authority connection registry.
@@ -27,9 +67,8 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
 
     private struct Offer {
         let id: UUID
-        let bootstrap: UUID
+        let bootstrap: AuthorityPairingProofBootstrap
         let peer: XPCPeerCredentials
-        let parentActive: @Sendable () -> Bool
         let listener: NSXPCListener
         let expires: ContinuousClock.Instant
         let timer: Task<Void, Never>
@@ -76,12 +115,11 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
 
     deinit { close() }
 
-    func offer(bootstrap: UUID, peer: XPCPeerCredentials,
-               parentActive: @escaping @Sendable () -> Bool) throws -> NSXPCListenerEndpoint {
+    func offer(bootstrap: AuthorityPairingProofBootstrap, peer: XPCPeerCredentials) throws -> NSXPCListenerEndpoint {
         _ = try policy.credentials(processID: peer.processID, userID: peer.userID, auditSessionID: peer.auditSessionID)
         try verifyCurrent()
         return try lock.withLock {
-            guard !closed, slot == nil, parentActive() else { throw AuthorityXPCEndpointError.unavailable }
+            guard !closed, slot == nil, bootstrap.acceptsOffer else { throw AuthorityXPCEndpointError.unavailable }
             let listener = NSXPCListener.anonymous()
             let id = UUID(), expires = ContinuousClock.now.advanced(by: timeout)
             configureListener(listener)
@@ -91,13 +129,13 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
                 self?.retire(id: id, onlyPending: true)
             }
             let proofLink = AuthorityPairingProofLink(verifyPolicy: { [verifyCurrent] in
-                guard parentActive() else { throw AuthorityXPCEndpointError.unavailable }
+                guard bootstrap.permits(id) else { throw AuthorityXPCEndpointError.unavailable }
                 try verifyCurrent()
             }, validatePolicy: { [validateTransport] transaction in
-                guard parentActive() else { throw AuthorityXPCEndpointError.unavailable }
+                guard bootstrap.permits(id) else { throw AuthorityXPCEndpointError.unavailable }
                 try validateTransport(transaction)
             })
-            slot = Offer(id: id, bootstrap: bootstrap, peer: peer, parentActive: parentActive, listener: listener,
+            slot = Offer(id: id, bootstrap: bootstrap, peer: peer, listener: listener,
                          expires: expires, timer: timer, proofLink: proofLink)
             listener.activate()
             return listener.endpoint
@@ -107,7 +145,7 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         lock.withLock {
             guard !closed, let current = slot, current.listener === listener, current.connection == nil, !current.retiring,
-                  ContinuousClock.now < current.expires, current.parentActive(),
+                  ContinuousClock.now < current.expires, current.bootstrap.permits(current.id),
                   (try? policy.verifyCredentials(connection)) == current.peer else { return false }
             let id = current.id
             let invocation = XPCInvocationGuard(connection: connection, policy: policy)
@@ -131,19 +169,20 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
     private func acceptHello(id: UUID, reply: @Sendable (UInt64) -> Void) throws {
         try verifyCurrent()
         try lock.withLock {
-            guard !closed, let current = slot, current.id == id, !current.ready, !current.retiring, current.parentActive(),
+            guard !closed, let current = slot, current.id == id, !current.ready, !current.retiring, current.bootstrap.permits(current.id),
                   ContinuousClock.now < current.expires else { throw AuthorityXPCEndpointError.unavailable }
             slot?.ready = true
-            current.timer.cancel()
-            reply(bindReservations == nil ? 1 : 2)
+            if bindReservations == nil { current.timer.cancel() }
+            reply(bindReservations == nil ? 1 : AuthorityPairingProofWire.handoffVersion)
         }
     }
 
     private func perform<Value>(id: UUID, binding: Bool = false, _ operation: (Offer) throws -> Value) throws -> Value {
         let current = try lock.withLock {
             guard !closed, let current = slot, current.id == id, current.ready, !current.retiring,
-                  current.parentActive(), current.activeWork < 8,
-                  binding ? current.reservations == nil && current.activeWork == 0 : current.reservations != nil else {
+                  current.bootstrap.permits(current.id), current.activeWork < 8,
+                  binding ? current.reservations == nil && current.activeWork == 0 && ContinuousClock.now < current.expires
+                          : current.reservations != nil && current.bootstrap.transferred(id) else {
                 throw AuthorityXPCEndpointError.unavailable
             }
             slot?.activeWork += 1
@@ -179,6 +218,16 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         }
     }
 
+    private func finishBootstrap(id: UUID) throws {
+        try verifyCurrent()
+        try lock.withLock {
+            guard !closed, let current = slot, current.id == id, current.ready, !current.retiring,
+                  current.reservations != nil, current.activeWork == 0, ContinuousClock.now < current.expires,
+                  current.bootstrap.transfer(id) else { throw AuthorityXPCEndpointError.unavailable }
+            current.timer.cancel()
+        }
+    }
+
     private func withReservations<Value>(id: UUID, _ operation: (AuthorityPairingProofReservations) throws -> Value) throws -> Value {
         try perform(id: id) { current in
             guard let reservations = current.reservations else { throw AuthorityXPCEndpointError.unavailable }
@@ -193,12 +242,17 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
         }
     }
 
-    func retire(bootstrap: UUID) {
-        clear { $0.bootstrap == bootstrap }
+    func retire(bootstrap: AuthorityPairingProofBootstrap) {
+        bootstrap.close()
+        clear { $0.bootstrap === bootstrap && !bootstrap.transferred($0.id) }
     }
 
     private func retire(id: UUID, onlyPending: Bool = false) {
-        clear { $0.id == id && (!onlyPending || !$0.ready) }
+        clear { offer in
+            guard offer.id == id else { return false }
+            if !onlyPending { return true }
+            return bindReservations == nil ? !offer.ready : !offer.bootstrap.transferred(id)
+        }
     }
 
     func close() {
@@ -248,6 +302,11 @@ final class AuthorityPairingProofLinks: NSObject, NSXPCListenerDelegate, @unchec
 
         func bindWindow(_ windowID: Data, reply: @escaping @Sendable (Bool) -> Void) {
             do { try checkedOwner().bindWindow(id: id, windowID: windowID); reply(true) }
+            catch { reply(false) }
+        }
+
+        func finishBootstrap(reply: @escaping @Sendable (Bool) -> Void) {
+            do { try checkedOwner().finishBootstrap(id: id); reply(true) }
             catch { reply(false) }
         }
 

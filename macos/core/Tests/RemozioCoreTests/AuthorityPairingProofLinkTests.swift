@@ -206,12 +206,14 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let connection = proofConnection(to: endpoint, requirement: fixture.requirement)
         defer { connection.invalidate() }
         let version = await hello(on: connection)
-        XCTAssertEqual(version, 2)
+        XCTAssertEqual(version, AuthorityPairingProofWire.handoffVersion)
 
         let bound: Bool = await proofExchange(on: connection, fallback: false) {
             $0.bindWindow(full.windowID, reply: $1)
         }
         XCTAssertTrue(bound)
+        let transferred = await proofExchange(on: connection, fallback: false) { $0.finishBootstrap(reply: $1) }
+        XCTAssertTrue(transferred)
 
         func key(_ id: UInt8) throws -> PairingKey {
             try PairingKey(keyID: Data(repeating: id, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
@@ -280,11 +282,13 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let client = proofConnection(to: try XCTUnwrap(offered.1), requirement: fixture.requirement)
         defer { client.invalidate() }
         let version = await hello(on: client)
-        XCTAssertEqual(version, 2)
+        XCTAssertEqual(version, AuthorityPairingProofWire.handoffVersion)
         let bound = await proofExchange(on: client, fallback: false) {
             $0.bindWindow(full.windowID, reply: $1)
         }
         XCTAssertTrue(bound)
+        let transferred = await proofExchange(on: client, fallback: false) { $0.finishBootstrap(reply: $1) }
+        XCTAssertTrue(transferred)
 
         let exporter = Data(repeating: 9, count: 32), proposal = try f.proposal.encode()
         let registration: (Data?, Data?) = await proofExchange(on: client, fallback: (nil, nil)) { proxy, reply in
@@ -391,6 +395,9 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let port = try await owner.beginV2(.init(id: full.windowID, invitation: invitation, replacement: nil,
             lifetimeMilliseconds: full.lifetimeMilliseconds), identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport),
             authorityConfiguration: approval)
+        let bootstrapClosed = try await waitFor { fixture.events.closedBootstrapLinks.withLock { $0 } == 1 }
+        XCTAssertTrue(bootstrapClosed)
+        XCTAssertEqual(closeCount.withLock { $0 }, 0)
         let reservations = try XCTUnwrap(bound.withLock { $0 })
         let acceptedAt = try clock.now().milliseconds
         let nextPeer = P256.Signing.PrivateKey().publicKey.x963Representation
@@ -645,33 +652,106 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(freshVersion, 1)
     }
 
-    func testClosingBootstrapRetiresReadyProofLink() async throws {
-        let fixture = try Fixture()
-        let parent = try await bootstrap(fixture)
-        let another = try await bootstrap(fixture)
-        defer { parent.invalidate(); another.invalidate() }
-        let offered = await offer(on: parent)
-        let client = proofConnection(to: try XCTUnwrap(offered.1), requirement: fixture.requirement)
-        defer { client.invalidate() }
+    private struct HandoffFixture {
+        let native: Fixture
+        let window: AuthorityPairingV2Window
+        let full: PairingInvitationV2
+        let proposal: PairingPhoneProposal
+        let now = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+
+        init() throws {
+            let f = try TransportPairingFixture(), owner = UUID()
+            let full = try PairingInvitationV2(invitation: f.invitation, windowID: Data(repeating: 5, count: 16),
+                secret: Data(repeating: 6, count: 32), lifetimeMilliseconds: 5_000)
+            let time = now
+            let window = try AuthorityPairingV2Window(invitation: full, predecessor: nil, started: time, authorityOwner: owner)
+            native = try Fixture(bindReservations: { id, link in
+                guard id == full.windowID else { throw FixtureError.retiredRole }
+                return try .init(window: window, authorityOwner: owner, link: link, now: { time },
+                    makeChallenge: { Data(repeating: 7, count: 32) }, verifyWindow: {})
+            })
+            self.window = window; self.full = full; proposal = f.proposal
+        }
+    }
+
+    private func boundProofLink(_ fixture: HandoffFixture, on bootstrap: NSXPCConnection) async throws -> NSXPCConnection {
+        let offered = await offer(on: bootstrap)
+        let client = proofConnection(to: try XCTUnwrap(offered.1), requirement: fixture.native.requirement)
         let version = await hello(on: client)
-        XCTAssertEqual(version, 1)
+        XCTAssertEqual(version, AuthorityPairingProofWire.handoffVersion)
+        let premature = await proofExchange(on: client, fallback: true) { $0.finishBootstrap(reply: $1) }
+        XCTAssertFalse(premature)
+        let bound = await proofExchange(on: client, fallback: false) {
+            $0.bindWindow(fixture.full.windowID, reply: $1)
+        }
+        XCTAssertTrue(bound)
+        return client
+    }
+
+    private func register(on link: NSXPCConnection, fixture: HandoffFixture, exporter: Data) async -> (Data?, Data?) {
+        await proofExchange(on: link, fallback: (nil, nil)) { proxy, reply in
+            proxy.registerCandidate(AuthorityPairingProofWire.bytes(UUID()), acceptedAt: fixture.now.milliseconds,
+                peerPoint: fixture.proposal.transportKey.publicKey, exporter: exporter) { reply(($0, $1)) }
+        }
+    }
+
+    func testClosingBootstrapBeforeHandoffRetiresTheBoundProofLink() async throws {
+        let fixture = try HandoffFixture()
+        let parent = try await bootstrap(fixture.native)
+        let spare = try await bootstrap(fixture.native)
+        defer { parent.invalidate(); spare.invalidate() }
+        let client = try await boundProofLink(fixture, on: parent)
+        defer { client.invalidate() }
+        let attempted = await register(on: client, fixture: fixture, exporter: Data(repeating: 8, count: 32))
+        XCTAssertNil(attempted.0)
 
         parent.invalidate()
-        let serverClosed = try await waitFor { fixture.events.closedBootstrapLinks.withLock { $0 } == 1 }
-        XCTAssertTrue(serverClosed)
-        let next = try await waitForOffer(on: another)
-        let staleReplied: Bool = await exchange(fallback: true) { reply in
-            guard let proxy = client.remoteObjectProxyWithErrorHandler({ _ in reply(false) }) as? any AuthorityPairingProofXPCProtocol else {
-                reply(false)
-                return
-            }
-            proxy.hello { _ in reply(true) }
+        let retired = try await waitFor { fixture.native.events.closedBootstrapLinks.withLock { $0 } == 1 }
+        XCTAssertTrue(retired)
+        _ = try await waitForOffer(on: spare)
+        let transferred = await proofExchange(on: client, fallback: false) { $0.finishBootstrap(reply: $1) }
+        XCTAssertFalse(transferred)
+        XCTAssertThrowsError(try fixture.window.export(at: fixture.now))
+    }
+
+    func testHandoffFreesAGeneralSlotAndPreservesProofAndPolicyChecks() async throws {
+        let fixture = try HandoffFixture()
+        var ordinary: [NSXPCConnection] = []
+        defer { ordinary.forEach { $0.invalidate() } }
+        for _ in 0..<7 { ordinary.append(try await bootstrap(fixture.native)) }
+        let parent = try await bootstrap(fixture.native)
+        defer { parent.invalidate() }
+        XCTAssertNil(fixture.native.registry.reserve())
+        let client = try await boundProofLink(fixture, on: parent)
+        defer { client.invalidate() }
+        let transferred = await proofExchange(on: client, fallback: false) { $0.finishBootstrap(reply: $1) }
+        XCTAssertTrue(transferred)
+        parent.invalidate()
+        let freed = try await waitFor { fixture.native.events.closedBootstrapLinks.withLock { $0 } == 1 }
+        XCTAssertTrue(freed)
+        ordinary.append(try await bootstrap(fixture.native))
+        XCTAssertNil(fixture.native.registry.reserve())
+
+        let exporter = Data(repeating: 9, count: 32)
+        let registration = await register(on: client, fixture: fixture, exporter: exporter)
+        let candidate = try XCTUnwrap(registration.0), challenge = try XCTUnwrap(registration.1)
+        let proposal = try fixture.proposal.encode()
+        let tag = try fixture.full.proof(proposal: fixture.proposal, challenge: challenge, exporter: exporter)
+        fixture.native.events.roleCurrent.withLock { $0 = false }
+        let refused = await proofExchange(on: client, fallback: true) {
+            $0.verifyCandidate(candidate, proposal: proposal, tag: tag, reply: $1)
         }
-        XCTAssertFalse(staleReplied)
-        let replacement = proofConnection(to: next, requirement: fixture.requirement)
-        defer { replacement.invalidate() }
-        let replacementVersion = await hello(on: replacement)
-        XCTAssertEqual(replacementVersion, 1)
+        XCTAssertFalse(refused)
+        fixture.native.events.roleCurrent.withLock { $0 = true }
+        let verified = await proofExchange(on: client, fallback: false) {
+            $0.verifyCandidate(candidate, proposal: proposal, tag: tag, reply: $1)
+        }
+        XCTAssertTrue(verified)
+        let confirmed = await proofExchange(on: client, fallback: false) { $0.confirmCandidate(candidate, reply: $1) }
+        XCTAssertTrue(confirmed)
+        let selected = try fixture.window.takeProposal(connection: AuthorityPairingProofWire.identifier(candidate),
+            matching: proposal, at: fixture.now)
+        XCTAssertEqual(try selected.encode(), proposal)
     }
 
     func testClosingBootstrapBeforeConnectRefusesTheOfferedEndpoint() async throws {

@@ -3,6 +3,7 @@ import Synchronization
 
 /// A native proof link. Registration and unproved cleanup can expire independently of the link.
 final class AuthorityPairingProofClient: @unchecked Sendable {
+    private enum Opening { case opening, independent, closed }
     private enum Reply: Sendable {
         case version(UInt64)
         case allowed(Bool)
@@ -48,25 +49,35 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
                      bootstrap makeBootstrap: (ApprovalTransportConfiguration, @escaping @Sendable () -> Void) throws -> Bootstrap)
         async throws -> AuthorityPairingProofClient {
         guard windowID.count == 16 else { throw AuthorityXPCError.invalidMessage }
-        let notified = Mutex(false)
-        let ended: @Sendable () -> Void = {
-            let first = notified.withLock { value in
-                guard !value else { return false }
-                value = true
+        let opening = Mutex(Opening.opening)
+        let peer = try makeBootstrap(configuration, {
+            let first = opening.withLock { state in
+                guard state == .opening else { return false }
+                state = .closed
                 return true
             }
             if first { onClose() }
-        }
-        let peer = try makeBootstrap(configuration, ended)
+        })
         let bootstrap = peer.channel
         do {
             try await bootstrap.start()
             guard let endpoint = try await bootstrap.openPairingProof() else { throw AuthorityXPCError.failed }
             let client = AuthorityPairingProofClient(endpoint: endpoint, peerPolicy: peer.policy, onClose: {
-                Task { await bootstrap.close() }
-                ended()
+                let first = opening.withLock { state in
+                    guard state != .closed else { return false }
+                    state = .closed
+                    return true
+                }
+                if first { onClose() }
             }, configure: peer.configure)
             try await client.start(windowID: windowID)
+            let handedOff = opening.withLock { state in
+                guard state == .opening else { return false }
+                state = .independent
+                return true
+            }
+            guard handedOff else { client.close(); throw AuthorityXPCError.closed }
+            await bootstrap.close()
             return client
         } catch {
             await bootstrap.close()
@@ -83,7 +94,7 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         connection.invalidationHandler = ended
         connection.activate()
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-        guard case .version(2) = try await call(deadline: deadline, hello: true, send: { proxy, reply in
+        guard case .version(AuthorityPairingProofWire.handoffVersion) = try await call(deadline: deadline, hello: true, send: { proxy, reply in
             proxy.hello { reply(.version($0)) }
         }) else { close(); throw AuthorityXPCError.failed }
         try lock.withLock {
@@ -92,6 +103,9 @@ final class AuthorityPairingProofClient: @unchecked Sendable {
         }
         guard case .allowed(true) = try await call(deadline: deadline, send: { proxy, reply in
             proxy.bindWindow(windowID) { reply(.allowed($0)) }
+        }) else { close(); throw AuthorityXPCError.failed }
+        guard case .allowed(true) = try await call(deadline: deadline, send: { proxy, reply in
+            proxy.finishBootstrap { reply(.allowed($0)) }
         }) else { close(); throw AuthorityXPCError.failed }
     }
 
