@@ -169,8 +169,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     var lanScope: PairingLANScope? { configuration.lanScope }
 
     func requirePairingOpen() throws {
-        try PairingColdDisableIntent.requirePairingOpen(macID: macID, accountID: accountID,
-            pairingDigest: activationRevision.configurationDigest, read: readColdDisableIntent)
+        try PairingColdDisableIntent.requirePairingOpen(read: readColdDisableIntent)
     }
 
     /// Endpoints retain the admission through the attempt and its in-flight replies.

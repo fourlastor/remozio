@@ -3064,45 +3064,48 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
     }
 
     func testInvalidColdDisableIntentClosesBothPairingHandshakes() throws {
-        let fixture = try Fixture(v2ActivationEnabled: true, readColdDisableIntent: { Data([0]) })
-        let legacy = Box<UInt64>(UInt64.max)
-        try fixture.endpoint().pairingHello { legacy.value = $0 }
-        XCTAssertEqual(legacy.value, 0)
-        let installed = Box<UInt64>(UInt64.max)
-        try fixture.endpoint().pairingSetupHello(maximumVersion: 3) { version, _ in installed.value = version }
-        XCTAssertEqual(installed.value, 0)
-        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
-        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.v2))
+        for unreadable in [false, true] {
+            let fixture = try Fixture(v2ActivationEnabled: true, readColdDisableIntent: {
+                if unreadable { throw Fault.injected }
+                return Data([0])
+            })
+            let legacy = Box<UInt64>(UInt64.max)
+            try fixture.endpoint().pairingHello { legacy.value = $0 }
+            XCTAssertEqual(legacy.value, 0)
+            let installed = Box<UInt64>(UInt64.max)
+            try fixture.endpoint().pairingSetupHello(maximumVersion: 3) { version, _ in installed.value = version }
+            XCTAssertEqual(installed.value, 0)
+            XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
+            XCTAssertThrowsError(try fixture.access.admitPairingVersion(.v2))
+        }
     }
 
-    func testWellFormedColdDisableIntentClosesUntilTheDisabledDigestMatches() throws {
+    func testOnlyPendingColdDisableIntentClosesPairingAfterReenablement() throws {
         let marker = Box<Data?>(nil)
-        let fixture = try Fixture(v2ActivationEnabled: false, readColdDisableIntent: { marker.value })
+        let fixture = try Fixture(v2ActivationEnabled: true, readColdDisableIntent: { marker.value })
+        let disabled = try AuthorityPairingSetupConfiguration(transportPublicKey: fixture.pairingConfiguration.transportPublicKey,
+            lifetimeMilliseconds: fixture.pairingConfiguration.lifetimeMilliseconds, v2ActivationEnabled: false)
+        let digest = PairingColdDisableIntent.digest(disabled.canonicalBytes)
         let limits = try CBORLimits(maxBytes: 768, maxDepth: 1, maxItems: 24)
-        func intent(_ completed: Bool, digest: Data) throws -> Data {
+        func intent(_ completed: Bool) throws -> Data {
             try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(fixture.mac), 2: .bytes(fixture.account),
                 3: .bytes(Data(repeating: 3, count: 16)), 4: .bytes(Data(repeating: 4, count: 32)),
                 5: .bytes(Data(repeating: 5, count: 32)), 6: .bytes(Data(repeating: 6, count: 32)),
                 7: .bytes(Data(repeating: 7, count: 32)), 8: .bytes(Data(repeating: 8, count: 32)),
                 9: .bytes(digest), 10: .boolean(completed)]), limits: limits)
         }
-        let digest = PairingColdDisableIntent.digest(fixture.pairingConfiguration.canonicalBytes)
-        let pending = try intent(false, digest: digest)
-        XCTAssertFalse(try PairingColdDisableIntent.decode(pending).completed)
-        marker.value = pending
+        let revision = fixture.access.activationRevision
+        XCTAssertNotEqual(digest, revision.configurationDigest)
+        marker.value = try intent(false)
         XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
-        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.v2))
+        XCTAssertThrowsError(try fixture.access.requestV2Activation(revision: revision, compositionReady: true))
 
-        marker.value = try intent(true, digest: digest)
-        let endpoint = try fixture.endpoint()
+        marker.value = try intent(true)
         let version = Box<UInt64>(0)
-        endpoint.pairingHello { version.value = $0 }
+        try fixture.endpoint().pairingHello { version.value = $0 }
         XCTAssertEqual(version.value, 1)
-        XCTAssertNoThrow(try fixture.access.admitPairingVersion(.legacy))
-
-        marker.value = try intent(true, digest: Data(repeating: 50, count: 32))
-        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.legacy))
-        XCTAssertThrowsError(try fixture.access.admitPairingVersion(.v2))
+        XCTAssertEqual(try fixture.access.requestV2Activation(revision: revision, compositionReady: true), .active)
+        XCTAssertNoThrow(try fixture.access.admitPairingVersion(.v2))
     }
 
     func testColdDisableLeavesCommittedPairingReceiptAvailable() throws {

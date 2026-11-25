@@ -99,8 +99,7 @@ enum PairingColdDisablePublication {
 
     static func retire(_ record: PairingColdDisableIntent, retainedHost: InstalledAuthorityCommandConfiguration,
         directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void, didRemove: () throws -> Void = {}) throws {
-        // A subsequent installed update can replace other fields while retaining the exact disabled pairing value.
-        try record.requirePairingTarget(retainedHost)
+        try record.requireAccountScope(retainedHost)
         try GatewaySettingsFenceRemoval.removeCompletedPairingDisable(record, directory: directory, owner: owner, verifyCurrent: {
             try requireConfiguration(retainedHost, directory: directory, owner: owner, verify: verify)
         }, didRemove: didRemove)

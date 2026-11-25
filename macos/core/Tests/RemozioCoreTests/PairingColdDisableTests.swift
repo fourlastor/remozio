@@ -83,12 +83,7 @@ final class PairingColdDisableTests: XCTestCase {
             XCTAssertFalse(pending.completed)
             XCTAssertEqual(try fixture.read(.commandHost), fixture.host.canonicalBytes)
             XCTAssertEqual(try fixture.read(.commandConfiguration), target.command.canonicalBytes)
-            let sourcePairing = try XCTUnwrap(fixture.host.command.presence.pairing)
-            let sourceDigest = PairingColdDisableIntent.digest(sourcePairing.canonicalBytes)
-            for digest in [sourceDigest, pending.targetPairing] {
-                XCTAssertThrowsError(try PairingColdDisableIntent.requirePairingOpen(macID: pending.macID, accountID: pending.accountID,
-                    pairingDigest: digest, read: { try fixture.read(.pairingColdDisableIntent) }))
-            }
+            XCTAssertThrowsError(try PairingColdDisableIntent.requirePairingOpen(read: { try fixture.read(.pairingColdDisableIntent) }))
 
             var reconciled: Data?
             let completed = try fixture.apply(retainTarget: { reconciled = $0.canonicalBytes })
@@ -98,10 +93,7 @@ final class PairingColdDisableTests: XCTestCase {
             XCTAssertEqual(try fixture.read(.commandConfiguration), target.command.canonicalBytes)
 
             XCTAssertEqual(try fixture.apply(didPublish: { _ in XCTFail("Unexpected replay write") }), completed)
-            XCTAssertNoThrow(try PairingColdDisableIntent.requirePairingOpen(macID: completed.macID, accountID: completed.accountID,
-                pairingDigest: completed.targetPairing, read: { try fixture.read(.pairingColdDisableIntent) }))
-            XCTAssertThrowsError(try PairingColdDisableIntent.requirePairingOpen(macID: completed.macID, accountID: completed.accountID,
-                pairingDigest: Data(count: 32), read: { try fixture.read(.pairingColdDisableIntent) }))
+            XCTAssertNoThrow(try PairingColdDisableIntent.requirePairingOpen(read: { try fixture.read(.pairingColdDisableIntent) }))
         }
     }
 
@@ -239,6 +231,76 @@ final class PairingColdDisableTests: XCTestCase {
             XCTAssertNil(try fixture.intent())
             XCTAssertEqual(try fixture.read(.commandHost), updated.canonicalBytes)
             XCTAssertEqual(try fixture.read(.commandConfiguration), updated.command.canonicalBytes)
+        }
+    }
+
+    func testObsoleteCompletionRetiresAfterConfirmingTheCurrentRegisteredFiles() throws {
+        try withFixture { fixture in
+            let current = try fixture.enabledActivation()
+            let store = fixture.activation.machine
+            try store.retainRuntimeActivation(current)
+            _ = try store.enrollRuntimeActivation(current)
+            try store.markRuntimeJobsRegistered(current)
+            let complete = try fixture.apply()
+            let disabled = try PairingColdDisableConfiguration(source: fixture.host).target
+            XCTAssertThrowsError(try complete.requirePairingTarget(current.host))
+
+            func retire() throws {
+                try PairingColdDisablePublication.retire(complete, retainedHost: current.host, directory: fixture.directory,
+                    owner: getuid(), verify: {
+                        let activation = try store.runtimeActivation(accountID: current.accountID)
+                        XCTAssertTrue(activation.jobsRegistered)
+                        XCTAssertEqual(try activation.plan?.encoded, try current.encoded)
+                    })
+            }
+            try AdministrativeSetupPublication.replacePairingColdDisable(current.host.command.canonicalBytes,
+                expected: disabled.command.canonicalBytes, file: .commandConfiguration,
+                directory: fixture.directory, owner: getuid(), verify: {})
+            XCTAssertThrowsError(try retire())
+            XCTAssertEqual(try fixture.intent(), complete)
+            try AdministrativeSetupPublication.replacePairingColdDisable(current.host.canonicalBytes,
+                expected: disabled.canonicalBytes, file: .commandHost,
+                directory: fixture.directory, owner: getuid(), verify: {})
+            try retire()
+            XCTAssertNil(try fixture.intent())
+            XCTAssertEqual(try fixture.read(.commandHost), current.host.canonicalBytes)
+            XCTAssertEqual(try fixture.read(.commandConfiguration), current.host.command.canonicalBytes)
+        }
+    }
+
+    func testActivationIgnoresObsoleteCompletionAndStillRefusesPendingOverride() throws {
+        try withFixture { fixture in
+            let disabled = try PairingColdDisableConfiguration(source: fixture.host)
+            let pending = try PairingColdDisableIntent(disabled)
+            let complete = try pending.completion()
+            try RuntimeActivationFiles.validateCommand(derived: fixture.host.command, retained: fixture.host.command,
+                readIntent: { try complete.encoded })
+
+            let baseline = fixture.activation.plan.host.command
+            XCTAssertThrowsError(try RuntimeActivationFiles.validateCommand(derived: baseline, retained: fixture.host.command,
+                readIntent: { try complete.encoded })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let current = try PairingColdDisableConfiguration(source: fixture.host).target.command
+            let pairing = try XCTUnwrap(current.presence.pairing)
+            let original = try XCTUnwrap(baseline.presence.pairing)
+            let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 6, maxItems: 1024)
+            let other = try AuthorityPairingSetupConfiguration(transportPublicKey: pairing.transportPublicKey,
+                lifetimeMilliseconds: original.lifetimeMilliseconds, v2ActivationEnabled: false)
+            guard case .map(var command) = try DeterministicCBOR.decode(current.canonicalBytes, limits: limits),
+                  case .map(var presence) = try DeterministicCBOR.decode(current.presence.canonicalBytes, limits: limits) else {
+                return XCTFail("Expected canonical command and presence")
+            }
+            presence[10] = .bytes(other.canonicalBytes)
+            command[1] = .bytes(try DeterministicCBOR.encode(.map(presence), limits: limits))
+            let retained = try AuthorityCommandStartupConfiguration.decode(DeterministicCBOR.encode(.map(command), limits: limits))
+            XCTAssertNotEqual(PairingColdDisableIntent.digest(other.canonicalBytes), complete.targetPairing)
+            XCTAssertNoThrow(try RuntimeActivationFiles.validateCommand(derived: baseline, retained: retained,
+                readIntent: { try complete.encoded }))
+            XCTAssertThrowsError(try RuntimeActivationFiles.validateCommand(derived: baseline, retained: retained,
+                readIntent: { try pending.encoded })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
         }
     }
 

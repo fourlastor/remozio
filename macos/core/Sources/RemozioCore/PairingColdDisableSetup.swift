@@ -7,7 +7,11 @@ public enum PairingColdDisableSetup {
         case originalJobsRestored, originalJobsRestorationFailed
     }
 
-    public static func run(accountIdentifier: String) throws {
+    public enum Result: Equatable {
+        case disabled, retiredObsoleteIntent
+    }
+
+    public static func run(accountIdentifier: String) throws -> Result {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         let identifier = accountIdentifier.lowercased()
         guard identifier.utf8.count == 32, identifier.utf8.allSatisfy({
@@ -118,8 +122,19 @@ public enum PairingColdDisableSetup {
 
         let prior = try PairingColdDisablePublication.readIntent(directory: directory, owner: 0)
         if let prior {
-            if prior.completed { try prior.requirePairingTarget(plan.host) }
-            else { try prior.requireScope(plan.host) }
+            if prior.completed {
+                try prior.requireAccountScope(plan.host)
+                if (try? prior.requirePairingTarget(plan.host)) == nil {
+                    // Retire the obsolete record under the exclusive lock. The current plan owns pairing.
+                    try PairingColdDisablePublication.retire(prior, retainedHost: plan.host, directory: directory, owner: 0, verify: {
+                        try exclusive.validateExclusive()
+                        try verifyPlan(plan)
+                    })
+                    return .retiredObsoleteIntent
+                }
+            } else {
+                try prior.requireScope(plan.host)
+            }
         } else if plan.host.command.presence.pairing?.v2ActivationEnabled == false {
             // A previous invocation may have retired the record before its success reply reached the operator.
             func verifyRetired() throws {
@@ -137,7 +152,7 @@ public enum PairingColdDisableSetup {
                     })
                 }
             }
-            return
+            return .disabled
         } else {
             _ = try PairingColdDisableConfiguration(source: plan.host)
         }
@@ -249,6 +264,7 @@ public enum PairingColdDisableSetup {
                 try verifyTarget()
             })
         }
+        return .disabled
     }
 
     static func stopAndPublish<Value>(_ sessions: [RuntimeJobStopSession], requireLiveJobs: Bool,

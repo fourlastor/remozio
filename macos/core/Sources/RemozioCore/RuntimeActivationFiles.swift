@@ -15,6 +15,14 @@ enum RuntimeActivationFiles {
         try access(plan: plan, account: account, initialization: initialization, inventory: inventory,
             publishNew: false, verifyCurrent: verifyCurrent)
     }
+    static func validateCommand(derived: AuthorityCommandStartupConfiguration, retained: AuthorityCommandStartupConfiguration,
+        readIntent: () throws -> Data?) throws {
+        guard derived.canonicalBytes != retained.canonicalBytes else { return }
+        try PairingColdDisableConfiguration.requirePairingOnlyDifference(derived: derived, retained: retained)
+        do { try PairingColdDisableIntent.requirePairingOpen(read: readIntent) }
+        catch { throw RuntimeActivationError.changedScope }
+    }
+
     private static func access(plan: RuntimeActivationPlan, account: AccountPreparationIntent,
                                initialization: AuthorityInitializationIntent, inventory: InstallationInventory,
                                publishNew: Bool, verifyCurrent: () throws -> Void) throws {
@@ -22,16 +30,8 @@ enum RuntimeActivationFiles {
         try verifyCurrent(); try plan.validate(account: account, reference: plan.reference)
         let bundle = try plan.configurationBundle(account: account, initialization: initialization, inventory: inventory)
         let commandBytes = plan.host.command.canonicalBytes
-        if bundle.command.canonicalBytes != commandBytes {
-            try PairingColdDisableConfiguration.requirePairingOnlyDifference(derived: bundle.command, retained: plan.host.command)
-            if let bytes = try PairingColdDisableIntent.read(accountID: account.accountID) {
-                do {
-                    let disable = try PairingColdDisableIntent.decode(bytes)
-                    guard disable.completed else { throw RuntimeActivationError.changedScope }
-                    try disable.requirePairingTarget(plan.host)
-                } catch { throw RuntimeActivationError.changedScope }
-            }
-        }
+        try validateCommand(derived: bundle.command, retained: plan.host.command,
+            readIntent: { try PairingColdDisableIntent.read(accountID: account.accountID) })
         guard bundle.transport.canonicalBytes == plan.transport.canonicalBytes,
               let transport = plan.reference.services.claims.first(where: { $0.role == .transport }) else { throw RuntimeActivationError.changedScope }
         let native = try NativeServiceAccountDirectory(accountID: account.accountID, ownerUID: account.ownerUID)

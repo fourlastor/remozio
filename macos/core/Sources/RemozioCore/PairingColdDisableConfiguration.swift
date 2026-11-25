@@ -98,14 +98,19 @@ struct PairingColdDisableIntent: Equatable, Sendable {
             targetPairing: targetPairing, completed: true)
     }
 
+    func requireAccountScope(_ host: InstalledAuthorityCommandConfiguration) throws {
+        guard host.command.macID == macID, host.command.accountID == accountID,
+              host.installationID == installationID else { throw PairingColdDisableError.changedConfiguration }
+    }
+
     func requireScope(_ host: InstalledAuthorityCommandConfiguration) throws {
-        guard host.command.macID == macID, host.command.accountID == accountID, host.installationID == installationID,
-              host.releaseDigest == releaseDigest else { throw PairingColdDisableError.changedConfiguration }
+        try requireAccountScope(host)
+        guard host.releaseDigest == releaseDigest else { throw PairingColdDisableError.changedConfiguration }
     }
 
     func requirePairingTarget(_ host: InstalledAuthorityCommandConfiguration) throws {
-        guard host.command.macID == macID, host.command.accountID == accountID, host.installationID == installationID,
-              let pairing = host.command.presence.pairing, pairing.v2ActivationEnabled == false, pairing.lanScope == nil,
+        try requireAccountScope(host)
+        guard let pairing = host.command.presence.pairing, pairing.v2ActivationEnabled == false, pairing.lanScope == nil,
               Self.digest(pairing.canonicalBytes) == targetPairing else { throw PairingColdDisableError.changedConfiguration }
     }
 
@@ -138,11 +143,9 @@ struct PairingColdDisableIntent: Equatable, Sendable {
         return record
     }
 
-    static func requirePairingOpen(macID: Data, accountID: Data, pairingDigest: Data, read: () throws -> Data?) throws {
+    static func requirePairingOpen(read: () throws -> Data?) throws {
         guard let bytes = try read() else { return }
-        let intent = try decode(bytes)
-        guard intent.completed, intent.macID == macID, intent.accountID == accountID,
-              intent.targetPairing == pairingDigest else { throw AuthorityPairingSetupError.unavailable }
+        guard try decode(bytes).completed else { throw AuthorityPairingSetupError.unavailable }
     }
 
     static func read(accountID: Data) throws -> Data? {

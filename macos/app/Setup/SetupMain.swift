@@ -27,7 +27,10 @@ struct SetupMain {
         }
         if CommandLine.arguments[1] == "--disable-pairing-v2" {
             do {
-                try PairingColdDisableSetup.run(accountIdentifier: CommandLine.arguments[2])
+                let result = try PairingColdDisableSetup.run(accountIdentifier: CommandLine.arguments[2])
+                if result == .retiredObsoleteIntent {
+                    print("Retired an obsolete pairing disable record. The current pairing configuration remains active.")
+                }
                 return
             } catch PairingColdDisableSetup.RecoveryError.originalJobsRestored {
                 fail("Pairing disable stopped before publication. Setup restored the original jobs. You can retry.", code: EX_TEMPFAIL)
