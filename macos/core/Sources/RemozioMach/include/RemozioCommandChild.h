@@ -38,6 +38,9 @@ typedef struct {
 int remozio_child_spec_decode(const void *bytes, size_t count, remozio_child_spec_t *output);
 void remozio_child_spec_close(remozio_child_spec_t *spec);
 int remozio_child_spec_check_executable(const remozio_child_spec_t *spec);
+/* Distinguish the final executable check from an errno reported by execve itself. */
+int remozio_child_executable_check_status(int error);
+int remozio_child_executable_check_errno(uint32_t status);
 /* Output has room for 16 entries. The approved primary GID occupies the first slot. */
 int remozio_child_spec_groups(const remozio_child_spec_t *spec, uint32_t *groups, uint32_t *count);
 /* Checks only descriptor layout. No input is read and no flags, attributes or

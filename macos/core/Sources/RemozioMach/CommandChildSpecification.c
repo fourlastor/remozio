@@ -163,6 +163,22 @@ int remozio_child_spec_check_executable(const remozio_child_spec_t *spec) {
     return error;
 }
 
+enum { executable_check_base = 0x10000 };
+
+static bool rejected_executable(int error) {
+    return error == ESTALE || error == ENOENT || error == ELOOP || error == EACCES;
+}
+
+int remozio_child_executable_check_status(int error) {
+    return rejected_executable(error) ? executable_check_base + error : error;
+}
+
+int remozio_child_executable_check_errno(uint32_t status) {
+    if (status <= executable_check_base || status > executable_check_base + ELAST) return 0;
+    int error = (int)(status - executable_check_base);
+    return rejected_executable(error) ? error : 0;
+}
+
 int remozio_child_spec_validate_stdio(const remozio_child_spec_t *spec, int terminal, const int streams[3]) {
     if (!spec || !streams || spec->stdio_pty_mask > 7 || spec->io_mode > 2) return EINVAL;
     if (spec->io_mode == 0) return (spec->format_version == 1 || spec->format_version >= 3) && terminal < 0 && spec->stdio_pty_mask == 0 ? 0 : EINVAL;

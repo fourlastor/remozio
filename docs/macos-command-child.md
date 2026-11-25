@@ -105,8 +105,11 @@ Protected mode requires the boot system or Data volume. The classification cover
 Previously opened writable descriptors and writable mappings remain a risk.
 Both modes use the resolved path and preserve arguments, working directory and environment.
 After release, the child opens the executable with target credentials and checks its metadata before exec.
-A failed check prevents exec. Path-bound mode retains the window between the check and the kernel's pathname lookup.
-The Root local diagnostic log records the launch mode and the request ID. A confirmed pre-exec ESTALE records the executable change or stale handle.
+A failed check prevents exec. The kernel resolves the path again in both modes.
+Protected mode relies on Root control of the executable and its ancestors during that lookup.
+Path-bound mode retains the window between the check and the kernel's pathname lookup.
+The Root local diagnostic log records the request ID, launch mode and reason for path-bound fallback.
+A confirmed check rejection records that the executable changed or is no longer valid, with the original error.
 
 ## Path-bound timing
 

@@ -148,7 +148,11 @@ int main(int argc, char **argv) {
     if ((error = read_exact(release_fd, &release, 1, deadline))) goto fail;
     if (release != 1) { error = EINVAL; goto fail; }
     close(release_fd); signal(SIGPIPE, SIG_DFL);
-    if ((error = remozio_child_spec_check_executable(&spec))) goto fail;
+    error = remozio_child_spec_check_executable(&spec);
+    if (error) {
+        error = remozio_child_executable_check_status(error);
+        goto fail;
+    }
     execve(spec.executable, spec.arguments, spec.environment);
     error = errno;
 fail:
