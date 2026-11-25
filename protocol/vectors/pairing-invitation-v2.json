@@ -1,6 +1,16 @@
 {
   "challenge": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
   "exporter": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+  "bonjourWindowNames": [
+    {
+      "windowID": "000102030405060708090a0b0c0d0e0f",
+      "name": "R2-9258385a87e7bf9effea002e90c5eabe"
+    },
+    {
+      "windowID": "101112131415161718191a1b1c1d1e1f",
+      "name": "R2-64d394db60592bcc0b3f6014c1692e37"
+    }
+  ],
   "valid": [
     {
       "name": "enrollment",

@@ -27,11 +27,13 @@ final class PairingInvitationV2Tests: XCTestCase {
     }
 
     private struct Invalid: Decodable { let name: String; let hex: String }
+    private struct BonjourWindow: Decodable { let windowID: String; let name: String }
 
     private struct Vectors: Decodable {
         let challenge: String
         let exporter: String
         let valid: [Vector]
+        let bonjourWindowNames: [BonjourWindow]
         let invalid: [Invalid]
         let challengePrelude: String
         let invalidPreludes: [String]
@@ -72,6 +74,23 @@ final class PairingInvitationV2Tests: XCTestCase {
             XCTAssertEqual(String(reflecting: invitation), "PairingInvitationV2(redacted)")
             XCTAssertTrue(invitation.customMirror.children.isEmpty)
         }
+    }
+
+    func testBonjourNameMatchesTheSharedVectorBeforeAndAfterExport() throws {
+        let values = try vectors()
+        let template = try PairingInvitationV2.importText(try XCTUnwrap(values.valid.first).text)
+        var names = Set<String>()
+        for row in values.bonjourWindowNames {
+            let invitation = try PairingInvitationV2(invitation: template.invitation, windowID: hex(row.windowID),
+                secret: Data(repeating: 2, count: 32), lifetimeMilliseconds: template.lifetimeMilliseconds)
+            let imported = try PairingInvitationV2.importText(invitation.exportText())
+            let expected = try PairingInvitationV2.bonjourInstanceName(windowID: invitation.windowID)
+            XCTAssertEqual(expected, row.name)
+            XCTAssertEqual(try PairingInvitationV2.bonjourInstanceName(windowID: imported.windowID), expected)
+            XCTAssertTrue(names.insert(expected).inserted)
+        }
+        XCTAssertEqual(names.count, 2)
+        XCTAssertThrowsError(try PairingInvitationV2.bonjourInstanceName(windowID: Data(count: 15)))
     }
 
     func testProofRejectsAnotherConnectionAndInvalidInputs() throws {

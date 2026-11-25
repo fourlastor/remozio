@@ -30,6 +30,22 @@ class PairingInvitationV2Test {
         }
     }
 
+    @Test fun bonjourNameMatchesTheSharedVectorBeforeAndAfterExport() {
+        val values = vectors()
+        val template = PairingInvitationV2.importText(rows(values).first().text("text"))
+        val names = mutableSetOf<String>()
+        for (vector in values.getValue("bonjourWindowNames").jsonArray) {
+            val row = vector.jsonObject
+            val invitation = PairingInvitationV2(template.invitation, row.bytes("windowID"), ByteArray(32) { 2 },
+                lifetimeMilliseconds = template.lifetimeMilliseconds)
+            val name = invitation.bonjourInstanceName()
+            assertEquals(row.text("name"), name)
+            assertEquals(name, PairingInvitationV2.importText(invitation.exportText()).bonjourInstanceName())
+            assertTrue(names.add(name))
+        }
+        assertEquals(2, names.size)
+    }
+
     @Test fun proofBindsTheConnectionAndRejectsInvalidInputs() {
         val values = vectors()
         val row = rows(values).first()

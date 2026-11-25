@@ -9,8 +9,11 @@ import android.net.nsd.NsdServiceInfo
 import android.os.PatternMatcher
 import dev.remozio.phone.transport.ApprovalCarrierRoute
 import dev.remozio.phone.transport.DirectTCPConnector
+import dev.remozio.protocol.PairingInvitation
+import dev.remozio.protocol.PairingInvitationV2
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.io.encoding.Base64
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
@@ -24,11 +27,15 @@ internal fun androidDirectRoutes(context: Context, macID: ByteArray): Flow<Appro
 }
 
 /** Pairing hints use their separate service type and scope. Only pinned setup TLS authenticates the endpoint. */
-internal fun androidPairingRoutes(context: Context, macID: ByteArray, accountID: ByteArray): Flow<ApprovalCarrierRoute> {
-    require(macID.size == 16 && accountID.size == 16)
-    fun id(bytes: ByteArray) = android.util.Base64.encodeToString(bytes,
-        android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
-    return androidNamedRoutes(context, "_remozio-pairing._tcp.", "R-${id(macID)}-${id(accountID)}")
+internal fun androidPairingRoutes(
+    context: Context, invitation: PairingInvitation, v2: PairingInvitationV2?,
+): Flow<ApprovalCarrierRoute> =
+    androidNamedRoutes(context, "_remozio-pairing._tcp.", pairingServiceName(invitation, v2))
+
+internal fun pairingServiceName(invitation: PairingInvitation, v2: PairingInvitationV2?): String {
+    if (v2 != null) return v2.bonjourInstanceName()
+    val encoder = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT)
+    return "R-${encoder.encode(invitation.macID.copyBytes())}-${encoder.encode(invitation.accountID.copyBytes())}"
 }
 
 private fun androidNamedRoutes(context: Context, type: String, name: String): Flow<ApprovalCarrierRoute> {
