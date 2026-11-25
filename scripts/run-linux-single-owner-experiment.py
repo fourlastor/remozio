@@ -873,7 +873,9 @@ def _act(action, host, owner, pids, observed, selector, sockets):
     if action == "caller-attach-k":
         key = "attachBeforeGo" if observed["attachBeforeGo"] == NA else "attachAfterGo"
         try:
-            dumpable = "0" if os.stat(f"/proc/{pids['k']}").st_uid == 0 else "1"
+            # The /proc/<pid> directory always shows the task's effective UID; files inside it,
+            # such as stat, belong to root when the task is not dumpable (task_dump_owner).
+            dumpable = "0" if os.stat(f"/proc/{pids['k']}/stat").st_uid == 0 else "1"
         except OSError:
             dumpable = NA
         if observed["kDumpableAtAttach"] != "1":
