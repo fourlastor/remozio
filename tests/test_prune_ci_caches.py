@@ -71,6 +71,17 @@ class PlanTests(unittest.TestCase):
         second = entry(9, mac("mac", IDENTITY_A, "2"), "01:00:00")
         self.assertEqual([item["id"] for item in PRUNE.plan([second, first], keep=set())], [7])
 
+    def test_replace_deletes_the_whole_family_except_kept_keys(self):
+        old = entry(1, mac("mac", IDENTITY_A, "1"), "01:00:00")
+        newest = entry(2, mac("mac", IDENTITY_A, "2"), "02:00:00")
+        saving = entry(3, mac("mac", IDENTITY_B, "3"), "03:00:00")
+        other = entry(4, mac("experiments", IDENTITY_A, "4"), "00:30:00")
+        gradle_entry = entry(5, gradle("kotlin", "Linux", "5"), "00:10:00")
+        pull = entry(6, mac("mac", IDENTITY_A, "6"), "00:20:00", ref="refs/pull/600/merge")
+        doomed = PRUNE.plan([old, newest, saving, other, gradle_entry, pull], keep={saving["key"]},
+                            replace="mac-build-v1-mac-")
+        self.assertEqual([item["id"] for item in doomed], [1, 2])
+
 
 class RunTests(unittest.TestCase):
     def setUp(self):

@@ -112,10 +112,13 @@ jobs:
           key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
           restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Pair the JVM phone client with the Linux software-key pairing tool
+        id: gradle
         run: ./gradlew :phone-core:linuxPairToolTest
       - name: Save Gradle downloads
         # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        # Saves even when a later step failed, so one failure does not cost the next run a cold download. A save needs
+        # every Gradle step to have succeeded: a failed one may have stopped partway through a download.
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true' && steps.gradle.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -166,9 +169,42 @@ jobs:
           path: ${{ runner.temp }}/remozio-native-tpm-report.json
           if-no-files-found: ignore
           retention-days: 7
+  cache-prepare:
+    name: Free the budget for a new Mac cache generation
+    # The only job besides cache-cleanup with actions: write, and it runs no repository build or test code. A Mac job
+    # saves a new generation only when it restored no usable entry, mostly when its identity changed. Two
+    # generations exceed the 10 GB budget, so this deletes main's Mac entries first when this push changed the
+    # settings half of the identity or the file set in a way that forces a cold build (scripts/ci-build-cache.py
+    # settings-changed). The toolchain half is known only on the Mac runner: a runner image or Xcode change is not
+    # seen here, so that push can overflow the budget once before cache-cleanup prunes.
+    # The Mac jobs need this job but still run when it is skipped or fails.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Compare the Mac cache settings with the previous main commit
+        id: settings
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          git fetch --quiet --no-tags --depth=1 origin "$BEFORE" || echo "::warning::Could not fetch $BEFORE; treating the settings as changed."
+          python3 scripts/ci-build-cache.py settings-changed --base "$BEFORE" --github-output "$GITHUB_OUTPUT"
+      - name: Delete main's superseded Mac cache entries
+        if: steps.settings.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for scope in mac experiments interop; do
+            python3 scripts/prune-ci-caches.py --repository "$GITHUB_REPOSITORY" --replace "mac-build-v1-$scope-"
+          done
   mac:
     name: Mac build
-    needs: changes
+    needs: [changes, cache-prepare]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac == 'true') }}
     runs-on: macos-26
     timeout-minutes: 120
@@ -206,6 +242,7 @@ jobs:
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope mac --github-output "$GITHUB_OUTPUT"
       - name: Save validated Mac compiler outputs
+        id: build-cache-save
         timeout-minutes: 5
         # Only main writes. A 3.5 GB entry per pull request evicted main's entry from the 10 GB budget.
         if: >-
@@ -216,6 +253,11 @@ jobs:
         with:
           path: ${{ steps.build-cache-key.outputs.paths }}
           key: ${{ steps.build-cache-key.outputs.key }}
+      - name: Report a missing main Mac build cache
+        if: always() && steps.build-cache-save.outcome == 'failure'
+        env:
+          KEY: ${{ steps.build-cache-key.outputs.key }}
+        run: echo "::warning::Saving $KEY failed, so main may have no cache for this scope until a main run saves one. Runs build cold meanwhile."
       - name: Retain cache validation and native build logs
         if: always()
         continue-on-error: true
@@ -251,7 +293,7 @@ jobs:
           PYTHON
   mac-experiments:
     name: Mac experiments
-    needs: changes
+    needs: [changes, cache-prepare]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_experiments == 'true') }}
     runs-on: macos-26
     timeout-minutes: 60
@@ -282,6 +324,7 @@ jobs:
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope experiments --github-output "$GITHUB_OUTPUT"
       - name: Save validated Mac experiments compiler outputs
+        id: build-cache-save
         timeout-minutes: 5
         # Only main writes, as for the Mac build cache.
         if: >-
@@ -292,6 +335,11 @@ jobs:
         with:
           path: ${{ steps.build-cache-key.outputs.paths }}
           key: ${{ steps.build-cache-key.outputs.key }}
+      - name: Report a missing main Mac experiments cache
+        if: always() && steps.build-cache-save.outcome == 'failure'
+        env:
+          KEY: ${{ steps.build-cache-key.outputs.key }}
+        run: echo "::warning::Saving $KEY failed, so main may have no cache for this scope until a main run saves one. Runs build cold meanwhile."
   mac-core:
     name: Mac core tests (${{ matrix.part }})
     needs: changes
@@ -378,7 +426,7 @@ jobs:
           retention-days: 7
   mac-interop:
     name: Mac interoperability
-    needs: changes
+    needs: [changes, cache-prepare]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_interop == 'true') }}
     runs-on: macos-26
     timeout-minutes: 20
@@ -429,10 +477,14 @@ jobs:
             ~/.gradle/caches/modules-2
           key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
           restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
-      - run: ./gradlew :phone-core:test :phone-core:approvalFlowTest
+      - name: Run the phone-core and approval-flow Gradle tests
+        id: gradle
+        run: ./gradlew :phone-core:test :phone-core:approvalFlowTest
       - name: Save Gradle downloads
         # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        # Saves even when a later step failed, so one failure does not cost the next run a cold download. A save needs
+        # every Gradle step to have succeeded: a failed one may have stopped partway through a download.
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true' && steps.gradle.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -444,6 +496,7 @@ jobs:
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope interop --github-output "$GITHUB_OUTPUT"
       - name: Save validated interoperability compiler outputs
+        id: build-cache-save
         if: >-
           github.event_name == 'push' && github.ref == 'refs/heads/main' &&
           steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
@@ -452,6 +505,11 @@ jobs:
         with:
           path: ${{ steps.build-cache-key.outputs.paths }}
           key: ${{ steps.build-cache-key.outputs.key }}
+      - name: Report a missing main interoperability cache
+        if: always() && steps.build-cache-save.outcome == 'failure'
+        env:
+          KEY: ${{ steps.build-cache-key.outputs.key }}
+        run: echo "::warning::Saving $KEY failed, so main may have no cache for this scope until a main run saves one. Runs build cold meanwhile."
       - name: Retain cache smoke logs
         if: always()
         continue-on-error: true
@@ -498,8 +556,11 @@ jobs:
           key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
           restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Kotlin tests on the iOS simulator
+        id: gradle
         run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-pairing:iosSimulatorArm64Test :phone-enrollment:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
       - name: Build the iOS app for the simulator
+        # The app's Xcode phase runs ./gradlew :phone-ui:embedAndSignAppleFrameworkForXcode.
+        id: gradle-app
         env:
           REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
         run: ./scripts/build-ios-app.sh
@@ -509,7 +570,9 @@ jobs:
         run: ./scripts/test-ios-app.sh
       - name: Save Gradle downloads
         # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        # Saves even when a later step failed, so one failure does not cost the next run a cold download. A save needs
+        # every Gradle step to have succeeded: a failed one may have stopped partway through a download.
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true' && steps.gradle.outcome == 'success' && steps.gradle-app.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -549,10 +612,14 @@ jobs:
             ~/.gradle/caches/modules-2
           key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
           restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
-      - run: ./gradlew :protocol-kotlin:jvmTest :phone-pairing:jvmTest :phone-enrollment:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
+      - name: Run the Kotlin protocol and phone tests
+        id: gradle
+        run: ./gradlew :protocol-kotlin:jvmTest :phone-pairing:jvmTest :phone-enrollment:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
       - name: Save Gradle downloads
         # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        # Saves even when a later step failed, so one failure does not cost the next run a cold download. A save needs
+        # every Gradle step to have succeeded: a failed one may have stopped partway through a download.
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true' && steps.gradle.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -594,10 +661,14 @@ jobs:
           restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Install Android SDK packages
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"'
-      - run: ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug :android-app:assembleRelease
+      - name: Build, test and lint the Android app
+        id: gradle
+        run: ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug :android-app:assembleRelease
       - name: Save Gradle downloads
         # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        # Saves even when a later step failed, so one failure does not cost the next run a cold download. A save needs
+        # every Gradle step to have succeeded: a failed one may have stopped partway through a download.
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true' && steps.gradle.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:

@@ -541,6 +541,99 @@ class BuildCacheTests(unittest.TestCase):
         self.assertEqual(self.source.read_text(), 'print(2)\n')
         self.assertEqual(self.source.stat().st_mtime_ns, stamp)
 
+    def test_a_restored_compatible_entry_is_not_saved_again(self):
+        self.key()
+        self.output()
+        first = self.operation('save')
+        self.assertTrue(first['save_entry'])
+        self.assertEqual(first['reason'], 'new-generation')
+        # A later commit changes a source file: the content key differs, but the identity does not.
+        self.source.write_text('print(2)\n')
+        self.key()
+        self.assertEqual(self.operation('restore')['result'], 'restored')
+        second = self.operation('save')
+        self.assertTrue(second['saved_manifest'])
+        self.assertFalse(second['save_entry'])
+        self.assertEqual(second['reason'], 'compatible-entry-restored')
+
+    def test_a_miss_invalid_manifest_or_cold_rebuild_saves_a_new_generation(self):
+        manifest = self.root / '.build/ci-cache/interop.json'
+        self.key()
+        self.assertEqual(self.operation('restore')['result'], 'cold-missing-or-invalid-manifest')
+        self.assertTrue(self.operation('save')['save_entry'])
+        # A file-set change outside package sources forces a cold build, so the restored entry is no use.
+        added = self.root / 'config.json'
+        added.write_text('{}')
+        self.track(added)
+        self.key()
+        self.assertEqual(self.operation('restore')['result'], 'cold-input-change')
+        self.assertTrue(self.operation('save')['save_entry'])
+        manifest.write_text('{')
+        self.key()
+        self.operation('restore')
+        self.assertTrue(self.operation('save')['save_entry'])
+
+    def test_a_save_without_a_recorded_restore_saves_and_mutation_never_saves(self):
+        self.key()
+        self.assertTrue(self.operation('save')['save_entry'])
+        self.key()
+        self.operation('restore')
+        self.source.write_text('print(3)\n')
+        result = self.operation('save')
+        self.assertFalse(result['save_entry'])
+        self.assertEqual(result['reason'], 'inputs-changed-during-checks')
+
+    def commit(self):
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q',
+                        '--allow-empty', '-m', 'c'], check=True)
+        return subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+
+    def add(self, name, text='x', mode=0o644):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        path.chmod(mode)
+        self.track(path)
+
+    def test_settings_changed_follows_the_identity_and_the_cold_file_set_rule(self):
+        self.add('scripts/cloudflared_artifact.py', 'first')
+        base = self.commit()
+        self.assertFalse(CACHE.settings_changed(self.root, base))
+        cases = (
+            ('a source edit keeps the generation', lambda: self.source.write_text('print(9)\n'), False),
+            ('a new Swift file in Sources replans without a cold build',
+             lambda: self.add('pkg/Sources/Lib/New.swift'), False),
+            ('top-level docs Markdown is exempt', lambda: self.add('docs/note.md'), False),
+            ('an audited Linux-only script is exempt', lambda: self.add('scripts/check-linux-host.sh', mode=0o755), False),
+            ('an Xcode phase input script edit keeps the identity',
+             lambda: self.add('scripts/cloudflared_artifact.py', 'second'), False),
+            ('a script edit changes the identity', lambda: self.add('scripts/build.py'), True),
+            ('a workflow edit changes the identity', lambda: self.add('.github/workflows/checks.yml'), True),
+            ('a package manifest changes the identity', lambda: self.add('pkg/Package.swift'), True),
+            ('an xcconfig changes the identity', lambda: self.add('app/Base.xcconfig'), True),
+            ('another new file forces a cold build', lambda: self.add('tests/test_new.py'), True),
+            ('a mode change of a Linux-only script is conservative',
+             lambda: self.add('scripts/check-linux-host.sh', mode=0o644), True),
+        )
+        for label, change, expected in cases:
+            with self.subTest(label):
+                before = self.commit()
+                change()
+                self.track(self.source)
+                self.commit()
+                self.assertEqual(CACHE.settings_changed(self.root, before), expected)
+        self.assertTrue(CACHE.settings_changed(self.root, '0' * 40))
+
+    def test_settings_changed_writes_its_output(self):
+        base = self.commit()
+        self.add('scripts/build.py')
+        self.commit()
+        github_output = self.root / 'github-output'
+        with contextlib.redirect_stdout(io.StringIO()):
+            CACHE.run(argparse.Namespace(operation='settings-changed', base=base, github_output=github_output),
+                      root=self.root)
+        self.assertEqual(github_output.read_text(), 'changed<<REMOZIO_CACHE_OUTPUT\ntrue\nREMOZIO_CACHE_OUTPUT\n')
+
     def test_system_keychain_output_root_is_cached_only_for_experiments(self):
         name = 'experiments/system-keychain/.build'
         self.assertIn(name, CACHE.CACHE_PATHS['experiments'])
