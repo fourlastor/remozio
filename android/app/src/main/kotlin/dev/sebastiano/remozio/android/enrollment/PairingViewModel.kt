@@ -21,6 +21,7 @@ internal data class PairingScreenState(
     val transcript: PairingTranscript? = null,
     val comparisonCode: String? = null,
     val expiresElapsedMillis: Long? = null,
+    val clockSkewAdvisory: Boolean = false,
     val signer: AndroidPairingBiometrics? = null,
     val mayHaveSavedSetup: Boolean = false,
 )
@@ -84,19 +85,21 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
             try {
                 val transcript = open(owner)
                 if (attempt === owner) {
-                    val now = System.currentTimeMillis().coerceAtLeast(0).toULong()
-                    val remaining = if (now >= transcript.expiresAtUnixMillis) 0uL else
-                        minOf(transcript.expiresAtUnixMillis - now, transcript.expiresAtUnixMillis - transcript.issuedAtUnixMillis)
+                    val deadline = owner.deadline
                     mutable.value = mutable.value.copy(phase = PairingPhase.COMPARING, transcript = transcript, comparisonCode = transcript.verificationCode(),
-                        expiresElapsedMillis = SystemClock.elapsedRealtime() + remaining.toLong())
+                        expiresElapsedMillis = deadline.expiresElapsedMillis, clockSkewAdvisory = deadline.clockSkewAdvisory)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
                 val result = app.retirePairing(owner).await()
                 if (attempt === owner) {
                     if (result.isSuccess) attempt = null
-                    mutable.value = mutable.value.copy(phase = if (failure is RePairAlreadyPending)
-                        PairingPhase.RECOVERY_PENDING else PairingPhase.FAILED, mayHaveSavedSetup = result.isFailure)
+                    val phase = when (failure) {
+                        is RePairAlreadyPending -> PairingPhase.RECOVERY_PENDING
+                        is PairingDeadlineExpired -> PairingPhase.EXPIRED
+                        else -> PairingPhase.FAILED
+                    }
+                    mutable.value = mutable.value.copy(phase = phase, mayHaveSavedSetup = result.isFailure)
                 }
             }
         }
@@ -119,7 +122,12 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
                     if (attempt === owner) mutable.value = mutable.value.copy(phase = PairingPhase.COMPARING, signer = null)
                 } else mutable.value = mutable.value.copy(phase = PairingPhase.BIOMETRIC, signer = signer)
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { if (attempt === owner) mutable.value = mutable.value.copy(phase = PairingPhase.FAILED, signer = null) }
+            catch (failure: Exception) {
+                if (attempt === owner) {
+                    val phase = if (failure is PairingDeadlineExpired) PairingPhase.EXPIRED else PairingPhase.FAILED
+                    mutable.value = mutable.value.copy(phase = phase, signer = null)
+                }
+            }
         }
     }
     fun biometricResult(signer: AndroidPairingBiometrics, result: PairingBiometricResult) {
@@ -136,7 +144,12 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
                 owner.submit(result.proof)
                 if (attempt === owner) mutable.value = mutable.value.copy(phase = PairingPhase.COMPLETE)
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { if (attempt === owner) mutable.value = mutable.value.copy(phase = PairingPhase.FAILED) }
+            catch (failure: Exception) {
+                if (attempt === owner) {
+                    val phase = if (failure is PairingDeadlineExpired) PairingPhase.EXPIRED else PairingPhase.FAILED
+                    mutable.value = mutable.value.copy(phase = phase)
+                }
+            }
         }
     }
     fun expire() {

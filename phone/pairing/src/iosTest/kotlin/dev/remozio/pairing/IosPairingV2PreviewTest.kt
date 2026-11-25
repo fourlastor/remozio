@@ -50,6 +50,21 @@ class IosPairingV2PreviewTest {
         assertContentEquals(ByteArray(32), host.borrowedExporter)
     }
 
+    @Test fun previewAcceptsFutureTranscriptDatesAndClosesAfterComparisonCode(): Unit = runBlocking {
+        val host = Host(issuedAt = 32_503_680_000_000uL)
+        val code = previewPairingV2(this, invitation, keys(host))
+        assertEquals(assertNotNull(host.staged).verificationCode(), code)
+        assertEquals(1, host.proposalCount)
+        assertEquals(1, host.closeCount)
+    }
+
+    @Test fun previewRejectsAnOverlongTranscriptAndCloses(): Unit = runBlocking {
+        val host = Host(lifetime = 300_001uL)
+        assertFailsWith<IllegalArgumentException> { previewPairingV2(this, invitation, keys(host)) }
+        assertEquals(1, host.proposalCount)
+        assertEquals(1, host.closeCount)
+    }
+
     @Test fun missingExporterClosesWithoutAProposal(): Unit = runBlocking {
         val host = Host(offerExporter = false)
         assertFailsWith<IOException> { previewPairingV2(this, invitation, keys(host)) }
@@ -79,7 +94,12 @@ class IosPairingV2PreviewTest {
         }
     }
 
-    private inner class Host(private val offerExporter: Boolean = true, sendChallenge: Boolean = true) : IosPairingV2Transport {
+    private inner class Host(
+        private val offerExporter: Boolean = true,
+        sendChallenge: Boolean = true,
+        private val issuedAt: ULong = 1_000u,
+        private val lifetime: ULong = 1_000u,
+    ) : IosPairingV2Transport {
         private val challenge = ByteArray(32) { 5 }
         private val outgoing = ArrayDeque<ByteArray>()
         private var incoming = ByteArray(0)
@@ -120,7 +140,7 @@ class IosPairingV2PreviewTest {
                         ChannelOffer(ChannelRole.MAC, phone.phone.scope, ByteArray(32) { 9 }, setOf(1u), emptyList(), emptySet()),
                         1u, 1u, mac.authorityPublicKey.copyBytes(), mac.transportPublicKey.copyBytes(),
                         phone.transportKey, phone.decisionKey, phone.biometricKey, ByteArray(32) { 10 }, null,
-                        ByteArray(16) { 11 }, 1_000u, 2_000u)
+                        ByteArray(16) { 11 }, issuedAt, issuedAt + lifetime)
                     staged = session
                     outgoing.addLast(wire(PairingSetupFrame.Transcript(session).encode()))
                     incoming = ByteArray(0)

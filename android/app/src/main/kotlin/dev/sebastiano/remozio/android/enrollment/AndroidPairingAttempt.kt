@@ -44,6 +44,8 @@ internal class AndroidPairingAttempt(
     private var identity: CreatedTransportIdentity? = null
     private var channel: PairingSetupChannel? = null
     private var invitation: PairingInvitation? = null
+    private var pairingDeadline: PairingDeadline? = null
+    val deadline: PairingDeadline get() = checkNotNull(pairingDeadline)
     private var transportKey: EnrollmentKeyReference? = null
     private var decisionKey: EnrollmentKeyReference? = null
     private var biometricKey: EnrollmentKeyReference? = null
@@ -135,17 +137,23 @@ internal class AndroidPairingAttempt(
         active()
         selected.validateMacClaims(transcript)
         proposal.validate(transcript)
+        val receivedAt = RequestElapsedClock.now()
+        pairingDeadline = PairingDeadline(transcript, receivedAt, opened.remainingSetupMillis(),
+            System.currentTimeMillis().coerceAtLeast(0).toULong())
+        requireOpenDeadline()
         rePairRecordID?.let {
             val checkpoint = store.checkpointRePair(it, transcript)
             preparedRecord = checkpoint
             enrollment = checkpoint.enrollment
         }
+        requireOpenDeadline()
         transcript
     }
 
     /** Invoke only after explicit code comparison. Durable PREPARED state precedes construction of the biometric signer. */
     suspend fun confirmComparison(): AndroidPairingBiometrics = operation {
         check(!proofSubmitted)
+        requireOpenDeadline()
         if (prepared) return@operation loadPreparedSigner()
         val transcript = transcript
         rePairRecordID?.let {
@@ -169,24 +177,27 @@ internal class AndroidPairingAttempt(
     }
 
     private fun loadPreparedSigner(): AndroidPairingBiometrics {
+        requireOpenDeadline()
         val access = checkNotNull(preparedAccess)
         check(access.lease.isCurrent())
         biometric?.close()
-        val signing = AndroidPairingBiometrics.load(access.record, RequestElapsedClock.now(),
-            System.currentTimeMillis().toULong(), RequestElapsedClock::now,
-            { !closed.get() && access.lease.isCurrent() })
-        biometric = signing
-        return signing
+        return AndroidPairingBiometrics.load(access.record, deadline, RequestElapsedClock::now,
+            { !closed.get() && access.lease.isCurrent() }).also { signer ->
+            biometric = signer
+        }
     }
 
     /** The exact confirmed transcript and fresh hardware proof are submitted once. A lost reply retains PREPARED storage. */
     suspend fun submit(proof: ByteArray) = operation {
         check(prepared && !proofSubmitted && checkNotNull(preparedAccess).lease.isCurrent())
+        requireOpenDeadline()
         val current = transcript
         require(current.verify(proof, current.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
         val receipt = checkNotNull(channel).submitProof(current.digest(), proof) {
+            requireOpenDeadline()
             if (rePairRecordID != null) preparedAccess = store.markRePairProof(checkNotNull(preparedAccess))
             active()
+            requireOpenDeadline()
             proofSubmitted = true
         }
         active()
@@ -235,6 +246,7 @@ internal class AndroidPairingAttempt(
         operations.withLock { active(); body().also { active() } }
     }
     private fun active() { check(!closed.get()) }
+    private fun requireOpenDeadline() = deadline.requireOpen(RequestElapsedClock.now())
     override fun toString() = "AndroidPairingAttempt(redacted)"
     companion object {
         private val random = SecureRandom()

@@ -239,6 +239,7 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
             }
             state.comparisonCode?.let { code ->
                 if (state.phase in setOf(PairingPhase.COMPARING, PairingPhase.PREPARING, PairingPhase.BIOMETRIC)) {
+                    if (state.clockSkewAdvisory) Text(stringResource(R.string.pairing_setup_clock_advisory))
                     SelectionContainer {
                         Text(code.replace(" ", "\n"),
                             style = MaterialTheme.typography.headlineLarge, fontFamily = FontFamily.Monospace)

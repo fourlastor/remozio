@@ -5,6 +5,7 @@ package dev.remozio.pairing
 import dev.remozio.protocol.*
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -24,6 +25,7 @@ class PairingSetupChannel private constructor(
     private var pending = ByteArray(0)
     private var offset = 0
     private val deadline: Job
+    private val expiresAt = TimeSource.Monotonic.markNow() + timeoutMillis.milliseconds
     init {
         require(timeoutMillis in 1..300_000)
         proposal.validateMacScope(invitation)
@@ -34,6 +36,10 @@ class PairingSetupChannel private constructor(
         }
     }
     val transcript: PairingTranscript get() = checkNotNull(staged)
+
+    /** Remaining setup budget for the selected channel, including time spent opening it. */
+    fun remainingSetupMillis(): Long =
+        if (closed.load()) 0 else (-expiresAt.elapsedNow()).inWholeMilliseconds.coerceAtLeast(0)
 
     private suspend fun authenticate() = operation {
         check(state == State.OPENING)

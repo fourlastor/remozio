@@ -2,6 +2,7 @@ package dev.sebastiano.remozio.android.biometrics
 
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.requests.ElapsedInstant
+import dev.sebastiano.remozio.android.enrollment.PairingDeadline
 
 import dev.remozio.protocol.*
 import java.security.KeyPairGenerator
@@ -35,15 +36,18 @@ class AndroidPairingBiometricsTest {
         return PairingTranscript(id(70), ByteArray(32) { 71 }, offer(ChannelRole.PHONE, 72), offer(ChannelRole.MAC, 73),
             1u, 1u, e.authorityPublicKey.copyBytes(), e.transportPublicKey.copyBytes().takeLast(65).toByteArray(),
             claim(e.transportKey), claim(e.decisionKey), claim(e.biometricKey), e.enrollmentTag.copyBytes(),
-            old?.let { PairingReplacement(it.phoneID.copyBytes(), it.epoch.copyBytes()) }, id(74), 1000u, 2000u)
+            old?.let { PairingReplacement(it.phoneID.copyBytes(), it.epoch.copyBytes()) }, id(74), 1_000_000u, 1_001_000u)
     }
     private val enrollment = record(1)
     private val transcript = transcript(enrollment)
     private val prepared = StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED, PreparedPairing(transcript, null, 1u))
     private var time = ElapsedInstant(1, 100u)
     private var current = true
-    private fun owner(wall: ULong = 1000u) = AndroidPairingBiometrics(prepared, biometric.private, biometric.public,
-        ElapsedInstant(1, 100u), wall, { time }, { current })
+    private fun newDeadline(wall: ULong = 1_000_000u, remaining: Long = 300_000) =
+        PairingDeadline(transcript, ElapsedInstant(1, 100u), remaining, wall)
+
+    private fun owner(deadline: PairingDeadline = newDeadline()) =
+        AndroidPairingBiometrics(prepared, biometric.private, biometric.public, deadline, { time }, { current })
 
     @Test fun proofUsesOnlyTheExactTranscriptAndBiometricPurpose() {
         val owner = owner(); val operation = owner.prepare(owner.beginAttempt())
@@ -80,12 +84,42 @@ class AndroidPairingBiometricsTest {
         owner.close()
     }
 
-    @Test fun lateAdmissionUsesOnlyRemainingSignedValidity() {
-        assertFailsWith<IllegalArgumentException> { owner(999u) }
-        assertFailsWith<IllegalArgumentException> { owner(2000u) }
-        val late = owner(1990u); val operation = late.prepare(late.beginAttempt())
-        time = ElapsedInstant(1, 110u)
-        assertFailsWith<BiometricAuthorizationUnavailable> { operation.complete(operation.signature) }
-        late.close()
+    @Test fun wallClockSkewOnlyControlsTheAdvisory() {
+        for ((wall, advisory) in listOf(970_000uL to false, 1_030_000uL to false, 939_999uL to true, 1_061_001uL to true)) {
+            time = ElapsedInstant(1, 100u)
+            val deadline = newDeadline(wall)
+            assertEquals(advisory, deadline.clockSkewAdvisory)
+            assertEquals(1100L, deadline.expiresElapsedMillis)
+            owner(deadline).use { signer ->
+                val operation = signer.prepare(signer.beginAttempt())
+                assertTrue(transcript.verify(operation.complete(operation.signature),
+                    enrollment.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
+            }
+        }
+    }
+
+    @Test fun loadingAgainAfterCancellationKeepsTheOriginalChannelDeadline() {
+        val deadline = newDeadline(remaining = 50)
+        assertEquals(150L, deadline.expiresElapsedMillis)
+        time = ElapsedInstant(1, 140u)
+        owner(deadline).use { signer -> signer.prepare(signer.beginAttempt()).close() }
+        owner(deadline).use { signer ->
+            val operation = signer.prepare(signer.beginAttempt())
+            time = ElapsedInstant(1, 150u)
+            assertFailsWith<BiometricAuthorizationUnavailable> { operation.complete(operation.signature) }
+            assertFailsWith<IllegalStateException> { signer.beginAttempt() }
+        }
+    }
+
+    @Test fun aConsumedChannelBudgetCannotStartAPrompt() {
+        owner(newDeadline(remaining = 0)).use { signer ->
+            assertFalse(signer.available())
+            assertFailsWith<IllegalStateException> { signer.beginAttempt() }
+        }
+    }
+
+    @Test fun aDeadlineFromAnotherTranscriptCannotLoadASigner() {
+        val other = PairingDeadline(transcript(record(2)), ElapsedInstant(1, 100u), 1_000, 1_000_000u)
+        assertFailsWith<IllegalArgumentException> { owner(other) }
     }
 }

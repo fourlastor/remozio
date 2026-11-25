@@ -49,10 +49,12 @@ class PairingSetupChannelCommonTest {
         val channel = PairingSetupChannel.connect(CoroutineScope(parent), stream, invitation, proposal)
         try {
             assertContentEquals(transcript.encode(), channel.transcript.encode())
+            assertTrue(channel.remainingSetupMillis() in 1L..300_000L)
             val wireBytes = stream.sent.fold(ByteArray(0)) { a, b -> a + b }
             assertContentEquals(wire(PairingSetupFrame.Proposal(proposal).encode()), wireBytes)
         } finally { channel.closeAndJoin(); parent.cancelAndJoin() }
         assertEquals(1, stream.closes)
+        assertEquals(0L, channel.remainingSetupMillis())
     }
 
     @Test fun rePairDoesNotWriteAProposalWhenTheDurableCheckpointFails(): Unit = runBlocking {
