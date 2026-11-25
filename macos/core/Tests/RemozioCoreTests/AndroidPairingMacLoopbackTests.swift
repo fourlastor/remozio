@@ -127,7 +127,8 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
             expectedTrustRevision: Data(repeating: 1, count: 16), issuedAtUnixMillis: issued, expiresAtUnixMillis: issued + 30_000)
     }
 
-    static func pairNativeClient(port: UInt16, invitation: PairingInvitationV2) async throws {
+    static func pairNativeClient(port: UInt16, invitation: PairingInvitationV2,
+                                 afterChallenge: @Sendable () async -> Void = {}) async throws {
         let transport = P256.Signing.PrivateKey()
         let biometric = P256.Signing.PrivateKey()
         let scope = try ChannelScope(macID: invitation.invitation.macID, accountID: invitation.invitation.accountID,
@@ -148,6 +149,7 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
         let exporter = Data(DispatchData._unconditionallyBridgeFromObjectiveC(secret))
         let prelude = try await AuthorityJournalSchema19MigrationTests.fixtureReadNativeFrame(from: channel, maximum: PairingSetupPreludeV2.maximumBytes)
         guard case .challenge(let challenge) = try PairingSetupPreludeV2.decode(prelude) else { throw FixtureError.unexpectedFrame }
+        await afterChallenge()
         let tag = try invitation.proof(proposal: proposal, challenge: challenge, exporter: exporter)
         try await AuthorityJournalSchema19MigrationTests.fixtureSendNativeFrame(
             PairingSetupPreludeV2.proposal(proposal, tag: tag).encode(), to: channel)
