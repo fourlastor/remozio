@@ -158,7 +158,11 @@ enum ProtectedMachineUpdateReplacement {
         let oldParent = expected == .before ? installed : prepared, oldName = expected == .before ? binding.installedName : binding.preparedName
         let newParent = expected == .before ? prepared : installed, newName = expected == .before ? binding.preparedName : binding.installedName
         let oldCounts = try oldParent.inspectInstalledApplication(name: oldName)
-        let newCounts = try newParent.inspectCopiedTree(name: newName)
+        let inspectCandidateMetadata: () throws -> ReleaseCopyCounts = switch expected {
+        case .before: { try newParent.inspectCopiedTree(name: newName) }
+        case .after: { try newParent.inspectInstalledApplication(name: newName) }
+        }
+        let newCounts = try inspectCandidateMetadata()
         let oldRelease = try inspect(URL(fileURLWithPath: oldParent.path).appendingPathComponent(oldName), app.teamID, app.identifier)
         let newRelease = try inspect(URL(fileURLWithPath: newParent.path).appendingPathComponent(newName), app.teamID, app.identifier)
         guard try InstallationInventory.digest(oldRelease) == context.inventory.releaseDigest,
@@ -167,7 +171,7 @@ enum ProtectedMachineUpdateReplacement {
         try snapshot.validate(newRelease, policy: policy, verifyCurrent: validate)
         guard try readPolicy() == policy,
               try oldParent.inspectInstalledApplication(name: oldName) == oldCounts,
-              try newParent.inspectCopiedTree(name: newName) == newCounts,
+              try inspectCandidateMetadata() == newCounts,
               try layout(binding, installed: installed, prepared: prepared) == expected else { throw MachineUpdateReplacementError.changedBinding }
         try validate(); return newRelease
     }

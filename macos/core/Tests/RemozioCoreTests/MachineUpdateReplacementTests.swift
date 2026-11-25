@@ -460,6 +460,92 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(result.record.phase, .observed); try f.assertAfter()
     }
 
+    func testRecoveryAcceptsMACLOnTheInstalledCandidateRoot() throws {
+        let f = try Fixture()
+        try interruptExchangeBeforeSync(f)
+        try setFixtureAttribute("com.apple.macl", value: Data(repeating: 0, count: 72), at: f.oldURL)
+        try f.reopen()
+
+        let observed = try observe(f)
+        XCTAssertEqual(observed.location, .installed)
+        XCTAssertEqual(observed.record.phase, .prepared)
+        XCTAssertEqual(try f.machine.store.machineUpdateReplacement(), observed.record)
+
+        var stages: [ProtectedMachineUpdateReplacement.Stage] = []
+        let recovered = try f.run(stage: { stages.append($0) })
+        XCTAssertEqual(stages, [.parentsSynchronized])
+        XCTAssertTrue(recovered.recoveredAfterExchange)
+        XCTAssertEqual(recovered.record.phase, .observed)
+        try f.assertAfter()
+        XCTAssertEqual(try observe(f).record, recovered.record)
+
+        stages.removeAll()
+        let repeated = try f.run(stage: { stages.append($0) })
+        XCTAssertEqual(stages, [.parentsSynchronized])
+        XCTAssertEqual(repeated.record, recovered.record)
+        try f.assertAfter()
+        let registration = try XCTUnwrap(f.machine.store.updateAdmissionRegistration())
+        XCTAssertThrowsError(try UpdateAdmissionBarrier(directory: f.directory, owner: getuid(),
+            expected: registration.machine).acquireAdmission())
+    }
+
+    func testPreparedCandidateRootRejectsMACLBeforeExchange() throws {
+        let f = try Fixture()
+        try setFixtureAttribute("com.apple.macl", value: Data(repeating: 0, count: 72), at: f.preparedURL)
+        XCTAssertThrowsError(try f.run()) { XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata) }
+        XCTAssertNil(try f.machine.store.machineUpdateReplacement())
+        try f.assertBefore()
+    }
+
+    func testRecoveryRejectsMACLOnAnInstalledCandidateChild() throws {
+        let f = try Fixture()
+        try interruptExchangeBeforeSync(f)
+        try setFixtureAttribute("com.apple.macl", value: Data(repeating: 0, count: 72),
+                                at: f.oldURL.appendingPathComponent("fixture"))
+        try assertUnsafeMetadataLeavesPreparedExchange(f)
+    }
+
+    func testRecoveryRejectsAnUnknownAttributeOnTheInstalledCandidateRoot() throws {
+        let f = try Fixture()
+        try interruptExchangeBeforeSync(f)
+        try setFixtureAttribute("dev.remozio.fixture", value: Data([1]), at: f.oldURL)
+        try assertUnsafeMetadataLeavesPreparedExchange(f)
+    }
+
+    private func interruptExchangeBeforeSync(_ f: Fixture) throws {
+        XCTAssertThrowsError(try f.run(stage: {
+            if $0 == .exchangedBeforeParentSync { throw ReplacementFixtureError.injected }
+        })) { XCTAssertEqual($0 as? ReplacementFixtureError, .injected) }
+        try f.assertAfter()
+        XCTAssertEqual(try f.machine.store.machineUpdateReplacement()?.phase, .prepared)
+    }
+
+    private func assertUnsafeMetadataLeavesPreparedExchange(_ f: Fixture) throws {
+        try f.reopen()
+        let prepared = try XCTUnwrap(f.machine.store.machineUpdateReplacement())
+        XCTAssertThrowsError(try observe(f)) { XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata) }
+        XCTAssertThrowsError(try f.machine.store.machineUpdateReplacement()) {
+            XCTAssertEqual($0 as? PreparationStoreError, .unavailable)
+        }
+        try f.reopen()
+        XCTAssertThrowsError(try f.run()) { XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata) }
+        XCTAssertThrowsError(try f.machine.store.machineUpdateReplacement()) {
+            XCTAssertEqual($0 as? PreparationStoreError, .unavailable)
+        }
+        try f.reopen()
+        XCTAssertEqual(try f.machine.store.machineUpdateReplacement(), prepared)
+        try f.assertAfter()
+    }
+
+    private func setFixtureAttribute(_ name: String, value: Data, at path: URL) throws {
+        let fd = open(path.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { throw JournalLeaseError.system(errno) }
+        defer { close(fd) }
+        guard value.withUnsafeBytes({ fsetxattr(fd, name, $0.baseAddress, $0.count, 0, 0) }) == 0 else {
+            throw JournalLeaseError.system(errno)
+        }
+    }
+
     func testAFailedRecoveredParentSyncKeepsThePreparedRecord() throws {
         let f = try Fixture()
         XCTAssertThrowsError(try f.run(stage: { if $0 == .exchangedBeforeParentSync { throw ReplacementFixtureError.injected } }))
