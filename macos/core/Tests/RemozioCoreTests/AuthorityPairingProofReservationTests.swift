@@ -147,15 +147,25 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
         XCTAssertNoThrow(try fixture.register(reservations, acceptedAt: 101))
     }
 
-    func testSecondValidProofCannotClaimAnAlreadySpentWindow() throws {
+    func testSixteenRegistrationsStillAllowOnlyOneProofToSpendTheWindow() throws {
         let fixture = try Fixture(), reservations = try fixture.reservations()
-        let first = try fixture.register(reservations)
-        let exporter = Data(repeating: 22, count: 32)
-        let second = try fixture.register(reservations, exporter: exporter)
-        try fixture.verify(reservations, first)
-        XCTAssertThrowsError(try fixture.verify(reservations, second, exporter: exporter))
-        XCTAssertThrowsError(try reservations.confirm(candidate: second.id))
-        try reservations.confirm(candidate: first.id)
+        let candidates = try (0..<16).map { index in
+            let exporter = Data(repeating: UInt8(index), count: 32)
+            return (try fixture.register(reservations, exporter: exporter), exporter)
+        }
+        XCTAssertEqual(reservations.pendingCount, 16)
+        let refill = (1_000 + PairingRegistrationBudget.registrationsPerSecond - 1) / PairingRegistrationBudget.registrationsPerSecond
+        fixture.clock.advance(to: 100 + refill)
+        XCTAssertThrowsError(try fixture.register(reservations))
+        let (selected, exporter) = candidates[0]
+        try fixture.verify(reservations, selected, exporter: exporter)
+        XCTAssertEqual(reservations.pendingCount, 0)
+        for (candidate, exporter) in candidates.dropFirst() {
+            XCTAssertThrowsError(try fixture.verify(reservations, candidate, exporter: exporter))
+            XCTAssertThrowsError(try reservations.confirm(candidate: candidate.id))
+        }
+        try reservations.confirm(candidate: selected.id)
+        XCTAssertThrowsError(try fixture.window.export(at: fixture.clock.now()))
     }
 
     func testVerifyPolicyFailureBlocksEveryProofOperation() throws {
@@ -228,8 +238,9 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
     func testReplayCapacityExceedsAllRegistrationsTheBudgetCanAdmitDuringAWindow() {
         let duration = AuthorityPairingSetupConfiguration.maximumLifetimeMilliseconds
         let rate = PairingRegistrationBudget.registrationsPerSecond
-        let required = PairingRegistrationBudget.burst + (duration * rate + 999) / 1_000
-        XCTAssertLessThan(required, UInt64(AuthorityPairingProofReservations.maximumRegistrations))
+        let required = PairingRegistrationBudget.authorityBurst + (duration * rate + 999) / 1_000
+        XCTAssertEqual(required, 9_616)
+        XCTAssertGreaterThanOrEqual(UInt64(AuthorityPairingProofReservations.maximumRegistrations), required)
     }
 
     func testRegistrationRecoversAfterMoreThan256RetirementsInOneWindow() throws {
@@ -259,7 +270,7 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
         let duplicate = UUID()
         let candidate = try fixture.register(reservations, connection: duplicate)
         reservations.retire(candidate: candidate.id)
-        for _ in 1..<PairingRegistrationBudget.burst {
+        for _ in 1..<PairingRegistrationBudget.authorityBurst {
             XCTAssertThrowsError(try fixture.register(reservations, connection: duplicate))
         }
         let refill = (1_000 + PairingRegistrationBudget.registrationsPerSecond - 1) / PairingRegistrationBudget.registrationsPerSecond
@@ -272,7 +283,7 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
     func testRegistrationBudgetRejectsARegressedOrChangedClock() {
         let epoch = UUID()
         for invalid in [AuthorityMoment(epoch: epoch, milliseconds: 99), .init(epoch: UUID(), milliseconds: 101)] {
-            var budget = PairingRegistrationBudget()
+            var budget = PairingRegistrationBudget.authority
             XCTAssertTrue(budget.spend(at: .init(epoch: epoch, milliseconds: 100)))
             XCTAssertFalse(budget.spend(at: invalid))
             XCTAssertFalse(budget.spend(at: .init(epoch: epoch, milliseconds: 1_100)))
@@ -281,12 +292,12 @@ final class AuthorityPairingProofReservationTests: XCTestCase {
 
     func testRegistrationBudgetRefillSaturatesAfterALargeClockAdvance() {
         let epoch = UUID()
-        var budget = PairingRegistrationBudget()
-        for _ in 0..<PairingRegistrationBudget.burst {
+        var budget = PairingRegistrationBudget.authority
+        for _ in 0..<PairingRegistrationBudget.authorityBurst {
             XCTAssertTrue(budget.spend(at: .init(epoch: epoch, milliseconds: 100)))
         }
         XCTAssertFalse(budget.spend(at: .init(epoch: epoch, milliseconds: 100)))
-        for _ in 0..<PairingRegistrationBudget.burst {
+        for _ in 0..<PairingRegistrationBudget.authorityBurst {
             XCTAssertTrue(budget.spend(at: .init(epoch: epoch, milliseconds: UInt64.max)))
         }
         XCTAssertFalse(budget.spend(at: .init(epoch: epoch, milliseconds: UInt64.max)))

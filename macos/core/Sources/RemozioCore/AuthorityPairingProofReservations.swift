@@ -98,17 +98,18 @@ final class AuthorityPairingProofReservations: Sendable {
     }
 
     private struct State {
-        var budget = PairingRegistrationBudget()
+        var budget = PairingRegistrationBudget.authority
         var connectionIDs: Set<UUID> = []
         // Keep an exporter fingerprint for replay rejection after its raw bytes leave pending.
         var exporterDigests: Set<SHA256.Digest> = []
         var retired = false
     }
 
-    static let maximumPending = 4
-    // Each link lasts at most one window. The budget permits at most burst + ceil(rate × duration)
-    // registrations, or 2,408 with a 300-second window. The ledger keeps full-link replay protection.
-    static let maximumRegistrations = 3_000
+    static let maximumPending = 16
+    // Cover burst + ceil(rate × window duration), or 16 + 32 × 300 = 9,616 registrations.
+    // At 10,000 entries the UUIDs and SHA-256 digests use about 469 KiB before Set storage overhead.
+    // The ledger retains replay protection for the whole proof link.
+    static let maximumRegistrations = 10_000
     private let window: AuthorityPairingV2Window
     private let link: AuthorityPairingProofLink
     private let now: @Sendable () throws -> AuthorityMoment
