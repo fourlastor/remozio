@@ -55,7 +55,8 @@ final class PairingControlIngressFixture: TransportPairingIngress, @unchecked Se
                  handler: @escaping @Sendable (any TransportPairingPeer) async throws -> Void) {
         lock.withLock { self.event = event; self.handler = handler }
     }
-    func start() throws { let event = lock.withLock { starts += 1; return self.event }; event?(.ready(port: 4321)) }
+    func start() throws { lock.withLock { starts += 1 }; report(.ready(port: 4321)) }
+    func report(_ value: DirectListenerEvent) { let event = lock.withLock { self.event }; event?(value) }
     func accept(_ peer: any TransportPairingPeer) {
         lock.withLock {
             guard !closed, let handler else { peer.abort(); return }
@@ -129,10 +130,13 @@ final class PairingControlLocalDriver: TransportPairingDriver, @unchecked Sendab
             case .prepareV2(let id):
                 calls.append("prepareV2")
                 endpoint.preparePairingV2(id) { reply(.flag($0)) }
-            case let .beginV2(id, windowID, invitation, lifetime):
-                calls.append("beginV2")
-                endpoint.beginPairingV2(id, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime) {
-                    reply(.number($0))
+            case let .beginV2(id, windowID, invitation, lifetime, requiresLAN):
+                calls.append(requiresLAN ? "beginV2LAN" : "beginV2")
+                let complete: @Sendable (UInt64) -> Void = { reply(.number($0)) }
+                if requiresLAN {
+                    endpoint.beginPairingV2LAN(id, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime, reply: complete)
+                } else {
+                    endpoint.beginPairingV2(id, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime, reply: complete)
                 }
             case .snapshot:
                 calls.append("snapshot")
@@ -182,6 +186,49 @@ final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
         let snapshot = try await client.current()
         return try XCTUnwrap(snapshot.candidates.first)
     }
+    func testScopedBonjourRouteLossAfterWithdrawalFailsAndAbortsTransport() async throws {
+        let f = try TransportPairingFixture(), ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)
+        let peer = PairingControlPeerFixture(f.proposal)
+        let port = try await owner.begin(f.invitation)
+        ingress.accept(peer)
+        try await until { try await !owner.snapshot().candidates.isEmpty }
+
+        let address = try XCTUnwrap(PairingLANRoute.Address(family: .ipv4, bytes: Data([192, 168, 5, 11])))
+        let queue = DispatchQueue(label: "pairing-route-loss-fixture")
+        let state = ScopedBonjourRouteFixture()
+        let advertisement = PairingLANAdvertisement(queue: queue, register: { _, _, _, _, _, report in
+            report(true)
+            return { state.withdrawals.withLock { $0 += 1 } }
+        })
+        defer { queue.sync { advertisement.close() }; owner.abort() }
+        queue.sync {
+            advertisement.start(name: "R-fixture", index: 7, port: port, address: address,
+                                isCurrent: { state.current.withLock { $0 } }) { event in
+                if case .failed = event {
+                    state.failures.withLock { $0 += 1 }
+                    ingress.report(event)
+                }
+            }
+            advertisement.withdraw()
+        }
+        XCTAssertEqual(state.withdrawals.withLock { $0 }, 1)
+        XCTAssertEqual(state.failures.withLock { $0 }, 0)
+        state.current.withLock { $0 = false }
+
+        try await until { await peer.isClosed }
+        XCTAssertEqual(state.failures.withLock { $0 }, 1)
+        XCTAssertEqual(state.withdrawals.withLock { $0 }, 1)
+        do { _ = try await owner.snapshot(); XCTFail("Route loss must close setup") }
+        catch TransportPairingControlError.closed {}
+        await owner.closeAndWait()
+    }
+
+    private final class ScopedBonjourRouteFixture: Sendable {
+        let current = Mutex(true)
+        let withdrawals = Mutex(0)
+        let failures = Mutex(0)
+    }
+
     func testProtectedMetadataAndStartupRoundTripPreserveExistingTransport() throws {
         let f = try TransportPairingFixture(), config = try TransportPairingControlConfiguration.decode(f.configuration.canonicalBytes)
         XCTAssertEqual(config.appPolicy.expectedUserID, 501); XCTAssertEqual(config.transportPolicy.expectedUserID, 20002)

@@ -215,11 +215,12 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             let completed = try work { () -> (UInt64, Data?) in
                 guard maximumVersion >= 1, let owners else { return (0, nil) }
                 guard access.requiresInstalledV2 else { return (1, nil) }
-                guard maximumVersion >= 2, rendezvous == nil, v2Window == nil, attempt == nil else { return (0, nil) }
-                let pending = AuthorityPairingRendezvous(revision: access.activationRevision)
+                let version: UInt64 = access.lanScope == nil ? 2 : 3
+                guard maximumVersion >= version, rendezvous == nil, v2Window == nil, attempt == nil else { return (0, nil) }
+                let pending = AuthorityPairingRendezvous(revision: access.activationRevision, lanScope: access.lanScope)
                 owners.register(pending)
                 rendezvous = pending
-                return (2, pending.id)
+                return (version, pending.id)
             }
             defer { completed.completion.close() }
             send { reply(completed.value.0, completed.value.1) }
@@ -230,11 +231,15 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                                 reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
             guard let rendezvous, rendezvous.id == rendezvousID, v2Window == nil, attempt == nil else { return nil }
+            var opened = false
+            defer { if !opened { retireRendezvous() } }
             let selection = try predecessor.map(PairedPhoneSelection.decode)
             guard try rendezvous.admitOpening(revision: access.activationRevision, {
                 try access.requestV2Activation(revision: access.activationRevision, compositionReady: true) == .active
             }) else { return nil }
-            return try openV2Window(label: label, predecessor: selection, publish: rendezvous.publishWindow)
+            let invitation = try openV2Window(label: label, predecessor: selection, publish: rendezvous.publishWindow)
+            opened = true
+            return invitation
         }
     }
 
@@ -422,8 +427,15 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             if let operation = $0.currentOperation { $0.replyingVersions[operation] = admission }
         }
     }
+    private func retireRendezvous() {
+        guard let rendezvous else { return }
+        if let owners { owners.retire(rendezvous) }
+        else { rendezvous.retire() }
+        self.rendezvous = nil
+    }
+
     private func closeV2Window() {
-        if let rendezvous { owners?.retire(rendezvous); self.rendezvous = nil }
+        retireRendezvous()
         v2Window?.close()
         clearV2Admission()
     }

@@ -226,18 +226,25 @@ public actor TransportPairingSetupOwner {
         } catch { prepared.close(); throw error }
     }
 
-    func beginInstalledV2(_ window: MacPairingV2PublicWindow, rendezvousID: Data) async throws -> UInt16 {
+    func beginInstalledV2(_ window: MacPairingV2PublicWindow, rendezvousID: Data, requiresLAN: Bool = false) async throws -> UInt16 {
         try active()
         guard !started, !openingProofLink, proofClient == nil, let installedIdentity,
               let preparedProof, preparedProof.id == rendezvousID else { throw TransportPairingControlError.invalidMessage }
         openingProofLink = true
         defer { self.preparedProof = nil; openingProofLink = false }
-        let client = try await preparedProof.link.finish(windowID: window.id)
+        let binding = try await preparedProof.link.finish(windowID: window.id)
+        let client = binding.client
         do {
             try active()
             proofClient = client
+            guard requiresLAN == (binding.lan != nil) else { throw TransportPairingControlError.invalidMessage }
+            let route: PairingLANRoute?
+            if let lan = binding.lan {
+                route = try await PairingLANRoute.resolve(lan.scope, timeoutMilliseconds: configuration.timeoutMilliseconds)
+            } else { route = nil }
+            try active()
             let ingress = PairingSetupV2Ingress(windowID: window.id, lifetimeMilliseconds: window.lifetimeMilliseconds, authority: client)
-            return try await beginV2(window, identity: installedIdentity.identity, ingress: ingress)
+            return try await beginV2(window, identity: installedIdentity.identity, ingress: ingress, lanRoute: route, lanBinding: binding.lan)
         } catch { client.close(); throw error }
     }
 
@@ -275,13 +282,14 @@ public actor TransportPairingSetupOwner {
     }
 
     private func beginV2(_ window: MacPairingV2PublicWindow, identity: SecIdentity,
-                         ingress: PairingSetupV2Ingress) async throws -> UInt16 {
+                         ingress: PairingSetupV2Ingress, lanRoute: PairingLANRoute? = nil, lanBinding: PairingLANBinding? = nil) async throws -> UInt16 {
         let holder = PairingIdentityHolder(identity)
         let rePair = window.replacement.map { RePairInvitation(invitation: window.invitation, predecessor: $0) }
         return try await begin(window.invitation, rePair: rePair, v2Factory: { invitation, event, handler in
-            let listener = try PairingSetupListener(identity: holder.identity, invitation: invitation, binding: .loopback,
-                maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
-                setupTimeoutMilliseconds: window.lifetimeMilliseconds, v2: ingress, event: event, handler: { try await handler($0) })
+            let listener = try PairingSetupListener(identity: holder.identity, invitation: invitation,
+                binding: lanRoute == nil ? .loopback : .localNetwork, maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
+                setupTimeoutMilliseconds: window.lifetimeMilliseconds, v2: ingress, lanRoute: lanRoute, lanBinding: lanBinding,
+                event: event, handler: { try await handler($0) })
             return NativePairingIngress(listener: listener)
         })
     }

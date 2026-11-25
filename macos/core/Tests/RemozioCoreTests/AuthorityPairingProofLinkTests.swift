@@ -696,6 +696,23 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testRejectedLegacyBindRetiresTheLinkBeforeTheBootstrapCloses() async throws {
+        let fixture = try HandoffFixture()
+        let parent = try await bootstrap(fixture.native)
+        let replacement = try await bootstrap(fixture.native)
+        defer { parent.invalidate(); replacement.invalidate() }
+        let offered = await offer(on: parent)
+        let client = proofConnection(to: try XCTUnwrap(offered.1), requirement: fixture.native.requirement)
+        defer { client.invalidate() }
+        let version = await hello(on: client)
+        XCTAssertEqual(version, AuthorityPairingProofWire.handoffVersion)
+
+        let bound = await proofExchange(on: client, fallback: false) { $0.bindWindow(Data(count: 16), reply: $1) }
+        XCTAssertFalse(bound)
+        let next = try await waitForOffer(on: replacement)
+        XCTAssertNotNil(next)
+    }
+
     func testClosingBootstrapBeforeHandoffRetiresTheBoundProofLink() async throws {
         let fixture = try HandoffFixture()
         let parent = try await bootstrap(fixture.native)

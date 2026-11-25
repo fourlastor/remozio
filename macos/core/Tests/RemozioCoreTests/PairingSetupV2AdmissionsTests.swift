@@ -31,6 +31,19 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
         }
     }
 
+    func testCompletingScopedProofRejectsNewConnectionsBeforeBonjourWithdrawal() {
+        var fixture = Fixture()
+        let winner = UUID()
+        XCTAssertEqual(fixture.admit(winner, source: "winner"), .admitted(evicting: nil))
+        XCTAssertFalse(fixture.admission.completeVerification(winner, at: fixture.started, closeAdmission: true))
+        XCTAssertEqual(fixture.admit(source: "other"), .admitted(evicting: nil))
+        XCTAssertTrue(fixture.admission.beginVerification(winner, at: fixture.started))
+        XCTAssertTrue(fixture.admission.completeVerification(winner, at: fixture.started, closeAdmission: true))
+        XCTAssertFalse(fixture.admission.remove(winner))
+        XCTAssertEqual(fixture.admit(source: "new", offset: 500), .rejected)
+        XCTAssertEqual(fixture.admit(source: "winner", offset: 1_000), .rejected)
+    }
+
     func testSameSourceReplacesOnlyItsOwnUnprovedSlot() {
         var fixture = Fixture()
         let busy = UUID(), peer = UUID()

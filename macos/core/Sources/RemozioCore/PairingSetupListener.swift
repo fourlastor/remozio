@@ -62,6 +62,9 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.remozio.pairing-listener")
     private let lock = NSLock()
     private let invitation: PairingInvitation
+    private let lanRoute: PairingLANRoute?
+    private let lanBinding: PairingLANBinding?
+    private let advertisement: PairingLANAdvertisement?
     private let v2: PairingSetupV2Ingress?
     private let applicationProtocol: String
     private let intakeClock: AuthorityClock?
@@ -91,24 +94,31 @@ public final class PairingSetupListener: @unchecked Sendable {
 
     init(identity: SecIdentity, invitation: PairingInvitation, binding: DirectApprovalListener.Binding,
          maximumConnections: Int, handshakeTimeoutMilliseconds: UInt64, setupTimeoutMilliseconds: UInt64,
-         v2: PairingSetupV2Ingress?, proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+         v2: PairingSetupV2Ingress?, lanRoute: PairingLANRoute? = nil, lanBinding: PairingLANBinding? = nil,
+         proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
          registrationLane: PairingSetupV2RegistrationLane = PairingSetupV2RegistrationLane(),
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
               (1...300_000).contains(setupTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
+        guard (lanRoute == nil) == (lanBinding == nil) else { throw DirectListenerError.invalidConfiguration }
+        if lanRoute?.isCurrent == false { throw TransportPairingControlError.unavailableInterface }
         if let v2 {
-            guard binding == .loopback, v2.windowID.count == 16, (1...300_000).contains(v2.lifetimeMilliseconds) else {
+            guard binding == (lanRoute == nil ? .loopback : .localNetwork), v2.windowID.count == 16,
+                  (1...300_000).contains(v2.lifetimeMilliseconds),
+                  lanBinding == nil || (lanBinding?.windowID == v2.windowID && lanBinding?.scope == lanRoute?.scope) else {
                 throw DirectListenerError.invalidConfiguration
             }
-        }
+        } else if lanRoute != nil { throw DirectListenerError.invalidConfiguration }
         var certificate: SecCertificate?
         guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess, let certificate,
               Self.candidatePoint(certificate: SecCertificateCopyData(certificate) as Data) == invitation.transportPublicKey,
               let local = sec_identity_create(identity) else { throw DirectListenerError.invalidIdentity }
         self.invitation = invitation; self.maximumConnections = maximumConnections
         self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.setupTimeoutMilliseconds = setupTimeoutMilliseconds
-        self.handler = handler; self.event = event; self.v2 = v2; self.proofTime = proofTime
+        self.handler = handler; self.event = event; self.v2 = v2; self.proofTime = proofTime; self.lanRoute = lanRoute
+        self.lanBinding = lanBinding
+        advertisement = lanRoute == nil ? nil : PairingLANAdvertisement(queue: queue)
         self.registrationLane = registrationLane
         intakeClock = try v2.map { _ in try AuthorityClock() }
         let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
@@ -125,15 +135,13 @@ public final class PairingSetupListener: @unchecked Sendable {
             complete(Self.candidatePoint(metadata: metadata) != nil)
         }, queue)
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-        if binding == .loopback { parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any) }
+        if let lanRoute {
+            parameters.requiredInterface = lanRoute.interface
+            parameters.requiredLocalEndpoint = .hostPort(host: lanRoute.address.host, port: .any)
+        } else if binding == .loopback { parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any) }
         listener = try NWListener(using: parameters)
-        if binding == .localNetwork {
-            func id(_ data: Data) -> String {
-                data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
-                    .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-            }
-            var service = NWListener.Service(name: "R-" + id(invitation.macID) + "-" + id(invitation.accountID),
-                type: "_remozio-pairing._tcp.")
+        if binding == .localNetwork && lanRoute == nil {
+            var service = NWListener.Service(name: Self.serviceName(invitation), type: "_remozio-pairing._tcp.")
             service.noAutoRename = true; listener.service = service
         }
         listener.stateUpdateHandler = { [weak self] in self?.changed($0) }
@@ -144,14 +152,21 @@ public final class PairingSetupListener: @unchecked Sendable {
     public func start() throws {
         try lock.withLock {
             guard !started, !closed else { throw DirectListenerError.alreadyStarted }
-            started = true; listener.start(queue: queue)
             if let v2 {
-                let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(v2.lifetimeMilliseconds)))
+                // Authority and Transport obtain milliseconds from the same host sleep-inclusive clock.
+                let beforeSample = ContinuousClock.now
+                let lifetime: UInt64
+                if lanBinding != nil {
+                    guard let remaining = lanRemainingLifetime() else { throw PairingSetupChannelError.closed }
+                    lifetime = remaining
+                } else { lifetime = v2.lifetimeMilliseconds }
+                let deadline = beforeSample.advanced(by: .milliseconds(Int64(lifetime)))
                 expiry = Task { [weak self] in
                     do { try await ContinuousClock().sleep(until: deadline) } catch { return }
                     self?.close()
                 }
             }
+            started = true; listener.start(queue: queue)
         }
         queue.asyncAfter(deadline: .now() + .milliseconds(Int(handshakeTimeoutMilliseconds))) { [weak self] in
             guard let self else { return }
@@ -164,14 +179,46 @@ public final class PairingSetupListener: @unchecked Sendable {
         close()
         let tasks = lock.withLock { retired.values.compactMap(\.task) }
         for task in tasks { await task.value }
+        if let advertisement {
+            await withCheckedContinuation { continuation in
+                queue.async { advertisement.close(); continuation.resume() }
+            }
+        }
     }
+
+    private static func serviceName(_ invitation: PairingInvitation) -> String {
+        func id(_ data: Data) -> String {
+            data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        }
+        return "R-" + id(invitation.macID) + "-" + id(invitation.accountID)
+    }
+
+    private func lanRemainingLifetime() -> UInt64? {
+        guard let lanBinding, let v2, let now = try? intakeClock?.now() else { return nil }
+        return lanBinding.remainingMilliseconds(at: now.milliseconds, windowLifetime: v2.lifetimeMilliseconds)
+    }
+
+    private func publishReady(_ port: UInt16) {
+        let announce = lock.withLock { () -> Bool in guard !closed && !ready else { return false }; ready = true; return true }
+        if announce { event(.ready(port: port)) }
+    }
+
     deinit { close() }
     private func changed(_ state: NWListener.State) {
         switch state {
         case .ready:
             guard let port = listener.port else { finish(.failed); return }
-            let announce = lock.withLock { () -> Bool in guard !closed, !ready else { return false }; ready = true; return true }
-            if announce { event(.ready(port: port.rawValue)) }
+            if let lanRoute, let advertisement {
+                guard lock.withLock({ !closed }) else { return }
+                advertisement.start(name: Self.serviceName(invitation), index: lanRoute.index, port: port.rawValue, address: lanRoute.address,
+                                    isCurrent: { [weak self] in lanRoute.isCurrent && self?.lanRemainingLifetime() != nil }) { [weak self] event in
+                    switch event {
+                    case .ready(let port): self?.publishReady(port)
+                    case .failed, .stopped: self?.finish(event)
+                    }
+                }
+            } else { publishReady(port.rawValue) }
         case .failed: finish(.failed)
         case .cancelled: finish(.stopped)
         default: break
@@ -190,6 +237,9 @@ public final class PairingSetupListener: @unchecked Sendable {
         var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
             guard started, !closed else { return nil }
+            if let lanBinding {
+                guard ready, let acceptedAt, acceptedAt.milliseconds < lanBinding.expiresAtMilliseconds else { return nil }
+            }
             if self.v2 == nil {
                 guard slots.count < maximumConnections else { return nil }
             } else {
@@ -295,11 +345,14 @@ public final class PairingSetupListener: @unchecked Sendable {
 
     private func completeVerification(_ id: UUID) throws {
         try lock.withLock {
-            guard !closed, let slot = slots[id], v2Admissions.completeVerification(id, at: proofTime()) else {
+            guard !closed, let slot = slots[id],
+                  v2Admissions.completeVerification(id, at: proofTime(), closeAdmission: lanBinding != nil) else {
                 throw PairingSetupChannelError.rejected
             }
             slot.proofTimer?.cancel(); slot.proofTimer = nil
         }
+        // Keep the accepted candidate alive for confirmation and receipt delivery.
+        if let advertisement { queue.async { advertisement.withdraw() } }
     }
 
     private func expireProof(_ id: UUID) {
@@ -341,7 +394,10 @@ public final class PairingSetupListener: @unchecked Sendable {
         guard let owned else { return }
         listener.cancel()
         for slot in owned { cancel(slot) }
-        queue.async { [event] in event(result) }
+        queue.async { [advertisement, event] in
+            advertisement?.close()
+            event(result)
+        }
     }
     // This verifies a TLS candidate's key, not enrollment, hardware custody or authorization.
     static func candidatePoint(certificate data: Data) -> Data? {

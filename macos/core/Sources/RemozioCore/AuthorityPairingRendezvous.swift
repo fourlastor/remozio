@@ -18,15 +18,17 @@ final class AuthorityPairingRendezvous: Sendable {
     }
 
     let id = AuthorityPairingProofWire.bytes(UUID())
-    private let revision: AuthorityPairingSetupAccess.V2ActivationRevision
+    let revision: AuthorityPairingSetupAccess.V2ActivationRevision
+    let lanScope: PairingLANScope?
     private let deadline: ContinuousClock.Instant
     private let now: @Sendable () -> ContinuousClock.Instant
     private let state = Mutex(State.waiting)
 
-    init(revision: AuthorityPairingSetupAccess.V2ActivationRevision,
+    init(revision: AuthorityPairingSetupAccess.V2ActivationRevision, lanScope: PairingLANScope? = nil,
          deadline: ContinuousClock.Instant = .now.advanced(by: AuthorityPairingProofWire.bootstrapTimeout),
          now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.revision = revision
+        self.lanScope = lanScope
         self.deadline = deadline
         self.now = now
     }
@@ -48,7 +50,8 @@ final class AuthorityPairingRendezvous: Sendable {
         }
     }
 
-    /// The revision belongs to one access instance. The current-role checks still apply to both peers.
+    /// A token cannot cross access incarnations. On a live endpoint this compares the immutable startup revision.
+    /// Role validation and protected publication govern changes to the installed policy.
     func admitOpening(revision: AuthorityPairingSetupAccess.V2ActivationRevision, _ promote: () throws -> Bool) throws -> Bool {
         try state.withLock {
             guard case .ready(let verified) = $0, self.revision == revision, now() < verified.offerDeadline else {
@@ -75,6 +78,10 @@ final class AuthorityPairingRendezvous: Sendable {
             guard case .opened(let verified) = $0 else { return false }
             return verified.link === link && now() < verified.offerDeadline
         }
+    }
+
+    var isRetired: Bool {
+        state.withLock { if case .retired = $0 { return true }; return false }
     }
 
     func retire() { state.withLock { $0 = .retired } }

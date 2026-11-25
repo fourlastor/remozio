@@ -25,11 +25,12 @@ struct PairingSetupV2Admissions {
     private var pending: [Pending] = []
     private var sources: [PairingSetupV2Source: (until: ContinuousClock.Instant, attempts: Int)] = [:]
     private var budget = PairingRegistrationBudget()
+    private var admissionClosed = false
 
     mutating func admit(_ id: UUID, source: PairingSetupV2Source, accepted: ContinuousClock.Instant,
                         clock: AuthorityMoment, draining: [PairingSetupV2Source]) -> Admission {
         // Keep one pending turn per source. A repeat can replace its own unproved slot only.
-        guard draining.lazy.filter({ $0 == source }).count < 2,
+        guard !admissionClosed, draining.lazy.filter({ $0 == source }).count < 2,
               pending.count + draining.count < Self.maximumPending + Self.maximumDraining else { return .rejected }
 
         var victim: Int?
@@ -68,11 +69,12 @@ struct PairingSetupV2Admissions {
         pending.contains { $0.id == id && $0.phase == .verifying && now < $0.deadline }
     }
 
-    mutating func completeVerification(_ id: UUID, at now: ContinuousClock.Instant) -> Bool {
+    mutating func completeVerification(_ id: UUID, at now: ContinuousClock.Instant, closeAdmission: Bool = false) -> Bool {
         guard let index = pending.firstIndex(where: { $0.id == id && $0.phase == .verifying && now < $0.deadline }) else {
             return false
         }
         pending.remove(at: index)
+        if closeAdmission { admissionClosed = true }
         return true
     }
 

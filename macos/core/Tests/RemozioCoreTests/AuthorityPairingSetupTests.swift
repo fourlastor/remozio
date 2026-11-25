@@ -49,7 +49,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let account: Data
         init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false,
              accountByte: UInt8 = 2, configureTransport: Bool = false, pairingLifetime: UInt64 = 1000,
-             v2ActivationEnabled: Bool? = nil, transportIdentity: P256.Signing.PrivateKey? = nil,
+             v2ActivationEnabled: Bool? = nil, lanScope: PairingLANScope? = nil, transportIdentity: P256.Signing.PrivateKey? = nil,
              observePairingContention: @escaping @Sendable () -> Void = {}) throws {
             transport = transportIdentity ?? P256.Signing.PrivateKey()
             self.account = Data(repeating: accountByte, count: 16)
@@ -103,7 +103,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: getuid())
             let journal = journal, environment = environment, authority = authority
             pairingConfiguration = try .init(transportPublicKey: transport.publicKey.x963Representation,
-                lifetimeMilliseconds: pairingLifetime, v2ActivationEnabled: v2ActivationEnabled)
+                lifetimeMilliseconds: pairingLifetime, v2ActivationEnabled: v2ActivationEnabled, lanScope: lanScope)
             access = try .init(journal: journal, macID: mac, accountID: account, authorityPublicKey: authority.publicKey.x963Representation,
                 appPolicy: policy, configuration: pairingConfiguration,
                 minimumEnvelopeVersion: 1, auditVersions: auditVersions, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
@@ -227,7 +227,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 commitSends.value += 1
                 endpoint.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
             case .setupHello:
-                endpoint.pairingSetupHello(maximumVersion: 2) { complete(.setupVersion($0, $1)) }
+                endpoint.pairingSetupHello(maximumVersion: 3) { complete(.setupVersion($0, $1)) }
             case let .openV2(label, predecessor, rendezvousID):
                 if let rendezvousID {
                     do {
@@ -364,7 +364,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .commit(let setup, let digest, let proof, let authorization):
                 proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
             case .setupHello:
-                proxy.pairingSetupHello(maximumVersion: 2) { [trace] version, id in
+                proxy.pairingSetupHello(maximumVersion: 3) { [trace] version, id in
                     trace?.setupReply.value = version
                     complete(.setupVersion(version, id))
                 }
@@ -935,6 +935,30 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.calls, ["hello", "begin"])
     }
 
+    func testInstalledSessionWithExplicitFalseKeepsTheLegacyInvitation() async throws {
+        let f = try Fixture(v2ActivationEnabled: false), requirement = try testRequirement(), trace = PhoneManagementTrace()
+        let server = NativeServer(f, requirement: requirement, installedPairing: true)
+        defer { server.close() }
+        let pairing = try TransportPairingFixture(), ingress = PairingControlIngressFixture()
+        let driver = PairingControlLocalDriver(owner: ingress.owner(pairing.configuration))
+        let session = try MacPairingSession(openInstalledRoot: {
+            trace.opens.value += 1
+            return AuthorityPairingChannel(driver: NativeDriver(endpoint: server.listener.endpoint, policy: f.policy,
+                requirement: requirement, trace: trace), macID: f.mac, accountID: f.account)
+        }, installedTransport: TransportPairingChannel(configuration: pairing.configuration, driver: driver),
+            administrator: V2AdministratorFixture(), unixMilliseconds: { 1000 }, elapsedMilliseconds: { 100 })
+        defer { session.abort() }
+
+        let snapshot = try await session.start(label: "Fixture")
+        XCTAssertEqual(snapshot.phase, .waitingForPhone)
+        XCTAssertNotNil(snapshot.invitation)
+        XCTAssertNil(snapshot.invitationV2)
+        XCTAssertFalse(snapshot.usesLoopbackOnlyV2)
+        XCTAssertEqual(trace.opens.value, 1)
+        XCTAssertEqual(trace.setupReply.value, 1)
+        XCTAssertEqual(driver.calls, ["hello", "begin"])
+    }
+
     func testInstalledSessionNeverFallsBackAfterAuthoritySelectsV2() async throws {
         let f = try Fixture(v2ActivationEnabled: true), requirement = try testRequirement(), trace = PhoneManagementTrace()
         let server = NativeServer(f, requirement: requirement, installedPairing: true)
@@ -983,6 +1007,69 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         return (TransportPairingChannel(configuration: pairing.configuration, driver: driver), driver, owner, server)
     }
 
+    func testInstalledLANProofCarriesTheProtectedScopeAndWindowRevision() async throws {
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        let f = try Fixture(v2ActivationEnabled: true, lanScope: scope), requirement = try testRequirement()
+        let app = NativeServer(f, requirement: requirement, installedPairing: true)
+        defer { app.close() }
+        let owners = try XCTUnwrap(app.pairingOwners)
+        let server = try AuthorityPairingProofLinkTests.Fixture(bindReservations: owners.proofReservations,
+                                                                lookupRendezvous: owners.lookupRendezvous)
+        let root = AuthorityPairingChannel(driver: NativeDriver(endpoint: app.listener.endpoint, policy: f.policy,
+            requirement: requirement), macID: f.mac, accountID: f.account)
+        defer { root.abort() }
+        _ = try await root.start()
+        let offered = try await root.negotiateInstalledPairing()
+        let negotiation = try XCTUnwrap(offered)
+        XCTAssertTrue(negotiation.requiresLAN)
+        let configuration = try TransportPairingFixture().transportConfiguration()
+        let prepared = try await AuthorityPairingProofClient.prepare(configuration: configuration,
+            rendezvousID: negotiation.rendezvousID, onClose: {}) { _, ended in
+                let connection = NSXPCConnection(listenerEndpoint: server.listener.endpoint)
+                let native = NativeAuthorityXPC(connection: connection, policy: server.policy,
+                    configure: { $0.setCodeSigningRequirement(server.requirement) })
+                return .init(channel: AuthorityXPCChannel(driver: native, onClose: ended), policy: server.policy,
+                    configure: { $0.setCodeSigningRequirement(server.requirement) })
+            }
+        let invitation = try await root.openV2(label: "Fixture", predecessor: nil, rendezvousID: negotiation.rendezvousID)
+        let binding = try await prepared.finish(windowID: invitation.windowID)
+        defer { binding.client.close() }
+        let projection = try XCTUnwrap(binding.lan)
+        XCTAssertEqual(projection.scope, scope)
+        XCTAssertEqual(projection.revision, f.activationRevision())
+        XCTAssertEqual(projection.windowID, invitation.windowID)
+        XCTAssertEqual(projection.expiresAtMilliseconds, f.environment.time.value + invitation.lifetimeMilliseconds)
+    }
+
+    func testInstalledSessionWithMissingLANInterfaceHasNoInvitationOrFallback() async throws {
+        let name = "rmz" + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(12))
+        XCTAssertEqual(if_nametoindex(name), 0)
+        let scope = try PairingLANScope(interfaceName: name, family: .ipv4)
+        let pairing = try TransportPairingFixture()
+        let f = try Fixture(v2ActivationEnabled: true, lanScope: scope, transportIdentity: pairing.macTransport)
+        let requirement = try testRequirement(), server = NativeServer(f, requirement: requirement, installedPairing: true)
+        defer { server.close() }
+        let (transport, driver, owner, proofServer) = try installedTransportFixture(pairing: pairing, owners: XCTUnwrap(server.pairingOwners))
+        let session = try MacPairingSession(openInstalledRoot: {
+            AuthorityPairingChannel(driver: NativeDriver(endpoint: server.listener.endpoint, policy: f.policy, requirement: requirement),
+                macID: f.mac, accountID: f.account)
+        }, installedTransport: transport, administrator: V2AdministratorFixture(), unixMilliseconds: { 1000 }, elapsedMilliseconds: { 100 })
+        defer { session.abort() }
+
+        do {
+            _ = try await session.start(label: "Fixture")
+            XCTFail("A missing interface must not open a listener")
+        } catch TransportPairingControlError.unavailableInterface {}
+        let snapshot = await session.snapshot()
+        XCTAssertEqual(snapshot.phase, .unavailableInterface)
+        XCTAssertNil(snapshot.invitation)
+        XCTAssertNil(snapshot.invitationV2)
+        XCTAssertEqual(driver.calls, ["hello", "v2Hello", "prepareV2", "beginV2LAN"])
+        XCTAssertEqual(proofServer.events.acceptedProofLinks.withLock { $0 }, 1)
+        let endpoint = await owner.listenerLocalEndpoint
+        XCTAssertNil(endpoint)
+    }
+
     func testInstalledSessionPublishesV2OnlyAfterTransportProofHandoffAndLoopback() async throws {
         let pairing = try TransportPairingFixture()
         let f = try Fixture(pairingLifetime: 10_000, v2ActivationEnabled: true, transportIdentity: pairing.macTransport)
@@ -1021,7 +1108,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         defer { root.abort(); transport.abort() }
         _ = try await root.start()
         let negotiated = try await root.negotiateInstalledPairing()
-        try await transport.prepareV2(rendezvousID: XCTUnwrap(negotiated))
+        try await transport.prepareV2(rendezvousID: XCTUnwrap(negotiated).rendezvousID)
         do {
             try await transport.beginV2(.init(id: Data(count: 16), invitation: pairing.invitation, replacement: nil,
                 lifetimeMilliseconds: 1_000))
@@ -1048,7 +1135,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         defer { first.abort() }
         _ = try await first.start()
         let firstNegotiated = try await first.negotiateInstalledPairing()
-        let firstID = try XCTUnwrap(firstNegotiated)
+        let firstID = try XCTUnwrap(firstNegotiated).rendezvousID
         try await owner.prepareInstalledV2(firstID)
         do {
             _ = try await owner.beginInstalledV2(.init(id: Data(count: 15), invitation: pairing.invitation, replacement: nil,
@@ -1065,7 +1152,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         defer { second.abort() }
         _ = try await second.start()
         let secondNegotiated = try await second.negotiateInstalledPairing()
-        try await owner.prepareInstalledV2(XCTUnwrap(secondNegotiated))
+        try await owner.prepareInstalledV2(XCTUnwrap(secondNegotiated).rendezvousID)
         XCTAssertEqual(proofServer.events.acceptedProofLinks.withLock { $0 }, 2)
     }
 
@@ -1119,16 +1206,27 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         defer { root.abort() }
         _ = try await root.start()
         let negotiated = try await root.negotiateInstalledPairing()
-        let id = try XCTUnwrap(negotiated)
+        let failedID = try XCTUnwrap(negotiated).rendezvousID
         let credentials = try server.clientCredentials()
+        _ = try links.offer(bootstrap: .init(), peer: credentials, rendezvousID: failedID)
+        do {
+            _ = try await root.openV2(label: "Fixture", predecessor: nil, rendezvousID: failedID)
+            XCTFail("Opening a window requires the native proof hello")
+        } catch AuthorityPairingChannelError.invalidMessage {}
+        XCTAssertNil(owners.lookupRendezvous(failedID))
+        try assertFreshPairingIsRefused(f, proposal: f.proposal().encode())
+
+        let retried = try await root.negotiateInstalledPairing()
+        let id = try XCTUnwrap(retried).rendezvousID
+        XCTAssertNotEqual(id, failedID)
         let bootstrap = AuthorityPairingProofBootstrap()
         let endpoint = try links.offer(bootstrap: bootstrap, peer: credentials, rendezvousID: id)
         XCTAssertThrowsError(try links.offer(bootstrap: .init(), peer: credentials, rendezvousID: id))
         do {
-            _ = try await root.openV2(label: "Fixture", predecessor: nil, rendezvousID: id)
-            XCTFail("Opening a window requires the native proof hello")
+            _ = try await root.openV2(label: "Fixture", predecessor: nil, rendezvousID: failedID)
+            XCTFail("A retired ticket interfered with the fresh attempt")
         } catch AuthorityPairingChannelError.invalidMessage {}
-        try assertFreshPairingIsRefused(f, proposal: f.proposal().encode())
+        XCTAssertNotNil(owners.lookupRendezvous(id))
         let proof = NSXPCConnection(listenerEndpoint: endpoint)
         proof.remoteObjectInterface = NSXPCInterface(with: AuthorityPairingProofXPCProtocol.self)
         proof.setCodeSigningRequirement(requirement)
@@ -1143,7 +1241,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         defer { other.abort() }
         _ = try await other.start()
         let otherRendezvous = try await other.negotiateInstalledPairing()
-        XCTAssertNotEqual(otherRendezvous, id)
+        XCTAssertNotEqual(otherRendezvous?.rendezvousID, id)
         do {
             _ = try await other.openV2(label: "Fixture", predecessor: nil, rendezvousID: id)
             XCTFail("Another app connection accepted the original rendezvous")
@@ -1210,7 +1308,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             requirement: requirement), macID: f.mac, accountID: f.account)
         _ = try await root.start()
         let negotiated = try await root.negotiateInstalledPairing()
-        let id = try XCTUnwrap(negotiated), pending = try XCTUnwrap(owners.lookupRendezvous(id))
+        let id = try XCTUnwrap(negotiated).rendezvousID, pending = try XCTUnwrap(owners.lookupRendezvous(id))
         let offer = UUID(), link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
         XCTAssertTrue(pending.claim(offer: offer))
         XCTAssertTrue(pending.acceptHello(offer: offer, link: link, offerDeadline: .now.advanced(by: .seconds(5))))

@@ -25,7 +25,7 @@ final class AuthorityPairingV2Window: Sendable {
 
     private let state: Mutex<State>
     private let started: AuthorityMoment
-    private let deadline: UInt64
+    let deadline: UInt64
     let publicInvitation: PairingInvitation
     let id: Data
     let predecessor: PairedPhoneSelection?

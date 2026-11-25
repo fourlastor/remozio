@@ -40,6 +40,11 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
     }
 }
 
+struct InstalledPairingNegotiation: Sendable {
+    let rendezvousID: Data
+    let requiresLAN: Bool
+}
+
 enum PairingClientCall: Sendable {
     case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel
     case setupHello, openV2(String, PairedPhoneSelection?, rendezvousID: Data?), stageV2(Data, UUID, Data)
@@ -85,7 +90,7 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
                 [self] in checked(.bytes($0), reply: reply)
             }
         case .setupHello:
-            proxy.pairingSetupHello(maximumVersion: 2) { [self] in checked(.setupVersion($0, $1), reply: reply) }
+            proxy.pairingSetupHello(maximumVersion: 3) { [self] in checked(.setupVersion($0, $1), reply: reply) }
         case let .openV2(label, selection, rendezvousID):
             guard let rendezvousID else { reply(.failed); return }
             do {
@@ -325,7 +330,7 @@ public actor AuthorityPairingChannel {
         return try await stage(claims, bytes: proposal.encode(), authorization: authorization)
     }
 
-    func negotiateInstalledPairing() async throws -> Data? {
+    func negotiateInstalledPairing() async throws -> InstalledPairingNegotiation? {
         let compatibility: PairingClientReply
         do { compatibility = try await perform(.versionedPhoneManagementHello(3)) }
         catch AuthorityPairingChannelError.closed { throw AuthorityPairingChannelError.setupDiscoveryUnavailable }
@@ -335,7 +340,8 @@ public actor AuthorityPairingChannel {
         case .version(3):
             switch try await perform(.setupHello) {
             case .setupVersion(1, nil): return nil
-            case .setupVersion(2, let id?) where id.count == 16: return id
+            case .setupVersion(let version, let id?) where (version == 2 || version == 3) && id.count == 16:
+                return InstalledPairingNegotiation(rendezvousID: id, requiresLAN: version == 3)
             default: throw AuthorityPairingChannelError.invalidMessage
             }
         default: throw AuthorityPairingChannelError.unsupportedVersion
