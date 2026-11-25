@@ -1,3 +1,4 @@
+import CryptoKit
 import dnssd
 import Foundation
 import RemozioMach
@@ -134,9 +135,15 @@ final class PairingLANPolicyTests: XCTestCase {
     func testBonjourWithdrawalDiscardsLateRegistrationForTheClosedWindow() throws {
         let queue = DispatchQueue(label: "pairing-lan-advertisement-fixture")
         let events = AdvertisementEvents()
+        let invitation = try PairingInvitation(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            label: "Mac", authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            transportPublicKey: bytes(point), minimumEnvelopeVersion: 1)
+        let name = try PairingSetupListener.serviceName(invitation, windowID: Data(0..<16))
+        XCTAssertEqual(try PairingSetupListener.serviceName(invitation), "R-AQEBAQEBAQEBAQEBAQEBAQ-AgICAgICAgICAgICAgICAg")
+        XCTAssertEqual(name, "R2-9258385a87e7bf9effea002e90c5eabe")
         let address = try XCTUnwrap(PairingLANRoute.Address(family: .ipv4, bytes: Data([192, 168, 5, 11])))
         let registration = PairingLANAdvertisement(queue: queue, register: { name, index, port, host, _, report in
-            XCTAssertEqual(name, "R-public-scope")
+            XCTAssertEqual(name, "R2-9258385a87e7bf9effea002e90c5eabe")
             XCTAssertEqual(index, 7)
             XCTAssertEqual(port, 4321)
             XCTAssertEqual(host.recordType, UInt16(kDNSServiceType_A))
@@ -145,7 +152,7 @@ final class PairingLANPolicyTests: XCTestCase {
             return { events.stopped.withLock { $0 += 1 } }
         })
         queue.sync {
-            registration.start(name: "R-public-scope", index: 7, port: 4321, address: address, isCurrent: { true }) { event in
+            registration.start(name: name, index: 7, port: 4321, address: address, isCurrent: { true }) { event in
                 switch event {
                 case .ready: events.reports.withLock { $0.append(true) }
                 case .failed, .stopped: events.reports.withLock { $0.append(false) }

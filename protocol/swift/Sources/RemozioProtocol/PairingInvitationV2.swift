@@ -35,6 +35,14 @@ public struct PairingInvitationV2: Sendable, CustomStringConvertible, CustomRefl
         self.replacement = replacement; self.lifetimeMilliseconds = lifetimeMilliseconds
     }
 
+    /// A public discovery hint derived from the Authority's random window identifier.
+    public static func bonjourInstanceName(windowID: Data) throws -> String {
+        guard windowID.count == 16 else { throw PairingInvitationError.invalidInvitation }
+        let input = Data("dev.remozio.pairing.bonjour-instance/2\u{0}".utf8) + windowID
+        let suffix = SHA256.hash(data: input).prefix(16).map { String(format: "%02x", $0) }.joined()
+        return "R2-" + suffix
+    }
+
     private func publicFields() throws -> [UInt64: CBORValue] {
         let predecessor: CBORValue
         if let replacement {

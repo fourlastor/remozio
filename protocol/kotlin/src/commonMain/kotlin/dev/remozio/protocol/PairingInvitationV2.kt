@@ -17,6 +17,12 @@ class PairingInvitationV2(
         require(windowID.size == 16 && secret.size == 32 && lifetimeMilliseconds in 1uL..MAXIMUM_LIFETIME_MILLISECONDS)
     }
 
+    /** A public discovery hint derived from the Authority's random window identifier. */
+    fun bonjourInstanceName(): String {
+        val input = "dev.remozio.pairing.bonjour-instance/2\u0000".encodeToByteArray() + windowID.copyBytes()
+        return "R2-" + sha256(input).take(16).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
+    }
+
     private fun publicFields() = mapOf(
         0uL to CborValue.Unsigned(2u), 1uL to CborValue.Bytes(invitation.encode()), 2uL to windowID,
         4uL to CborValue.Unsigned(if (replacement == null) 0u else 1u),
