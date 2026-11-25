@@ -49,9 +49,13 @@ struct PairingSetupV2Ingress: Sendable {
 public final class PairingSetupListener: @unchecked Sendable {
     private final class Slot: @unchecked Sendable {
         let channel: NetworkByteChannel
+        let source: String?
         var task: Task<Void, Never>?
         var proofTimer: Task<Void, Never>?
-        init(_ channel: NetworkByteChannel) { self.channel = channel }
+        init(_ channel: NetworkByteChannel, source: String?) {
+            self.channel = channel
+            self.source = source
+        }
     }
     private let listener: NWListener
     private let queue = DispatchQueue(label: "dev.remozio.pairing-listener")
@@ -60,9 +64,8 @@ public final class PairingSetupListener: @unchecked Sendable {
     private let v2: PairingSetupV2Ingress?
     private let applicationProtocol: String
     private let intakeClock: AuthorityClock?
-    private var intakeBudget = PairingRegistrationBudget()
+    private let registrationLane = PairingSetupV2RegistrationLane()
     private var v2Admissions = PairingSetupV2Admissions()
-    private var sources: [String: (until: ContinuousClock.Instant, count: Int)] = [:]
     private var expiry: Task<Void, Never>?
     private let proofTime: @Sendable () -> ContinuousClock.Instant
     private let maximumConnections: Int
@@ -178,25 +181,30 @@ public final class PairingSetupListener: @unchecked Sendable {
         let acceptedAt: AuthorityMoment?
         do { acceptedAt = try intakeClock?.now() }
         catch { connection.cancel(); return }
+        let source: String?
+        if v2 != nil, case .hostPort(let host, _) = connection.endpoint { source = String(describing: host) }
+        else { source = nil }
         let applicationProtocol = applicationProtocol
+        let registrations = registrationLane
         var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
             guard started, !closed else { return nil }
             if self.v2 == nil {
                 guard slots.count < maximumConnections else { return nil }
             } else {
-                guard let acceptedAt, admitSource(connection.endpoint, at: accepted),
-                      intakeBudget.spend(at: acceptedAt) else { return nil }
-                switch v2Admissions.admit(id, deadline: deadline, draining: retired.count) {
+                guard let acceptedAt, let source else { return nil }
+                switch v2Admissions.admit(id, source: source, accepted: accepted, clock: acceptedAt,
+                                           draining: retired.values.compactMap(\.source)) {
                 case .rejected: return nil
                 case .admitted(let victim):
                     if let victim { evicted = retireProof(victim) }
                 }
             }
-            let value = Slot(NetworkByteChannel(connection: connection) {
+            let channel = NetworkByteChannel(connection: connection) {
                 Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
                     .flatMap { Self.candidatePoint(metadata: $0) } != nil
-            })
+            }
+            let value = Slot(channel, source: source)
             slots[id] = value
             return value
         }
@@ -225,8 +233,11 @@ public final class PairingSetupListener: @unchecked Sendable {
                     let proof: PairingSetupV2Connection?
                     if let windowV2 {
                         guard let acceptedAt, ContinuousClock.now < deadline else { throw PairingSetupChannelError.rejected }
-                        let candidate = try await windowV2.register(connection: id, acceptedAt: acceptedAt.milliseconds, peerPoint: point,
-                            exporter: Self.exporter(metadata), deadline: deadline)
+                        let exporter = try Self.exporter(metadata)
+                        let candidate = try await registrations.withTurn(until: deadline) {
+                            try await windowV2.register(connection: id, acceptedAt: acceptedAt.milliseconds, peerPoint: point,
+                                                        exporter: exporter, deadline: deadline)
+                        }
                         registeredProof = candidate
                         proof = .init(connection: candidate.connection, challenge: candidate.challenge,
                             publicationDeadline: candidate.publicationDeadline, verify: { [weak self] proposal, peer, tag in
@@ -263,20 +274,6 @@ public final class PairingSetupListener: @unchecked Sendable {
             return true
         }
         if !keep { channel.abort() }
-    }
-
-    private func admitSource(_ endpoint: NWEndpoint, at now: ContinuousClock.Instant) -> Bool {
-        guard case .hostPort(let host, _) = endpoint else { return false }
-        sources = sources.filter { $0.value.until > now }
-        let key = String(describing: host)
-        if let record = sources[key] {
-            guard record.count < 8 else { return false }
-            sources[key] = (record.until, record.count + 1)
-        } else {
-            guard sources.count < 64 else { return false }
-            sources[key] = (now.advanced(by: .seconds(1)), 1)
-        }
-        return true
     }
 
     private func beginVerification(_ id: UUID) throws {
@@ -337,7 +334,7 @@ public final class PairingSetupListener: @unchecked Sendable {
             closed = true
             expiry?.cancel(); expiry = nil
             for (id, slot) in slots { retired[id] = slot }
-            slots.removeAll(); v2Admissions.removeAll(); sources.removeAll()
+            slots.removeAll(); v2Admissions.removeAll()
             return Array(retired.values)
         }
         guard let owned else { return }
