@@ -2207,6 +2207,58 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         try assertProofClosureReleasesAdmission(.lostConfirmation)
     }
 
+    func testSecondCandidateCannotStageOrCommitWhileWinnerIsStagingOnLiveProofLink() throws {
+        let fixture = try Fixture()
+        let window = try fixture.access.openV2Window(label: "Fixture", predecessor: nil)
+        let invitation = try PairingInvitationV2.decode(fixture.access.exportV2Window(window))
+        let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+        let reservations = try fixture.access.proofReservations(for: window, link: link)
+
+        let rivalKey = P256.Signing.PrivateKey()
+        let winnerDraft = try fixture.proposal()
+        let rivalDraft = try fixture.proposal(phone: 10, keyBase: 48, biometric: rivalKey)
+        let winner = try PairingPhoneProposal(phone: winnerDraft.phone, transportKey: winnerDraft.transportKey,
+            decisionKey: winnerDraft.decisionKey, biometricKey: winnerDraft.biometricKey)
+        let rival = try PairingPhoneProposal(phone: rivalDraft.phone, transportKey: rivalDraft.transportKey,
+            decisionKey: rivalDraft.decisionKey, biometricKey: rivalDraft.biometricKey)
+        let winnerBytes = try winner.encode(), rivalBytes = try rival.encode()
+        let winnerExporter = Data(repeating: 85, count: 32), rivalExporter = Data(repeating: 86, count: 32)
+        let now = fixture.environment.now()
+        let first = try reservations.register(connection: UUID(), acceptedAt: now.milliseconds,
+            peerPoint: winner.transportKey.publicKey, exporter: winnerExporter)
+        let second = try reservations.register(connection: UUID(), acceptedAt: now.milliseconds,
+            peerPoint: rival.transportKey.publicKey, exporter: rivalExporter)
+        let firstTag = try invitation.proof(proposal: winner, challenge: first.challenge, exporter: winnerExporter)
+        let secondTag = try invitation.proof(proposal: rival, challenge: second.challenge, exporter: rivalExporter)
+        try reservations.verify(candidate: first.id, proposalBytes: winnerBytes, tag: firstTag)
+        try reservations.confirm(candidate: first.id)
+        let attempt = try fixture.access.stageV2(window, connection: first.id, proposalBytes: winnerBytes, authorize: {})
+
+        try link.requireActive()
+        try window.requireStaging(now)
+        XCTAssertEqual(reservations.pendingCount, 0)
+        XCTAssertThrowsError(try reservations.verify(candidate: second.id, proposalBytes: rivalBytes, tag: secondTag))
+        XCTAssertThrowsError(try reservations.confirm(candidate: second.id))
+        XCTAssertThrowsError(try fixture.access.stageV2(window, connection: second.id, proposalBytes: rivalBytes, authorize: {})) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .invalidConfirmation)
+        }
+
+        let transcript = attempt.transcript
+        let input = try transcript.signingInput(purpose: .phoneBiometric)
+        let rivalProof = try rivalKey.signature(for: input).rawRepresentation
+        XCTAssertThrowsError(try fixture.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(),
+            proof: rivalProof, window: window, authorize: {}))
+        XCTAssertEqual(try fixture.records(), 0)
+        XCTAssertEqual(fixture.environment.signed.value, 0)
+
+        let winnerProof = try fixture.biometric.signature(for: input).rawRepresentation
+        _ = try fixture.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(),
+            proof: winnerProof, window: window, authorize: {})
+        XCTAssertEqual(try fixture.records(), 1)
+        XCTAssertEqual(fixture.environment.signed.value, 1)
+        try fixture.assertCheckpoint()
+    }
+
     func testRetiredProofLinkBlocksStageAndCommit() throws {
         for stageBeforeRetirement in [false, true] {
             let fixture = try Fixture()
