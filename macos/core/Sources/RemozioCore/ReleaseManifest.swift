@@ -3,6 +3,7 @@ import RemozioProtocol
 
 public enum ReleaseManifestError: Error, Equatable {
     case invalidDeclaration, corruptData, unsupportedSchema, missingMetadata, identityMismatch, unsafePath
+    case requiresNewerMacOS(minimum: String)
     case security(Int32)
 }
 

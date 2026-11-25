@@ -4,8 +4,10 @@ import XCTest
 @testable import RemozioCore
 
 final class SignedReleaseInspectionTests: XCTestCase {
-    private func inspect(_ url: URL, identifier: String) throws -> SignedReleaseEvidence {
-        try SignedReleaseInspection.inspect(url, expectedAppIdentifier: identifier, expectedTeamID: nil) { identifier, _ in
+    private func inspect(_ url: URL, identifier: String,
+                         hostVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion) throws -> SignedReleaseEvidence {
+        try SignedReleaseInspection.inspect(url, expectedAppIdentifier: identifier, expectedTeamID: nil,
+                                            hostVersion: hostVersion) { identifier, _ in
             "identifier \"\(identifier)\""
         }
     }
@@ -207,6 +209,85 @@ final class SignedReleaseInspectionTests: XCTestCase {
             XCTAssertThrowsError(try SignedReleaseInspection.inspect(app, teamID: "ABCDEFGHIJ", appIdentifier: identifier))
         }
     }
+    func testMinimumMacOSComparesNumericComponents() throws {
+        let floor = OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
+        for version in ["26.0", "26.0.0"] {
+            try SignedReleaseInspection.requireSupportedMacOS(["LSMinimumSystemVersion": version], hostVersion: floor)
+        }
+        let host = OperatingSystemVersion(majorVersion: 26, minorVersion: 10, patchVersion: 0)
+        try SignedReleaseInspection.requireSupportedMacOS(["LSMinimumSystemVersion": "26.9.99"], hostVersion: host)
+        XCTAssertThrowsError(try SignedReleaseInspection.requireSupportedMacOS(["LSMinimumSystemVersion": "26.10.1"], hostVersion: host)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .requiresNewerMacOS(minimum: "26.10.1"))
+        }
+    }
+
+    func testMinimumMacOSRejectsMalformedOrBelowBaselineMetadata() {
+        let host = OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
+        let invalidValues: [Any] = [26, "", "26", "26.", "26..0", "26.0.0.0", " 26.0", "26.0 ", "26.0beta",
+                                    "+26.0", "26.-1", "026.0", "26.00", "26.0.01", "２６.０", "\(Int.max)0.0", "25.99.99"]
+        for value in invalidValues {
+            XCTAssertThrowsError(try SignedReleaseInspection.requireSupportedMacOS(["LSMinimumSystemVersion": value],
+                                                                                     hostVersion: host), "\(value)") {
+                XCTAssertEqual($0 as? ReleaseManifestError, .identityMismatch)
+            }
+        }
+        XCTAssertThrowsError(try SignedReleaseInspection.requireSupportedMacOS([:], hostVersion: host)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .identityMismatch)
+        }
+    }
+
+    func testMinimumMacOSUsesTheHigherArm64Requirement() throws {
+        let host = OperatingSystemVersion(majorVersion: 26, minorVersion: 4, patchVersion: 0)
+        var plist: [String: Any] = ["LSMinimumSystemVersion": "26.4", "LSMinimumSystemVersionByArchitecture": ["arm64": "26.3", "x86_64": "99.0"]]
+        try SignedReleaseInspection.requireSupportedMacOS(plist, hostVersion: host)
+        plist["LSMinimumSystemVersion"] = "26.5"
+        XCTAssertThrowsError(try SignedReleaseInspection.requireSupportedMacOS(plist, hostVersion: host)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .requiresNewerMacOS(minimum: "26.5"))
+        }
+        plist["LSMinimumSystemVersion"] = "26.0"
+        plist["LSMinimumSystemVersionByArchitecture"] = ["arm64": "26.4.1"]
+        XCTAssertThrowsError(try SignedReleaseInspection.requireSupportedMacOS(plist, hostVersion: host)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .requiresNewerMacOS(minimum: "26.4.1"))
+        }
+        plist["LSMinimumSystemVersionByArchitecture"] = ["x86_64": "99.0"]
+        try SignedReleaseInspection.requireSupportedMacOS(plist, hostVersion: host)
+        let invalidOverrides: [Any] = ["26.0", ["arm64": 26], ["arm64": "26.01"], ["arm64": "25.9"]]
+        for invalid in invalidOverrides {
+            plist["LSMinimumSystemVersionByArchitecture"] = invalid
+            XCTAssertThrowsError(try SignedReleaseInspection.requireSupportedMacOS(plist, hostVersion: host)) {
+                XCTAssertEqual($0 as? ReleaseManifestError, .identityMismatch)
+            }
+        }
+    }
+
+    func testSignedMinimumMacOSChecksTheHostAndPreservesSignatureValidation() throws {
+        let original = repository.appendingPathComponent(".build/macos-app/DerivedData/Build/Products/Debug/Remozio.app")
+        guard FileManager.default.fileExists(atPath: original.path) else { throw XCTSkip("Build the app before minimum version checks.") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let copy = root.appendingPathComponent("Remozio.app")
+        try FileManager.default.copyItem(at: original, to: copy)
+        let plistURL = copy.appendingPathComponent("Contents/Info.plist")
+        var plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: plistURL), format: nil) as? [String: Any])
+        plist["LSMinimumSystemVersion"] = "26.10"
+        plist["LSMinimumSystemVersionByArchitecture"] = ["arm64": "26.10.1", "x86_64": "99.0"]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: plistURL)
+        let identifier = "dev.sebastiano.remozio.macos.debug"
+        let compatibleHost = OperatingSystemVersion(majorVersion: 26, minorVersion: 10, patchVersion: 1)
+        XCTAssertThrowsError(try inspect(copy, identifier: identifier, hostVersion: compatibleHost))
+
+        let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        sign.arguments = ["--force", "--sign", "-", "--options", "runtime", "--identifier", identifier, copy.path]
+        sign.standardOutput = FileHandle.nullDevice; sign.standardError = FileHandle.nullDevice
+        try sign.run(); sign.waitUntilExit(); XCTAssertEqual(sign.terminationStatus, 0)
+        let olderHost = OperatingSystemVersion(majorVersion: 26, minorVersion: 10, patchVersion: 0)
+        XCTAssertThrowsError(try inspect(copy, identifier: identifier, hostVersion: olderHost)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .requiresNewerMacOS(minimum: "26.10.1"))
+        }
+        XCTAssertEqual(try inspect(copy, identifier: identifier, hostVersion: compatibleHost).manifest.components.count, 8)
+    }
+
     func testSignedMetadataAndHelperTamperingAreRejected() throws {
         let original = repository.appendingPathComponent(".build/macos-app/DerivedData/Build/Products/Debug/Remozio.app")
         guard FileManager.default.fileExists(atPath: original.path) else { throw XCTSkip("Build the app before artifact tamper checks.") }
