@@ -4,16 +4,19 @@ Status: **unapproved proposal**, 29 October 2026, except for the owner decisions
 recorded here. On 13 November 2026 the Linux host owner chose decisions 7 and 8,
 chose the direction for decision 5 (strict first) and put decisions 4 and 6 behind
 written gates (see [Decisions](#decisions)). On 15 November 2026 the owner adopted
-the measured protected-launch candidate for decision 5. Decisions 1, 2, 3, 4 and 6
-stay open. Nothing else here is accepted policy.
+the measured protected-launch candidate for decision 5. On 25 November 2026 the
+owner chose decisions 1 (reading B), 2 (a narrowly privileged execution identity)
+and 3 (an unsandboxed execution unit). Decisions 4 and 6 stay behind their gates.
+Nothing else here is accepted policy.
 It proposes concrete service identities, paths, ownership and modes, IPC peers,
 startup refusals, recovery behavior and operator gates for the
 [contributor guide's](https://gist.github.com/rock3r/ef069bbc6f931b83febf2e1c159cdbfa)
 Phase 3. It does not approve production activation, change any contract, claim
-hardware key custody, or choose the open
-[line 67 handoff](linux-host-contract.md#candidate-strict-admission-profile).
-Account, unit and path names are chosen (decision 8), except the execution
-identity, which stays with decision 2. Every mode and limit below is still a
+hardware key custody, or design the
+[line 67 handoff](linux-host-contract.md#candidate-strict-admission-profile):
+decision 1 selects reading B, and its design is still to come.
+Account, unit and path names are chosen (decision 8). Decision 2 chooses the kind
+of execution identity; its account name is still to be proposed. Every mode and limit below is still a
 reviewable proposal. Nothing has been
 installed, started or provisioned, and no service code exists yet.
 
@@ -35,7 +38,7 @@ the least required access (line 155).
 | --- | --- | --- | --- |
 | Authority | `remozio-authority.service`, system user `remozio-authority`, no login shell, no capabilities | Journal, continuity store, checkpoints and recovery marker; decision verification and atomic consumption; grants reading; authority TPM key; dispatch permits | Execute commands; open network sockets; read the transport key |
 | Transport | `remozio-transport.service`, system user `remozio-transport`, no capabilities | Network listener, pinned TLS with its own TPM key, framing to and from the authority | Sign arbitrary bytes with the authority key, consume decisions, reach authority state, execute, reach pairing administration |
-| Execution | `remozio-exec.service`; identity and privilege are an open decision (below) | Receiving one-use dispatch permits from the authority and starting the target command with the retained streams | Accept anything but an authority-issued permit; decide; retry an uncertain dispatch |
+| Execution | `remozio-exec.service`; a dedicated service user with only `CAP_SETUID` and `CAP_SETGID` (decision 2), account name still to be proposed | Receiving one-use dispatch permits from the authority and starting the target command with the retained streams | Accept anything but an authority-issued permit; decide; retry an uncertain dispatch |
 | Caller monitor | Placement is an open decision (below); candidate: a dedicated system user (decision 2) that keeps only `CAP_SYS_PTRACE`, the capability set of the adopted decision 5 design; its confinement is not measured | Trace ownership of the frontend from protected launch, the kernel-checked submission carrier | Release a stop across the dispatch handoff without the acknowledged protocol |
 | Frontend | `/usr/libexec/remozio/remozio` invoked by the user; launch path is the contract's largest open gate; adopted design: static, set-group-ID to `remozio-frontend` (decision 5) | Submitting one bounded request with its streams | Execute the target itself |
 | Session | `remozio-session.service` as a systemd user unit, the interactive user's identity | Presence observations and read-only status | Modify authority state (contract line 156) |
@@ -197,21 +200,22 @@ on the target machine:
 
 | Setting | Authority | Transport | Execution |
 | --- | --- | --- | --- |
-| `NoNewPrivileges=yes`, `UMask=0077`, `LockPersonality=yes` | yes | yes | see open decision 3 |
-| `ProtectSystem=strict`, `ReadWritePaths=` own state only | yes | yes | see open decision 3 |
+| `NoNewPrivileges=yes`, `UMask=0077`, `LockPersonality=yes` | yes | yes | no (decision 3) |
+| `ProtectSystem=strict`, `ReadWritePaths=` own state only | yes | yes | no (decision 3) |
 | `ProtectHome=yes` | yes | yes | no; commands run in the user's directories |
-| `RestrictAddressFamilies=` | `AF_UNIX` | `AF_UNIX AF_INET AF_INET6` | `AF_UNIX` |
-| `IPAddressDeny=any` | yes | no | yes |
-| Device namespace and TPM exposure | unresolved, open decision 4 | unresolved, open decision 4 | `PrivateDevices=yes`, no TPM |
-| `CapabilityBoundingSet=` | empty | empty | open decision 2 |
-| `SystemCallFilter=@system-service` | yes | yes | open decision 3 |
+| `RestrictAddressFamilies=` | `AF_UNIX` | `AF_UNIX AF_INET AF_INET6` | none (decision 3) |
+| `IPAddressDeny=any` | yes | no | no (decision 3) |
+| Device namespace and TPM exposure | unresolved, open decision 4 | unresolved, open decision 4 | no `PrivateDevices=` (decision 3); not given TPM access |
+| `CapabilityBoundingSet=` | empty | empty | `CAP_SETUID CAP_SETGID` (decision 2) |
+| `SystemCallFilter=@system-service` | yes | yes | no (decision 3) |
 
 ## Decisions
 
 On 13 November 2026 the Linux host owner chose decisions 7 and 8, chose the
 direction for decision 5 and put decisions 4 and 6 behind written gates. On 15
-November 2026 the owner adopted the measured candidate for decision 5. Decisions 1,
-2, 3, 4 and 6 stay open, and this proposal chooses none of those.
+November 2026 the owner adopted the measured candidate for decision 5. On 25
+November 2026 the owner chose decisions 1, 2 and 3 as recorded below. Decisions 4
+and 6 stay behind their gates, and this proposal chooses neither.
 
 1. **Line 67 handoff.** [Contract line 67](linux-host-contract.md#candidate-strict-admission-profile)
    requires the monitor to own and confirm the caller's stop while committing the
@@ -220,8 +224,12 @@ November 2026 the owner adopted the measured candidate for decision 5. Decisions
    candidate readings (A: detect and record, as in the fixture; B: a single owner
    holds the stop and spawns; C: pause until a production design exists) remain
    open, and nothing here selects one.
-   **Open.** It depends on the protected-launch design (decision 5). That design is
-   now adopted with a recorded result, so this review is due.
+   **Chosen on 25 November 2026: reading B.** One owner holds the caller's stop and
+   spawns the command, so the stop cannot be lost in the handoff interval. This
+   keeps the Mac guarantee, as the strict-first direction of decision 5 requires.
+   Reading A (detect and record) is not enough for production. The design of the
+   single owner is the next work item; until it is measured, production execution
+   stays off.
 2. **Monitor and execution privilege.** Ptrace access is checked in layers. Ubuntu's
    default Yama mode adds an ancestry rule: without `CAP_SYS_PTRACE`, a tracer may
    attach only to its descendants. Being the frontend's parent satisfies only that
@@ -249,7 +257,11 @@ November 2026 the owner adopted the measured candidate for decision 5. Decisions
    frontend peer rule no longer matches, so the candidate unit starts the monitor
    through `aa-exec`. A Root process that runs the installed frontend also has the
    frontend label; that limit is still a decision for the Linux host owner.
-   The execution identity stays open.
+   **Chosen on 25 November 2026.** Approved commands run through a dedicated
+   execution service user that keeps only `CAP_SETUID` and `CAP_SETGID`, not
+   Root. Its account name is still to be proposed. The owner accepts the limit
+   above: a Root process that runs the installed frontend also gets the frontend
+   label, but Root can already bypass every control on the host.
 3. **Execution sandbox inheritance.** A command started directly by
    `remozio-exec.service` inherits the unit's sandbox: `NoNewPrivileges=` would
    break `sudo` inside the command, and `ProtectSystem=` would make system paths
@@ -257,8 +269,11 @@ November 2026 the owner adopted the measured candidate for decision 5. Decisions
    capability set, or commands start as transient units through PID 1 with the
    retained descriptors passed as standard streams. The second changes how stream
    retention and the line 67 handoff are proved.
-   **Open.** It depends on the protected-launch design (decision 5) and on the
-   reading chosen for decision 1.
+   **Chosen on 25 November 2026: unsandboxed execution unit.** The execution unit
+   keeps only its capability set, with no `NoNewPrivileges=` and no
+   `ProtectSystem=`, so `sudo` and system writes work inside approved commands.
+   The protection for a command is the approval, not a sandbox. Transient units
+   are not used.
 4. **TPM role isolation.** On Ubuntu `/dev/tpmrm0` is shared by group. Any account
    allowed to open it can use any object whose authorization it holds, so role
    separation would rest on per-role key authorization stored in each role's 0600
