@@ -103,21 +103,26 @@ final class PairingSetupV2AdmissionsTests: XCTestCase {
         XCTAssertNil(PairingSetupV2Source(.unix(path: "/fixture")))
     }
 
-    func testIPv6SourceKeyIgnoresScopeAndSharesQuotaWithinPrefix() throws {
-        XCTAssertEqual(try source("fe80::1234%lo0"), try source("fe80::1234"))
-        let original = try source("2001:db8:0:1::1")
-        let rotation = try source("2001:db8:0:1:abcd::2")
-        let other = try source("2001:db8:0:2::1")
-        XCTAssertEqual(original, .ipv6Prefix(0x20010db800000001))
-        XCTAssertEqual(rotation, original)
-        XCTAssertNotEqual(other, original)
+    func testIPv6AddressesInSamePrefixKeepSeparateSlotsAndQuotas() throws {
+        let scoped = try source("fe80::1234%lo0")
+        XCTAssertEqual(scoped, try source("fe80::1234"))
+        XCTAssertNotEqual(scoped, try source("fe80::5678%lo0"))
+        let phone = try source("2001:db8:0:1::1")
+        let peer = try source("2001:db8:0:1:abcd::2")
+        XCTAssertEqual(phone, .ipv6(high: 0x20010db800000001, low: 1))
+        XCTAssertNotEqual(phone, peer)
 
         var fixture = Fixture()
-        let id = UUID()
-        XCTAssertEqual(fixture.admit(id, key: original), .admitted(evicting: nil))
-        XCTAssertEqual(fixture.admit(key: rotation), .admitted(evicting: id))
-        XCTAssertEqual(fixture.admit(key: rotation), .rejected)
-        XCTAssertEqual(fixture.admit(key: other), .admitted(evicting: nil))
+        let phoneFirst = UUID(), peerFirst = UUID()
+        XCTAssertEqual(fixture.admit(phoneFirst, key: phone), .admitted(evicting: nil))
+        XCTAssertEqual(fixture.admit(peerFirst, key: peer), .admitted(evicting: nil))
+        let phoneRetry = UUID(), peerRetry = UUID()
+        XCTAssertEqual(fixture.admit(phoneRetry, key: phone), .admitted(evicting: phoneFirst))
+        XCTAssertEqual(fixture.admit(peerRetry, key: peer), .admitted(evicting: peerFirst))
+        XCTAssertEqual(fixture.admit(key: phone), .rejected)
+        XCTAssertEqual(fixture.admit(key: peer), .rejected)
+        XCTAssertTrue(fixture.admission.beginVerification(phoneRetry, at: fixture.started))
+        XCTAssertTrue(fixture.admission.beginVerification(peerRetry, at: fixture.started))
     }
 
     private func source(_ host: String, port: NWEndpoint.Port = 1) throws -> PairingSetupV2Source {
