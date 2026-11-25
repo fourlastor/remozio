@@ -78,6 +78,9 @@ class PlatformPairingAttemptTest {
             assertContentEquals(keys.decisionPublicKey, proposal.decisionKey.publicKey.copyBytes())
             assertContentEquals(keys.biometricPublicKey, proposal.biometricKey.publicKey.copyBytes())
             proposal.validateMacScope(invitation)
+            assertEquals(listOf(Triple(0uL, 1uL, 1uL), Triple(0uL, 1uL, 2uL), Triple(0uL, 1uL, 3uL), Triple(0uL, 1uL, 4uL)),
+                proposal.phone.requests.map { Triple(it.kind, it.wireVersion, it.schemaVersion) })
+            assertTrue(proposal.phone.requests.all { it.features.isEmpty() })
             assertTrue(channel.transcript.verificationCode().isNotEmpty())
             val (macID, accountID, pin, alpn) = assertNotNull(keys.opened)
             assertContentEquals(invitation.macID.copyBytes(), macID as ByteArray)
