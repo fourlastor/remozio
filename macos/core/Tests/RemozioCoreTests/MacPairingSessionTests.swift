@@ -56,6 +56,7 @@ private actor MacPairingTransportFixture: MacPairingTransportControl {
     private let aborts = Mutex(0)
     nonisolated var abortCount: Int { aborts.withLock { $0 } }
     var staged = 0
+    private var beforeCurrentReply: (@Sendable () -> Void)?
     func start(rePair: RePairInvitation) throws -> UInt16 {
         XCTAssertEqual(rePair.predecessor, fixture.proposal.replacement)
         XCTAssertEqual(try rePair.invitation.encode(), try fixture.invitation.encode())
@@ -65,7 +66,11 @@ private actor MacPairingTransportFixture: MacPairingTransportControl {
     init(_ fixture: TransportPairingFixture) { self.fixture = fixture }
     func start(invitation: PairingInvitation) throws -> UInt16 { XCTAssertEqual(try invitation.encode(), try fixture.invitation.encode()); return 4321 }
     func current() throws -> TransportPairingSnapshot {
-        try .init(port: 4321, candidates: disappear ? [] : [.init(id: id, proposal: fixture.proposal, phase: phase, biometricProof: proof)])
+        defer {
+            beforeCurrentReply?()
+            beforeCurrentReply = nil
+        }
+        return try .init(port: 4321, candidates: disappear ? [] : [.init(id: id, proposal: fixture.proposal, phase: phase, biometricProof: proof)])
     }
     func stage(candidateID: Data, transcript: PairingTranscript) throws {
         staged += 1
@@ -80,6 +85,7 @@ private actor MacPairingTransportFixture: MacPairingTransportControl {
     }
     func showProof(_ value: Data) { proof = value; phase = .proofReady }
     func removeCandidate() { disappear = true }
+    func beforeNextCurrentReply(_ action: @escaping @Sendable () -> Void) { beforeCurrentReply = action }
     func loseDelivery() { loseReceiptReply = true }
     nonisolated func abort() { aborts.withLock { $0 += 1 } }
     func close() {}
@@ -99,14 +105,27 @@ private actor MacPairingAdministratorFixture: MacPairingAdministrator {
     func cancelAuthorization() { cancel = true }
     func holdAuthorization() { hold = true }
     var isWaiting: Bool { waiting != nil }
-    func release() { let old = waiting; waiting = nil; old?.resume(returning: Data(count: MemoryLayout<AuthorizationExternalForm>.size)) }
+    func release() {
+        hold = false
+        let old = waiting; waiting = nil
+        old?.resume(returning: Data(count: MemoryLayout<AuthorizationExternalForm>.size))
+    }
     func close() {}
 }
-private final class MacPairingClockFixture: @unchecked Sendable {
-    private let lock = NSLock()
-    private var elapsed: UInt64 = 0
-    func now() -> UInt64 { lock.withLock { elapsed } }
-    func advance() { lock.withLock { elapsed = 1000 } }
+private final class MacPairingClockFixture: Sendable {
+    enum Failure: Error { case sample }
+    private let values = Mutex((wall: UInt64(1000), elapsed: UInt64(0), failed: false))
+
+    func wall() -> UInt64 { values.withLock { $0.wall } }
+    func elapsed() throws -> UInt64 {
+        try values.withLock {
+            guard !$0.failed else { throw Failure.sample }
+            return $0.elapsed
+        }
+    }
+    func setWall(_ milliseconds: UInt64) { values.withLock { $0.wall = milliseconds } }
+    func setElapsed(_ milliseconds: UInt64) { values.withLock { $0.elapsed = milliseconds } }
+    func failElapsedRead() { values.withLock { $0.failed = true } }
 }
 final class MacPairingSessionTests: XCTestCase {
     private struct Owner {
@@ -116,7 +135,7 @@ final class MacPairingSessionTests: XCTestCase {
         let admin: MacPairingAdministratorFixture
         let clock = MacPairingClockFixture()
         let session: MacPairingSession
-        init(rePair: Bool = false, selectedRevision: UUID? = nil) throws {
+        init(rePair: Bool = false, selectedRevision: UUID? = nil, elapsedAtV2OpenReply: UInt64? = nil) throws {
             let fixture = try TransportPairingFixture(rePair: rePair)
             self.fixture = fixture
             root = .init(fixture); transport = .init(fixture); admin = .init(root)
@@ -125,9 +144,15 @@ final class MacPairingSessionTests: XCTestCase {
                     revision: try selectedRevision ?? GatewayHostSnapshot.uuid(fixture.transcript.expectedTrustRevision),
                     phone: DeliveryRecipient(phoneID: replacement.phoneID, enrollmentEpoch: replacement.epoch))
             }
-            let clock = clock
-            session = .init(root: root, transport: transport, administrator: admin, predecessor: predecessor,
-                unixMilliseconds: { 1000 }, elapsedMilliseconds: { clock.now() })
+            let clock = clock, root = root
+            let v2 = try elapsedAtV2OpenReply.map { elapsed in
+                let exported = try PairingInvitationV2(invitation: fixture.invitation, windowID: Data(repeating: 1, count: 16),
+                    secret: Data(repeating: 2, count: 32), replacement: fixture.proposal.replacement, lifetimeMilliseconds: 1000)
+                return MacPairingV2Control(open: { _, _ in clock.setElapsed(elapsed); return exported },
+                    listen: { _ in }, stage: { proposal, _, authorization in try await root.stage(proposal, authorization: authorization) })
+            }
+            session = .init(root: root, transport: transport, administrator: admin, predecessor: predecessor, v2: v2,
+                unixMilliseconds: { clock.wall() }, elapsedMilliseconds: { try clock.elapsed() })
         }
         func start() async throws {
             _ = try await session.start(label: "Fixture"); _ = try await session.current()
@@ -214,6 +239,7 @@ final class MacPairingSessionTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(40))
         XCTAssertFalse(closed.withLock { $0 })
         XCTAssertEqual(o.transport.abortCount, 0)
+        o.clock.setElapsed(1000)
         release.continuation.finish()
         let state = try await commit.value
         let current = await close.value
@@ -283,11 +309,100 @@ final class MacPairingSessionTests: XCTestCase {
         XCTAssertEqual(stages, 0); XCTAssertEqual(snapshot.phase, .closed); await o.session.close()
     }
     func testElapsedDeadlineClearsActionAvailabilityBeforeCommit() async throws {
-        let o = try Owner(); try await o.start(); try await o.prepareProof(); o.clock.advance()
+        let o = try Owner(); try await o.start(); try await o.prepareProof(); o.clock.setElapsed(1000)
         do { _ = try await o.session.current(); XCTFail() } catch {}
         let state = await o.session.snapshot(), commits = await o.root.commits
         XCTAssertEqual(state.phase, .expired); XCTAssertEqual(state.remainingMilliseconds, 0); XCTAssertEqual(commits, 0); await o.session.close()
     }
+    func testConfirmationAtDeadlineExpiresAndClearsPairingData() async throws {
+        let o = try Owner(); try await o.start(); try await o.select()
+        o.clock.setElapsed(1000)
+        do { _ = try await o.session.confirmComparison(); XCTFail("Confirmed an expired transcript") }
+        catch MacPairingSessionError.expired {}
+        try await assertExpiredBeforeCommit(o)
+    }
+
+    func testCommitExpiresWhileWaitingForAdministratorAuthorization() async throws {
+        let o = try Owner(); try await o.start(); try await o.prepareProof()
+        await o.admin.holdAuthorization()
+        let commit = Task { @Sendable in try await o.session.commit() }
+        let readyBy = ContinuousClock.now.advanced(by: .seconds(2))
+        while !(await o.admin.isWaiting), ContinuousClock.now < readyBy {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let waiting = await o.admin.isWaiting
+        XCTAssertTrue(waiting)
+        o.clock.setElapsed(60_000)
+        await o.admin.release()
+        do { _ = try await commit.value; XCTFail("Submitted a commit after expiry") }
+        catch MacPairingSessionError.expired {}
+        try await assertExpiredBeforeCommit(o)
+    }
+
+    func testProofReplyThatCrossesDeadlineIsDiscarded() async throws {
+        let o = try Owner(); try await o.start(); try await o.select()
+        _ = try await o.session.confirmComparison()
+        try await o.transport.showProof(o.fixture.proof())
+        await o.transport.beforeNextCurrentReply { o.clock.setElapsed(1000) }
+        do { _ = try await o.session.current(); XCTFail("Accepted a proof after expiry") }
+        catch MacPairingSessionError.expired {}
+        try await assertExpiredBeforeCommit(o)
+    }
+
+    func testV2DeadlineIncludesTheOpenCallAndDoesNotRestartAtStaging() async throws {
+        let o = try Owner(elapsedAtV2OpenReply: 100); try await o.start()
+        let opened = await o.session.snapshot()
+        XCTAssertEqual(opened.remainingMilliseconds, 900)
+        o.clock.setElapsed(800)
+        try await o.select()
+        let staged = await o.session.snapshot()
+        XCTAssertEqual(staged.remainingMilliseconds, 200)
+        o.clock.setElapsed(1000)
+        do { _ = try await o.session.confirmComparison(); XCTFail("Extended the v2 window when staging") }
+        catch MacPairingSessionError.expired {}
+        try await assertExpiredBeforeCommit(o)
+    }
+
+    func testSignedWindowMayShortenV2DeadlineDespiteLaterWallClockChange() async throws {
+        let o = try Owner(elapsedAtV2OpenReply: 100); try await o.start()
+        o.clock.setWall(1900)
+        try await o.select()
+        let staged = await o.session.snapshot()
+        XCTAssertEqual(staged.remainingMilliseconds, 100)
+        o.clock.setWall(1000)
+        o.clock.setElapsed(200)
+        do { _ = try await o.session.confirmComparison(); XCTFail("Extended the deadline after the wall clock changed") }
+        catch MacPairingSessionError.expired {}
+        try await assertExpiredBeforeCommit(o)
+    }
+
+    func testElapsedClockFailurePreventsCommit() async throws {
+        let o = try Owner(); try await o.start(); try await o.prepareProof()
+        o.clock.failElapsedRead()
+        do { _ = try await o.session.commit(); XCTFail("Submitted a commit without a clock sample") }
+        catch MacPairingClockFixture.Failure.sample {}
+        let state = await o.session.snapshot(), commits = await o.root.commits
+        XCTAssertEqual(state.phase, .unavailable)
+        XCTAssertEqual(state.remainingMilliseconds, 0)
+        XCTAssertFalse(state.phoneProofAvailable)
+        XCTAssertEqual(commits, 0)
+        XCTAssertGreaterThan(o.transport.abortCount, 0)
+    }
+
+    private func assertExpiredBeforeCommit(_ o: Owner) async throws {
+        let state = await o.session.snapshot()
+        XCTAssertEqual(state.phase, .expired)
+        XCTAssertEqual(state.remainingMilliseconds, 0)
+        XCTAssertNil(state.comparisonCode)
+        XCTAssertTrue(state.candidates.isEmpty)
+        XCTAssertFalse(state.phoneProofAvailable)
+        XCTAssertGreaterThan(o.transport.abortCount, 0)
+        do { _ = try await o.session.commit(); XCTFail("Submitted a commit from an expired session") }
+        catch MacPairingSessionError.invalidState {}
+        let commits = await o.root.commits
+        XCTAssertEqual(commits, 0)
+    }
+
     func testInvalidProofNeverReachesCommit() async throws {
         let o = try Owner(); try await o.start(); try await o.select(); _ = try await o.session.confirmComparison()
         await o.transport.showProof(Data(count: 64))
