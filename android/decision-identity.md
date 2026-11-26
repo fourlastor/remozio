@@ -35,17 +35,17 @@ The self-signed certificate supplies public-key material only. It is not a trans
 
 ## Signing boundary
 
-`declineCommand` accepts the original authority-signed body. It verifies the trusted Mac/account and parses the supported command capture. Decline must appear among the captured choices. Unsupported schemas, features and request families fail before signing.
+`declineSession` takes the authenticated command session that the app displays. It checks the session against the enrolled Mac, account and authority key. The session checks the negotiated schema and verifies that the current status allows the captured decline action.
 
 The method constructs the complete decision itself. Callers cannot select a signing purpose, key ID, phone identity or approval action. It signs the canonical cancellation input and verifies the resulting wire signature before returning a carrier. It exposes no raw signing operation. Command execution and other biometric choices remain unavailable through this key.
 
 The enrollment host must call this method only for an explicit choice on the displayed request. It must close the identity when the enrollment is removed or its trust changes. Close prevents subsequent signatures from that handle; it does not delete the underlying key. Other active enrollments remain independent.
 
-An issued signature proves origin, not freshness. This adapter does not discover terminal status, provide an action queue, send messages, retry decisions or consume requests. The future request host must bind UI selection to its retained session and stop stale callbacks. The Mac must independently validate current enrollment, request expiry and atomic consumption. A lost reply cannot be treated as success or retried automatically.
+The request host binds the explicit UI choice to its retained session and closes stale sessions. The Mac independently validates current enrollment, request expiry and atomic consumption. A lost reply leaves the outcome uncertain.
 
 ## Evidence and remaining work
 
-JVM tests use disposable software keys solely to check message bindings and cryptographic conversion. They cover altered requests, wrong authorities and accounts, unsupported contracts, absent decline, invalid captures, closed handles and wrong local keys. Policy tests exercise hardware classifications and creation fallback failures.
+JVM tests use disposable software keys to verify cancellation signatures for all four command schemas. They also cover session binding, current status, permitted actions and invalid key handles. Phone Core tests cover malformed and unsupported requests during session admission. Policy tests exercise hardware classifications and creation fallback failures.
 
 The launcher does not create or load these keys yet. Pairing, request controls, network dispatch and phone removal integration remain separate work. Real Keystore behavior, process restart, device lock, update continuity and Pixel custody checks remain for the physical-device session.
 

@@ -1,10 +1,17 @@
 package dev.sebastiano.remozio.android.decisions
 
 import dev.remozio.phone.enrollment.*
+import dev.remozio.phone.requests.CommandRequestSession
+import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.phone.requests.RequestLimits
 import dev.remozio.phone.updates.PhoneUpdateSchedulingQuery
 import dev.remozio.protocol.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
@@ -30,81 +37,118 @@ class AndroidDecisionIdentityTest {
             decisionPublicPoint(decisionKey.public as ECPublicKey)), reference(EnrollmentKeyRole.BIOMETRIC), id(6, 32), null)
     private val decline = CapturedAction(ActionChoice.DECLINE, ActionScope.CurrentRequest)
     private val execute = CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)
-    private fun request(mac: Int = 2, account: Int = 3, requestID: Int = 7, actions: List<CapturedAction> = listOf(decline, execute),
-                        kind: RequestKind = RequestKind.COMMAND, schema: ULong = 1u, features: Set<ULong> = emptySet(),
-                        bytes: ByteArray = capture) =
-        IssuedRequestPayload(RequestContract(kind, 1u, schema), id(mac), id(account), id(requestID), id(8, 32), features,
-            1u, 60001u, bytes, actions, bound, bound)
-    private fun sign(request: IssuedRequestPayload, key: java.security.PrivateKey = authority.private): ByteArray =
+    private val receivedAt = ElapsedInstant(0, 100u)
+
+    private fun request(mac: Int = 2, account: Int = 3, schema: ULong = 1u,
+                        actions: List<CapturedAction> = listOf(decline, execute), bytes: ByteArray = capture) =
+        IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, schema), id(mac), id(account), id(7), id(8, 32),
+            emptySet(), 1u, 60001u, bytes, actions, bound, bound)
+
+    private fun sign(body: ByteArray, type: ApprovalMessageType, purpose: SigningPurpose, signer: KeyPair) =
         P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
-            initSign(key); update(SigningInput.make(1u, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST,
-                request.encode(bound), bound, bound)); sign()
+            initSign(signer.private)
+            update(SigningInput.make(1u, type, purpose, body, bound, bound))
+            sign()
         })
+
+    private fun session(request: IssuedRequestPayload, signer: KeyPair = authority, presented: Boolean = true): CommandRequestSession {
+        val body = request.encode(bound)
+        val session = CommandRequestSession.open(body, sign(body, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST, signer),
+            request.macID, request.accountID, decisionPublicPoint(signer.public as ECPublicKey), limits, setOf(request.contract.schemaVersion))
+        if (presented) {
+            val status = RequestStatusPayload(request.macID, request.accountID, request.requestID, request.requestDigest(bound, bound),
+                request.challenge, 1u, RequestPhase.PRESENTED, RequestStatusReason.NONE, id(20), 1000u, 59000u,
+                null, false, null, null).encode(bound)
+            session.observe(status, sign(status, ApprovalMessageType.STATUS, SigningPurpose.STATUS, signer), receivedAt)
+        }
+        return session
+    }
+
     private fun identity() = AndroidDecisionIdentity(enrollment, decisionKey.private, DecisionKeySecurity.TRUSTED_ENVIRONMENT)
 
-    @Test fun declineBindsTheWholeAuthenticatedRequestAndTheEnrolledPhoneKey() {
+    private fun vector(property: String, name: String): ByteArray {
+        val source = File(checkNotNull(System.getProperty(property))).readText()
+        val row = Json.parseToJsonElement(source).jsonObject.getValue("valid").jsonArray
+            .map { it.jsonObject }.single { it.getValue("name").jsonPrimitive.content == name }
+        return row.getValue("hex").jsonPrimitive.content.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    }
+
+    @Test fun declineBindsTheAuthenticatedRequestForEveryNegotiatedCommandSchema() {
+        val fields = (DeterministicCbor.decode(capture, bound) as CborValue.Fields).values
+        val captureV2 = DeterministicCbor.encode(CborValue.Fields(fields + (0uL to CborValue.Unsigned(2u))), bound)
+        val captures = mapOf(
+            1uL to capture,
+            2uL to captureV2,
+            3uL to vector("remozio.test.commandStreamVectors", "schema3-terminal-mask-0"),
+            4uL to vector("remozio.test.linuxCommandCaptureVectors", "schema4-base"),
+        )
         identity().use { signer ->
-            val request = request()
-            val carrier = signer.declineCommand(request.encode(bound), sign(request), limits)
-            val decision = DecisionPayload.decode(carrier.body.copyBytes(), bound)
-            assertEquals(ApprovalMessageType.DECISION, carrier.type)
-            assertEquals(SigningPurpose.CANCELLATION, carrier.purpose)
-            assertEquals(decline, decision.action)
-            assertContentEquals(request.macID, decision.macID)
-            assertContentEquals(request.accountID, decision.accountID)
-            assertContentEquals(request.requestID, decision.requestID)
-            assertContentEquals(request.challenge, decision.challenge)
-            assertContentEquals(request.requestDigest(bound, bound), decision.requestDigest)
-            assertContentEquals(enrollment.phoneID.copyBytes(), decision.phoneID)
-            assertContentEquals(enrollment.decisionKey.keyID.copyBytes(), decision.keyID)
-            assertTrue(ApprovalSignature.verify(carrier.signature.copyBytes(), enrollment.decisionKey.publicKey.copyBytes(), 1u,
-                carrier.type, carrier.purpose, carrier.body.copyBytes(), bound, bound))
-            assertFalse(ApprovalSignature.verify(carrier.signature.copyBytes(), enrollment.decisionKey.publicKey.copyBytes(), 1u,
-                carrier.type, SigningPurpose.BIOMETRIC_AUTHORIZATION, carrier.body.copyBytes(), bound, bound))
+            for ((schema, bytes) in captures) {
+                val request = request(schema = schema, bytes = bytes)
+                session(request).use { displayed ->
+                    assertEquals(schema, assertNotNull(displayed.snapshot(receivedAt).capture).schemaVersion)
+                    val carrier = signer.declineSession(displayed, receivedAt, limits)
+                    val decision = DecisionPayload.decode(carrier.body.copyBytes(), bound)
+                    assertEquals(ApprovalMessageType.DECISION, carrier.type)
+                    assertEquals(SigningPurpose.CANCELLATION, carrier.purpose)
+                    assertEquals(decline, decision.action)
+                    assertContentEquals(request.macID, decision.macID)
+                    assertContentEquals(request.accountID, decision.accountID)
+                    assertContentEquals(request.requestID, decision.requestID)
+                    assertContentEquals(request.challenge, decision.challenge)
+                    assertContentEquals(request.requestDigest(bound, bound), decision.requestDigest)
+                    assertContentEquals(enrollment.phoneID.copyBytes(), decision.phoneID)
+                    assertContentEquals(enrollment.decisionKey.keyID.copyBytes(), decision.keyID)
+                    assertTrue(ApprovalSignature.verify(carrier.signature.copyBytes(), enrollment.decisionKey.publicKey.copyBytes(), 1u,
+                        carrier.type, carrier.purpose, carrier.body.copyBytes(), bound, bound))
+                    assertFalse(ApprovalSignature.verify(carrier.signature.copyBytes(), enrollment.decisionKey.publicKey.copyBytes(), 1u,
+                        carrier.type, SigningPurpose.BIOMETRIC_AUTHORIZATION, carrier.body.copyBytes(), bound, bound))
+                }
+            }
         }
     }
 
-    @Test fun refusesOtherMacAccountsChangedRequestsAndWrongAuthoritySignatures() {
+    @Test fun declineRejectsAValidatedSessionFromAnotherMacAccountOrAuthority() {
         identity().use { signer ->
             for (request in listOf(request(mac = 99), request(account = 99))) {
-                assertFailsWith<DecisionIdentityUnavailable> { signer.declineCommand(request.encode(bound), sign(request), limits) }
+                session(request).use {
+                    assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+                }
             }
-            val request = request()
-            assertFailsWith<DecisionIdentityUnavailable> { signer.declineCommand(request.encode(bound), sign(request, pair().private), limits) }
-            assertFailsWith<DecisionIdentityUnavailable> { signer.declineCommand(request(requestID = 99).encode(bound), sign(request), limits) }
+            session(request(), signer = pair()).use {
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+            }
         }
     }
 
-    @Test fun refusesAbsentDeclineUnsupportedContractsFeaturesAndInvalidCapture() {
+    @Test fun declineRequiresCurrentStatusAndAnAllowedDecline() {
         identity().use { signer ->
-            val requests = listOf(request(actions = listOf(execute)), request(schema = 2u), request(features = setOf(1u)),
-                request(kind = RequestKind.ONE_PASSWORD_ACCESS, actions = listOf(decline)), request(bytes = byteArrayOf(0xa0.toByte())))
-            requests.forEach { request ->
-                assertFailsWith<DecisionIdentityUnavailable> { signer.declineCommand(request.encode(bound), sign(request), limits) }
+            session(request(), presented = false).use {
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+            }
+            session(request(actions = listOf(execute))).use {
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+            }
+            session(request()).use {
+                val expiredAt = ElapsedInstant(0, 60_000u)
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, expiredAt, limits) }
             }
         }
     }
 
     @Test fun closeInvalidatesOnlyItsHandleAndWrongLocalKeyCannotProduceACarrier() {
-        val first = identity(); val second = identity(); val request = request(); val signature = sign(request)
-        first.close(); first.close()
-        assertFailsWith<DecisionIdentityUnavailable> { first.declineCommand(request.encode(bound), signature, limits) }
-        second.use { assertEquals(SigningPurpose.CANCELLATION, it.declineCommand(request.encode(bound), signature, limits).purpose) }
-        AndroidDecisionIdentity(enrollment, pair().private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { wrong ->
-            assertFailsWith<DecisionIdentityUnavailable> { wrong.declineCommand(request.encode(bound), signature, limits) }
-        }
-    }
-
-    @Test fun boundsRequestsAndDoesNotEchoTheirContentsOnFailure() {
-        identity().use { signer ->
-            val request = request()
-            for ((body, signature) in listOf(ByteArray(bound.maxBytes + 1) to ByteArray(64),
-                request.encode(bound) to ByteArray(63), "private synthetic request".toByteArray() to ByteArray(64))) {
-                assertEquals("Decision identity unavailable", assertFailsWith<DecisionIdentityUnavailable> {
-                    signer.declineCommand(body, signature, limits)
-                }.message)
+        session(request()).use { displayed ->
+            val closed = identity()
+            closed.close()
+            closed.close()
+            assertEquals("Decision identity unavailable", assertFailsWith<DecisionIdentityUnavailable> {
+                closed.declineSession(displayed, receivedAt, limits)
+            }.message)
+            assertEquals("AndroidDecisionIdentity(redacted)", closed.toString())
+            identity().use { assertEquals(SigningPurpose.CANCELLATION, it.declineSession(displayed, receivedAt, limits).purpose) }
+            AndroidDecisionIdentity(enrollment, pair().private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { wrong ->
+                assertFailsWith<DecisionIdentityUnavailable> { wrong.declineSession(displayed, receivedAt, limits) }
             }
-            assertEquals("AndroidDecisionIdentity(redacted)", signer.toString())
         }
     }
 
