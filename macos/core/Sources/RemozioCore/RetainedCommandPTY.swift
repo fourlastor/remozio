@@ -8,12 +8,12 @@ final class RetainedCommandPTY {
     enum Read: Equatable { case waiting, bytes(Data), end }
     private var handle: OpaquePointer?
 
-    init(attributes: termios? = nil, size: winsize? = nil) throws {
+    init(attributes: termios? = nil, size: winsize? = nil, target: (uid: uid_t, gid: gid_t)? = nil) throws {
         var copiedAttributes = attributes ?? termios(), copiedSize = size ?? winsize()
         let status = withUnsafePointer(to: &copiedAttributes) { attributesPointer in
             withUnsafePointer(to: &copiedSize) { sizePointer in
-                remozio_command_pty_create(attributes == nil ? nil : attributesPointer,
-                    size == nil ? nil : sizePointer, &handle)
+                remozio_command_pty_create_for_target(attributes == nil ? nil : attributesPointer,
+                    size == nil ? nil : sizePointer, target?.uid ?? 0, target?.gid ?? 0, &handle)
             }
         }
         if status != 0 { throw RetainedCommandPTYError.native(status) }

@@ -82,6 +82,7 @@ final class CommandExecution {
         let status = try resources.withBorrowedDescriptors { input, output, error, directory in
             let pty: RetainedCommandPTY?
             if resources.requiresStreamPump {
+                let target = resources.capture.target
                 let privatePTY = try resources.withBorrowedCallerTerminal { callerTerminal in
                     let source = resources.requiresMappedLayout ? callerTerminal : input
                     var attributes = termios(), size = winsize()
@@ -91,7 +92,8 @@ final class CommandExecution {
                             throw RetainedCommandPTYError.native(errno)
                         }
                     }
-                    return try RetainedCommandPTY(attributes: hasTerminal ? attributes : nil, size: hasTerminal ? size : nil)
+                    return try RetainedCommandPTY(attributes: hasTerminal ? attributes : nil,
+                        size: hasTerminal ? size : nil, target: (target.uid, target.gid))
                 }
                 pty = privatePTY
                 pump = try CommandPTYStreamPump(pty: privatePTY, channel: resources.makeStreamAuthority())
