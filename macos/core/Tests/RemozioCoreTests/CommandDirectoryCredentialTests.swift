@@ -41,13 +41,23 @@ final class CommandDirectoryCredentialTests: XCTestCase {
         guard result == 0 else { throw CocoaError(.coderReadCorrupt) }
         try inspect(&spec)
     }
+    private func executableInfo(_ path: String = "/usr/bin/true") throws -> stat {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        return info
+    }
     func testProductionFramesBindAccountNameAndAllTerminalLayoutsWithoutChangingCapture() throws {
+        let info = try executableInfo()
         for mask in [nil] + (0...7).map({ Optional(UInt32($0)) }) {
             let mode: CommandIOMode = mask == nil ? .pipes : .pty
             let capture = try capture(target: fixture, mode: mode, mask: mask), original = capture.canonicalBytes
-            let bytes = try CommandChildLaunchSpecification(capture: capture, preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+            let launch = CommandExecutableLaunch(mode: .protectedPath, info: info)
+            let bytes = try CommandChildLaunchSpecification(capture: capture, launch: launch,
+                preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
             try decoded(bytes) { spec in
-                XCTAssertEqual(spec.format_version, 3); XCTAssertEqual(spec.stdio_pty_mask, mask ?? 0)
+                XCTAssertEqual(spec.format_version, 4); XCTAssertEqual(spec.stdio_pty_mask, mask ?? 0)
+                XCTAssertEqual(spec.launch_mode, REMOZIO_CHILD_LAUNCH_PROTECTED_PATH)
+                XCTAssertEqual(remozio_child_spec_check_executable(&spec), 0)
                 XCTAssertEqual(spec.io_mode, mask == nil ? 0 : 2)
                 XCTAssertEqual(String(cString: spec.account_name), "fixture")
                 XCTAssertEqual(Array(UnsafeBufferPointer(start: spec.groups, count: Int(spec.group_count))), [42, 5678])
@@ -60,6 +70,42 @@ final class CommandDirectoryCredentialTests: XCTestCase {
             XCTAssertEqual(spec.format_version, 3); XCTAssertEqual(spec.io_mode, 1); XCTAssertEqual(spec.stdio_pty_mask, 7)
         }
     }
+    func testPathBoundFrameChecksExecutableMetadataWithoutReadingOrLaunchingIt() throws {
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data([0x01]).write(to: fixture)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        XCTAssertEqual(chmod(fixture.path, 0o100), 0)
+        let info = try executableInfo(fixture.path)
+        let launch = CommandExecutableLaunch(mode: .pathBound, info: info)
+        let bytes = try CommandChildLaunchSpecification(capture: capture(target: self.fixture),
+            resolvedExecutablePath: Data(fixture.path.utf8), launch: launch,
+            preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+        try decoded(bytes) { spec in
+            XCTAssertEqual(spec.format_version, 4)
+            XCTAssertEqual(spec.launch_mode, REMOZIO_CHILD_LAUNCH_PATH_BOUND)
+            XCTAssertEqual(spec.executable_inode, info.st_ino)
+            XCTAssertEqual(spec.executable_mtime_s, UInt64(bitPattern: Int64(info.st_mtimespec.tv_sec)))
+            XCTAssertEqual(remozio_child_spec_check_executable(&spec), 0)
+            var mismatch = spec
+            mismatch.executable_inode ^= 1
+            for mode in [REMOZIO_CHILD_LAUNCH_PROTECTED_PATH, REMOZIO_CHILD_LAUNCH_PATH_BOUND] {
+                mismatch.launch_mode = mode
+                XCTAssertEqual(remozio_child_spec_check_executable(&mismatch), ESTALE)
+            }
+            mismatch = spec
+            mismatch.executable_ctime_ns ^= 1
+            XCTAssertEqual(remozio_child_spec_check_executable(&mismatch), ESTALE)
+        }
+        for (offset, invalid): (Int, UInt32) in [(44, 0), (44, 3), (88, 1_000_000_000), (100, 1_000_000_000)] {
+            var bad = bytes
+            withUnsafeBytes(of: invalid.bigEndian) { bad.replaceSubrange(offset..<offset + 4, with: $0) }
+            var spec = remozio_child_spec_t()
+            defer { remozio_child_spec_close(&spec) }
+            XCTAssertEqual(bad.withUnsafeBytes { remozio_child_spec_decode($0.baseAddress, $0.count, &spec) }, EINVAL)
+            XCTAssertNil(spec.storage)
+        }
+    }
+
     func testActualDirectorySnapshotsValidateWithoutApplyingCredentialsOrTruncatingRoot() throws {
         for uid in [UInt32(0), getuid()] {
             let target = try CommandTargetResolver.resolve(uid: uid)

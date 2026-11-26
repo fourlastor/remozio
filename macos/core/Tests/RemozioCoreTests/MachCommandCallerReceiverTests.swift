@@ -5593,6 +5593,19 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .failedBeforeStart)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
+    func testNativeDispatchClassifiesV4MetadataMismatchAsFailureBeforeStart() throws {
+        let test = try nativeDispatchFixture()
+        let stale = test.fixture.root.appendingPathComponent("stale-metadata-child")
+        try FileManager.default.moveItem(atPath: test.launcher, toPath: stale.path)
+        try beginDispatch(test.fixture, request: test.request, launcher: stale.path)
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .failedBeforeStart)
+        let id = test.request.requestID
+        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .failed)
+        XCTAssertEqual(outcome?.revision, 2)
+    }
+
     func testNativeDispatchCommitsBeforeReleaseAndDeliversOriginalObservedExitWithoutReplay() throws {
         for checkpointed in [false, true] {
             let test = try nativeDispatchFixture(checkpointed: checkpointed), authority = test.authority
@@ -5838,7 +5851,9 @@ extension MachCommandCallerReceiverTests {
             let deadline = Date().addingTimeInterval(8)
             while !owner.dispose() && Date() < deadline { _ = owner.poll(); usleep(1000) }
         }
-        XCTAssertThrowsError(try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)) {
+        let proof = try resources.makeFilesystemRecheck().run(deadline: .now + .seconds(5), checkProbe: {})
+        XCTAssertThrowsError(try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000,
+            fileCreationMask: 0o022, filesystemProof: proof)) {
             XCTAssertEqual($0 as? CommandExecutionError, .unavailable)
         }
         XCTAssertThrowsError(try owner.release()) { XCTAssertEqual($0 as? CommandExecutionError, .unavailable) }
@@ -6047,8 +6062,10 @@ extension MachCommandCallerReceiverTests {
                     if !callerExits { throw MachCommandCallerError.unavailable }
                 })
             defer { XCTAssertTrue(execution.dispose()) }
+            let proof = try resources.makeFilesystemRecheck().run(deadline: .now + .seconds(5), checkProbe: {})
             if callerExits { try peer.stop() }
-            XCTAssertThrowsError(try execution.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022))
+            XCTAssertThrowsError(try execution.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher,
+                preparationMilliseconds: 5000, fileCreationMask: 0o022, filesystemProof: proof))
             guard case .terminal(let outcome) = execution.poll() else { return XCTFail("Unspawned owner must retire") }
             XCTAssertEqual(outcome, callerExits ? .requesterExitedBeforeStart : .failedBeforeStart)
             XCTAssertEqual(resources.requesterExitObserved, callerExits)
@@ -7067,7 +7084,9 @@ extension MachCommandCallerReceiverTests {
             let deadline = Date().addingTimeInterval(8)
             while !owner.dispose() && Date() < deadline { _ = owner.poll(checkStreamPolicy: {}); usleep(1000) }
         }
-        try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)
+        let proof = try resources.makeFilesystemRecheck().run(deadline: .now + .seconds(5), checkProbe: {})
+        try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000,
+            fileCreationMask: 0o022, filesystemProof: proof)
         var prepared = false
         let preparationDeadline = Date().addingTimeInterval(5)
         while !prepared {
@@ -7533,7 +7552,9 @@ extension MachCommandCallerReceiverTests {
             owner.cancelBeforeRelease(); let deadline = Date().addingTimeInterval(8)
             while !owner.dispose() && Date() < deadline { _ = owner.poll(checkStreamPolicy: {}); usleep(1000) }
         }
-        try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)
+        let proof = try resources.makeFilesystemRecheck().run(deadline: .now + .seconds(5), checkProbe: {})
+        try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000,
+            fileCreationMask: 0o022, filesystemProof: proof)
         let preparation = Date().addingTimeInterval(5)
         while true {
             if case .prepared = owner.poll(checkStreamPolicy: {}) { break }

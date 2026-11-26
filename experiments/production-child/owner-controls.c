@@ -87,7 +87,11 @@ static int fixture_dispose(remozio_command_monitor_t *owner) {
 #undef main
 int main(void) {
     struct account target = {.uid = 501, .gid = 20, .name = "fixture", .groups = {20,100,200}, .count = 3};
-    strcpy(directory, "/private/tmp"); strcpy(target_path, "/fixture/target");
+    /* The V4 frame captures the sibling target's identity. The fixture intercepts every spawn. */
+    if (!locate()) {
+        fputs("Owner controls could not locate the experiment helpers.\n", stderr);
+        return 1;
+    }
     const struct { int scenario; enum case_kind kind; int error; bool retired; int disposed; } cases[] = {
         {0,positive,0,true,1}, {0,wrong_name,0,true,1}, {0,missing_group,0,true,1}, {0,legacy,0,true,1},
         {0,cancel_prepared,0,true,1}, {3,positive,4,true,1}, {4,positive,13,true,1},

@@ -13,7 +13,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY_NAMES = {"probe", "monitor", "child", "target"}
-NATIVE_SUCCESS = {"schemaVersion": 1, "privilegedControlsRun": True, "passed": 6,
+NATIVE_SUCCESS = {"schemaVersion": 1, "privilegedControlsRun": True, "passed": 8,
                   "parentCredentialsUnchanged": True, "allOwnedCleanupConfirmed": True,
                   "fixtureRemoved": True, "installedRemozio": False}
 
@@ -45,7 +45,7 @@ def workflow_context(env, system, architecture, version, uid, euid, head):
 
 def verify_preparation(manifest, expected_sources, context):
     expected = {"schemaVersion": 1, "hostMacOS": context["hostMacOS"], "hostArchitecture": "arm64",
-                "ordinaryControls": {"schemaVersion": 1, "codecControls": 6, "privilegedControlsRun": False},
+                "ordinaryControls": {"schemaVersion": 1, "codecControls": 8, "privilegedControlsRun": False},
                 "ownerControls": {"schemaVersion": 1, "ownerControls": 30, "privilegedControlsRun": False, "realProcessesSpawned": 0},
                 "descriptorControls": {"schemaVersion": 1, "descriptorControls": 3, "privilegedControlsRun": False},
                 "ordinaryPrivilegedModeRefused": True, "invalidUIDRefused": True,

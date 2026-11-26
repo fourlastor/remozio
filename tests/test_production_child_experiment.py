@@ -69,7 +69,7 @@ class ProductionChildPreparationTests(unittest.TestCase):
                 elif "--descriptor-controls" in command:
                     value = {"schemaVersion": 1, "descriptorControls": 3, "privilegedControlsRun": False}
                 elif "--inspect" in command and command[-1] != str(2**32 - 1):
-                    value = {"schemaVersion": 1, "codecControls": 6, "privilegedControlsRun": False}
+                    value = {"schemaVersion": 1, "codecControls": 8, "privilegedControlsRun": False}
                 else:
                     return subprocess.CompletedProcess(command, 77 if "--privileged-controls" in command else 64, "", "")
                 return subprocess.CompletedProcess(command, 0, json.dumps(value), "")

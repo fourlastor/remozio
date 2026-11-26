@@ -23,7 +23,17 @@ final class ProtectedExecutablePathTests: XCTestCase {
     func testRetainsValidExecutableAndCloseRetiresIt() throws {
         let fixture = try Fixture(), path = try fixture.acquire()
         XCTAssertEqual(path.path, fixture.executable)
-        try path.validate(); path.close(); path.close()
+        try path.validate()
+        let info = try path.commandExecutableInfo()
+        XCTAssertEqual(info.st_size, Int64("executable fixture".utf8.count))
+        let protected = CommandExecutableLaunch(mode: .protectedPath, info: info)
+        let pathBound = CommandExecutableLaunch(mode: .pathBound, info: info)
+        try CommandExecution.requireCurrentExecutable(protected, observed: protected)
+        XCTAssertThrowsError(try CommandExecution.requireCurrentExecutable(protected, observed: pathBound)) {
+            XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed)
+        }
+        try CommandExecution.requireCurrentExecutable(pathBound, observed: pathBound)
+        path.close(); path.close()
         XCTAssertThrowsError(try path.validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
     }
     func testReplacementPermanentlyRetiresPath() throws {
@@ -57,6 +67,7 @@ final class ProtectedExecutablePathTests: XCTestCase {
         let next = try fixture.acquire()
         XCTAssertEqual(chmod(fixture.root + "/bin", 0o777), 0)
         XCTAssertThrowsError(try next.validate())
+        XCTAssertThrowsError(try fixture.acquire())
     }
     func testRejectsParentSymlinkAndDetectsDirectoryReplacement() throws {
         let fixture = try Fixture(), path = try fixture.acquire()
@@ -93,6 +104,24 @@ final class ProtectedExecutablePathTests: XCTestCase {
         try acl(["+a", "everyone allow write", fixture.executable])
         XCTAssertThrowsError(try path.validate())
         XCTAssertThrowsError(try fixture.acquire())
+    }
+
+    func testCommandLaunchMountRequiresBootOwnershipSemantics() throws {
+        var system = fsid_t(), data = fsid_t()
+        system.val = (11, 1)
+        data.val = (12, 1)
+        var mount = statfs()
+        mount.f_flags = UInt32(MNT_LOCAL)
+        mount.f_owner = 0
+        for volume in [system, data] {
+            mount.f_fsid = volume
+            try ProtectedExecutablePath.validateLaunchMount(mount, system: system, data: data)
+        }
+        mount.f_flags |= UInt32(MNT_IGNORE_OWNERSHIP)
+        XCTAssertThrowsError(try ProtectedExecutablePath.validateLaunchMount(mount, system: system, data: data))
+        mount.f_flags = UInt32(MNT_LOCAL)
+        mount.f_fsid.val = (13, 1)
+        XCTAssertThrowsError(try ProtectedExecutablePath.validateLaunchMount(mount, system: system, data: data))
     }
 
     func testLocalMountMustBeRootOwned() throws {

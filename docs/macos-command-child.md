@@ -99,7 +99,26 @@ The native supervisor establishes kernel exec/exit evidence and the owned child 
 The authority must bind those observations to the retained request before reporting a command exit status or signal.
 It must retain the original request, handle caller lifetime, forward signals, cancel the process group and support terminal resize.
 Those integrations remain required, along with durable permit ownership and current elevation policy.
-Pathname execution retains the user-approved replacement race after the final identity/content check.
+The production launcher accepts private format 4. It adds the launch mode and the verified file metadata to the account-bound format 3.
+Root checks the resolved path with the protected-path validator. The file and its ancestors must have protected ownership, permissions, ACLs and mounts.
+Protected mode requires the boot system or Data volume. The classification covers the named executable. Interpreters and libraries have their own lookup.
+Previously opened writable descriptors and writable mappings remain a risk.
+Both modes use the resolved path and preserve arguments, working directory and environment.
+After release, the child opens the executable with target credentials and checks its metadata before exec.
+A failed check prevents exec. Path-bound mode retains the window between the check and the kernel's pathname lookup.
+The Root local diagnostic log records the launch mode and the request ID. A confirmed pre-exec ESTALE records the executable change or stale handle.
+
+## Path-bound timing
+
+A normal-user fixture on arm64 macOS 27.2.1 sampled 120 launches of `/usr/bin/true` per condition.
+The interval starts at the check's descriptor close and ends at the userspace `execve` call site.
+
+| Condition | Median (µs) | 95th percentile (µs) | Maximum observed (µs) |
+| --- | ---: | ---: | ---: |
+| Idle | 3.583 | 5.791 | 16.291 |
+| Two CPU workers | 3.167 | 5.000 | 28.292 |
+
+Scheduling can widen this interval. The kernel pathname lookup follows it.
 
 ## Validation limits
 

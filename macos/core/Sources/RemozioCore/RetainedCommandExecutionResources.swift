@@ -74,8 +74,13 @@ final class RetainedCommandExecutionResources {
 
     func makeFilesystemRecheck() throws -> CommandFilesystemCapture.Recheck {
         guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
-        return try filesystem.makeRecheck()
+        return try filesystem.makeRecheck(checkingLaunchPath: true)
     }
+    func executableLaunch(from proof: CommandFilesystemCapture.MetadataProof) throws -> CommandExecutableLaunch {
+        guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
+        return try filesystem.executableLaunch(from: proof)
+    }
+
     func verifyFilesystemMetadata(_ proof: CommandFilesystemCapture.MetadataProof) throws {
         guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
         try filesystem.verifyMetadata(proof)

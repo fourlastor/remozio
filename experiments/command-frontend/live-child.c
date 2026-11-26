@@ -9,7 +9,7 @@
 static uid_t fixture_getuid(void) { return 0; }
 static uid_t fixture_geteuid(void) { return 0; }
 static int fixture_account_apply(const remozio_child_spec_t *spec) {
-    return spec && spec->format_version == 3 && spec->uid == getuid() && spec->gid == getgid() &&
+    return spec && spec->format_version == 4 && spec->uid == getuid() && spec->gid == getgid() &&
         spec->group_count == 1 && spec->groups && spec->groups[0] == getgid() &&
         spec->account_name && !strcmp(spec->account_name, "fixture") ? 0 : EPERM;
 }

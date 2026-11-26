@@ -12,7 +12,7 @@ static int compare_group(const void *a, const void *b) {
     return left > right ? 1 : left < right ? -1 : 0;
 }
 int remozio_child_account_validate(const remozio_child_spec_t *spec) {
-    if (!spec || spec->format_version != 3 || !spec->account_name || !*spec->account_name ||
+    if (!spec || spec->format_version < 3 || spec->format_version > 4 || !spec->account_name || !*spec->account_name ||
         strnlen(spec->account_name, REMOZIO_CHILD_MAX_ACCOUNT_NAME + 1U) > REMOZIO_CHILD_MAX_ACCOUNT_NAME ||
         spec->uid == UINT32_MAX || spec->gid == UINT32_MAX || !spec->groups ||
         !spec->group_count || spec->group_count > REMOZIO_CHILD_MAX_ACCOUNT_GROUPS) return EINVAL;

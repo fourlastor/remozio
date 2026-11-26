@@ -52,7 +52,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private typealias ExecutionFilesystemProbe = CommandFilesystemProbe<CommandFilesystemCapture.MetadataProof>
     private struct DeferredCommandPreparation {
         let deadline: ContinuousClock.Instant
-        let finish: (ExecutionFilesystemProbe) throws -> Void
+        let finish: (ExecutionFilesystemProbe, CommandFilesystemCapture.MetadataProof) throws -> Void
     }
     private var deferredCommandPreparations: [Data: DeferredCommandPreparation] = [:]
     private var releaseActivity: ReleaseActivityBarrier?
@@ -1203,7 +1203,7 @@ extension AuthorityJournal {
             commandExecutions[requestID] = execution
             commandActivity[requestID] = activity; transferredActivity = true
             startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
-            let prepare: (ExecutionFilesystemProbe) throws -> Void = { probe in
+            let prepare: (ExecutionFilesystemProbe, CommandFilesystemCapture.MetadataProof) throws -> Void = { probe, proof in
                 guard self.commandExecutions[requestID] === execution, self.requests === requests, execution.canPrepare else {
                     throw CommandExecutionError.unavailable
                 }
@@ -1216,7 +1216,7 @@ extension AuthorityJournal {
                 guard ContinuousClock.now < probe.deadline else { throw CommandFilesystemProbeError.expired }
                 try execution.prepare(monitorPath: monitorPath, childPath: childPath,
                     preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask,
-                    releaseActivity: activity, filesystemChecked: true)
+                    releaseActivity: activity, filesystemProof: proof)
             }
             // The closure stays under this journal's lock and can only verify the same original controller.
             commandStreamChecks[requestID] = {
@@ -1251,8 +1251,8 @@ extension AuthorityJournal {
             commandsAwaitingPreparation.insert(requestID)
             defer { commandsAwaitingPreparation.remove(requestID) }
             do {
-                _ = try awaitCommandFilesystem(probe)
-                try prepare(probe)
+                let proof = try awaitCommandFilesystem(probe)
+                try prepare(probe, proof)
             } catch {
                 execution.cancelBeforeRelease()
                 throw error
@@ -1278,9 +1278,9 @@ extension AuthorityJournal {
                             catch CommandFilesystemProbeError.atCapacity { }
                             continue
                         }
-                        guard try probe.consumeIfReady() != nil else { continue }
+                        guard let proof = try probe.consumeIfReady() else { continue }
                         execution.filesystemProbe = nil
-                        try pending.finish(probe)
+                        try pending.finish(probe, proof)
                     } catch {
                         execution.cancelBeforeRelease()
                     }
@@ -1314,6 +1314,9 @@ extension AuthorityJournal {
                         // No observer can see .executing between the commit and the native release attempt.
                         let now = try execution.clock(), receiptTime = execution.receiptTime()
                         try execution.resources.verifyFilesystemMetadata(proof)
+                        let observedLaunch = try execution.resources.executableLaunch(from: proof)
+                        guard let launch = execution.executableLaunch else { throw CommandExecutionError.unavailable }
+                        try CommandExecution.requireCurrentExecutable(launch, observed: observedLaunch)
                         _ = try requests.recordOutcome(requestID: id, expectedRevision: 0, event: .beginDispatch,
                             now: now, receiptTimeMs: receiptTime)
                         execution.dispatchRevision = 1

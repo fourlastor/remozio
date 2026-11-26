@@ -133,7 +133,7 @@ public final class CommandFilesystemCapture {
     }
 
     /// The worker gets duplicate descriptors. Retiring the request cannot invalidate or reuse them.
-    func makeRecheck() throws -> Recheck {
+    func makeRecheck(checkingLaunchPath: Bool = false) throws -> Recheck {
         guard executableFD >= 0, directoryFD >= 0 else { throw CommandFilesystemCaptureError.closed }
         let file = fcntl(executableFD, F_DUPFD_CLOEXEC, 0)
         guard file >= 0 else { throw CommandFilesystemCaptureError.system(errno) }
@@ -144,7 +144,7 @@ public final class CommandFilesystemCapture {
             throw CommandFilesystemCaptureError.system(error)
         }
         return Recheck(captureID: captureID, executableFD: file, directoryFD: cwd, executable: executable,
-            directory: directory, resolvedPath: resolvedExecutablePath, caller: caller)
+            directory: directory, resolvedPath: resolvedExecutablePath, caller: caller, checkingLaunchPath: checkingLaunchPath)
     }
 
     final class Recheck: Sendable {
@@ -155,19 +155,31 @@ public final class CommandFilesystemCapture {
         private let directory: CapturedDirectory
         private let resolvedPath: Data
         private let caller: CommandFilesystemCaller
+        private let checkingLaunchPath: Bool
 
         fileprivate init(captureID: UUID, executableFD: Int32, directoryFD: Int32, executable: CapturedExecutable,
-                         directory: CapturedDirectory, resolvedPath: Data, caller: CommandFilesystemCaller) {
+                         directory: CapturedDirectory, resolvedPath: Data, caller: CommandFilesystemCaller, checkingLaunchPath: Bool) {
             self.captureID = captureID; self.executableFD = executableFD; self.directoryFD = directoryFD
             self.executable = executable; self.directory = directory; self.resolvedPath = resolvedPath
             self.caller = caller
+            self.checkingLaunchPath = checkingLaunchPath
         }
 
         func run(deadline: ContinuousClock.Instant, checkProbe: () throws -> Void) throws -> MetadataProof {
             let observed = try CommandFilesystemCapture.recheck(executableFD: executableFD, directoryFD: directoryFD,
                 executable: executable, directory: directory, resolvedPath: resolvedPath, caller: caller, deadline: deadline,
                 checkProbe: checkProbe, checkCancellation: {})
-            return MetadataProof(captureID: captureID, observed: observed)
+            let mode: CommandExecutableLaunch.Mode
+            if checkingLaunchPath, let path = String(data: resolvedPath, encoding: .utf8),
+               let placement = try? ProtectedExecutablePath.acquire(path: path),
+               let info = try? placement.commandExecutableInfo(),
+               CommandFilesystemCapture.stable(observed, info) {
+                mode = .protectedPath
+            } else {
+                mode = .pathBound
+            }
+            try CommandFilesystemCapture.checkDeadline(deadline, checkProbe: checkProbe)
+            return MetadataProof(captureID: captureID, observed: observed, launchMode: mode)
         }
 
         deinit {
@@ -179,6 +191,15 @@ public final class CommandFilesystemCapture {
     struct MetadataProof: Sendable {
         fileprivate let captureID: UUID
         fileprivate let observed: stat
+        fileprivate let launchMode: CommandExecutableLaunch.Mode
+    }
+
+    func executableLaunch(from proof: MetadataProof) throws -> CommandExecutableLaunch {
+        guard executableFD >= 0, proof.captureID == captureID,
+              Self.stable(proof.observed, try Self.executableInfo(executableFD)) else {
+            throw CommandFilesystemCaptureError.changed
+        }
+        return CommandExecutableLaunch(mode: proof.launchMode, info: proof.observed)
     }
 
     /// Compare the final metadata with the completed hash probe without reading the file again.
@@ -411,7 +432,7 @@ public final class CommandFilesystemCapture {
         }
     }
 
-    private static func stable(_ before: stat, _ after: stat) -> Bool {
+    static func stable(_ before: stat, _ after: stat) -> Bool {
         before.st_dev == after.st_dev && before.st_ino == after.st_ino && before.st_mode == after.st_mode &&
             before.st_uid == after.st_uid && before.st_gid == after.st_gid && before.st_size == after.st_size &&
             before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec && before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
