@@ -30,6 +30,7 @@ public enum SignedReleaseInspection {
 
     /// Internal fixture seam. Production has no caller-supplied signature requirement.
     static func inspect(_ bundle: URL, expectedAppIdentifier: String, expectedTeamID: String?,
+                        hostVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion,
                         requirement: (String, Data) throws -> String) throws -> SignedReleaseEvidence {
         let input = bundle.standardizedFileURL
         try noSymlink(input)
@@ -42,8 +43,10 @@ public enum SignedReleaseInspection {
               let executable = app.plist["CFBundleExecutable"] as? String,
               appComponent.identifier == expectedAppIdentifier, appComponent.relativePath == "Contents/MacOS/" + executable,
               app.plist["CFBundleVersion"] as? String == manifest.build,
-              app.plist["CFBundleShortVersionString"] as? String == manifest.release,
-              app.plist["LSMinimumSystemVersion"] as? String == "26.0" else { throw ReleaseManifestError.identityMismatch }
+              app.plist["CFBundleShortVersionString"] as? String == manifest.release else {
+            throw ReleaseManifestError.identityMismatch
+        }
+        try requireSupportedMacOS(app.plist, hostVersion: hostVersion)
         let expectedPaths = Set(manifest.components.map(\.relativePath) + manifest.dependencies.flatMap {
             [$0.executablePath] + $0.executableAliases.sorted()
         })
@@ -122,6 +125,37 @@ public enum SignedReleaseInspection {
             throw ReleaseManifestError.identityMismatch
         }
         return SignedReleaseEvidence(manifest: manifest, codeDirectoryHashes: hashes, dependencyCodeDirectoryHashes: dependencyHashes)
+    }
+
+    static func requireSupportedMacOS(_ plist: [String: Any], hostVersion: OperatingSystemVersion) throws {
+        var minimum = try minimumVersion(plist["LSMinimumSystemVersion"])
+        if let overrides = plist["LSMinimumSystemVersionByArchitecture"] {
+            guard let overrides = overrides as? [String: Any] else { throw ReleaseManifestError.identityMismatch }
+            if let arm64 = overrides["arm64"] {
+                let declared = try minimumVersion(arm64)
+                if declared.version > minimum.version { minimum = declared }
+            }
+        }
+        let host = (hostVersion.majorVersion, hostVersion.minorVersion, hostVersion.patchVersion)
+        guard minimum.version <= host else { throw ReleaseManifestError.requiresNewerMacOS(minimum: minimum.declaration) }
+    }
+
+    private static func minimumVersion(_ rawValue: Any?) throws -> (version: (Int, Int, Int), declaration: String) {
+        guard let declaration = rawValue as? String, declaration.utf8.count <= 3 * String(Int.max).utf8.count + 2 else {
+            throw ReleaseManifestError.identityMismatch
+        }
+        let parts = declaration.split(separator: ".", omittingEmptySubsequences: false)
+        guard (2...3).contains(parts.count) else { throw ReleaseManifestError.identityMismatch }
+        let numbers = try parts.map { part in
+            guard !part.isEmpty, part.utf8.allSatisfy({ (48...57).contains($0) }),
+                  part.utf8.count == 1 || part.first != "0", let value = Int(part) else {
+                throw ReleaseManifestError.identityMismatch
+            }
+            return value
+        }
+        let version = (numbers[0], numbers[1], numbers.count == 3 ? numbers[2] : 0)
+        guard version >= (26, 0, 0) else { throw ReleaseManifestError.identityMismatch }
+        return (version, declaration)
     }
 
     private struct Metadata {
