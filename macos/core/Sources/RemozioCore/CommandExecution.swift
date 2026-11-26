@@ -157,7 +157,8 @@ final class CommandExecution {
         }
         let requestID = LowercaseHexadecimal.encode(resources.request.requestID)
         let mode = executableLaunch.mode == .protectedPath ? "protected-path" : "path-bound"
-        Self.dispatchAudit.notice("Command dispatch attempt request=\(requestID, privacy: .public) launch=\(mode, privacy: .public)")
+        let pathBoundReason = executableLaunch.pathBoundReason?.rawValue ?? "none"
+        Self.dispatchAudit.notice("Command dispatch attempt request=\(requestID, privacy: .public) launch=\(mode, privacy: .public) fallback=\(pathBoundReason, privacy: .public)")
         released = true
         let status = remozio_command_monitor_release(monitor)
         if status != 0 { pendingSignals.removeAll(); observationUncertain = true; cancelOwned(); throw CommandExecutionError.native(status) }
@@ -271,13 +272,14 @@ final class CommandExecution {
         if observation.monitor_ownership_lost { return .terminal(.unknown) }
         if observation.monitor_reaped {
             guard observation.status_closed || observation.protocol_failed else { return released ? .running : .preparing }
+            let checkErrno = remozio_child_executable_check_errno(observation.status.failure_error)
             if releaseSucceeded, !monitorPollFailed, observation.status_closed, !observation.protocol_failed,
                observation.target_kernel_registered, observation.target_exit_observed, !observation.target_exec_observed,
-               observation.status.reaped, observation.status.target_release_attempted, observation.status.failure_error == UInt32(ESTALE) {
+               observation.status.reaped, observation.status.target_release_attempted, checkErrno != 0 {
                 if !loggedExecutableRejection {
                     loggedExecutableRejection = true
                     let id = LowercaseHexadecimal.encode(resources.request.requestID)
-                    Self.dispatchAudit.notice("Command ESTALE before exec (executable changed or stale handle) request=\(id, privacy: .public) errno=\(ESTALE)")
+                    Self.dispatchAudit.notice("Command executable changed or no longer valid before exec request=\(id, privacy: .public) errno=\(checkErrno)")
                 }
                 return .terminal(.failedBeforeStart)
             }

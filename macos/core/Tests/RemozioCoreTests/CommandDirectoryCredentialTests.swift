@@ -31,7 +31,7 @@ final class CommandDirectoryCredentialTests: XCTestCase {
     }
     private var fixture: CommandTarget { .init(uid: 1234, gid: 42, supplementaryGroups: [42, 5678], observedName: "fixture") }
     private func frame(_ target: CommandTarget, mode: CommandIOMode = .pipes, mask: UInt32? = nil) throws -> Data {
-        try CommandChildLaunchSpecification(capture: capture(target: target, mode: mode, mask: mask),
+        try CommandChildLaunchSpecification(historicalAccountCapture: capture(target: target, mode: mode, mask: mask),
             preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
     }
     private func decoded(_ bytes: Data, inspect: (inout remozio_child_spec_t) throws -> Void) throws {
@@ -104,6 +104,44 @@ final class CommandDirectoryCredentialTests: XCTestCase {
             XCTAssertEqual(bad.withUnsafeBytes { remozio_child_spec_decode($0.baseAddress, $0.count, &spec) }, EINVAL)
             XCTAssertNil(spec.storage)
         }
+    }
+
+    func testPathBoundCheckRejectsDifferentInodeFinalSymlinkAndMissingFile() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let candidate = directory.appendingPathComponent("candidate").path
+        let original = directory.appendingPathComponent("original").path
+        let different = directory.appendingPathComponent("different").path
+        for path in [candidate, different] {
+            try Data([0x01]).write(to: URL(fileURLWithPath: path))
+            XCTAssertEqual(chmod(path, 0o700), 0)
+        }
+        XCTAssertEqual(link(candidate, original), 0)
+        let launch = CommandExecutableLaunch(mode: .pathBound, info: try executableInfo(candidate))
+        let bytes = try CommandChildLaunchSpecification(capture: capture(target: fixture),
+            resolvedExecutablePath: Data(candidate.utf8), launch: launch,
+            preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+        try decoded(bytes) { spec in
+            XCTAssertEqual(remozio_child_spec_check_executable(&spec), 0)
+            XCTAssertEqual(rename(different, candidate), 0)
+            XCTAssertEqual(remozio_child_spec_check_executable(&spec), ESTALE)
+            XCTAssertEqual(unlink(candidate), 0)
+            XCTAssertEqual(symlink(original, candidate), 0)
+            XCTAssertEqual(remozio_child_spec_check_executable(&spec), ELOOP)
+            XCTAssertEqual(unlink(candidate), 0)
+            XCTAssertEqual(remozio_child_spec_check_executable(&spec), ENOENT)
+        }
+    }
+
+    func testExecutableCheckStatusDistinguishesRecheckFromExecErrno() {
+        for error in [ESTALE, ENOENT, ELOOP, EACCES] {
+            let detail = remozio_child_executable_check_status(error)
+            XCTAssertEqual(remozio_child_executable_check_errno(UInt32(detail)), error)
+            XCTAssertEqual(remozio_child_executable_check_errno(UInt32(error)), 0)
+        }
+        XCTAssertEqual(remozio_child_executable_check_status(EIO), EIO)
+        XCTAssertEqual(remozio_child_executable_check_errno(UInt32.max), 0)
     }
 
     func testActualDirectorySnapshotsValidateWithoutApplyingCredentialsOrTruncatingRoot() throws {

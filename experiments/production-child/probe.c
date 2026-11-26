@@ -191,7 +191,8 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
             state.status.latest.detail != 0 || !state.status.target_release_attempted) failure = 9;
     } else if (stale) {
         if (received != 0 || !state.release_attempted || !state.status.target_release_attempted ||
-            !state.status.failed || state.status.failure_error != ESTALE || state.target_exec_observed ||
+            !state.status.failed || remozio_child_executable_check_errno(state.status.failure_error) != ESTALE ||
+            state.target_exec_observed ||
             ioctl(input[0], FIONREAD, &available) || available != 1) failure = 10;
     } else if (received != 0 || state.release_attempted || state.target_exec_observed ||
                ioctl(input[0], FIONREAD, &available) || available != 1) failure = 10;

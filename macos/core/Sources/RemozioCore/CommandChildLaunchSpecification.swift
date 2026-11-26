@@ -9,8 +9,23 @@ struct CommandExecutableLaunch: Sendable {
         case pathBound = 2
     }
 
+    enum PathBoundReason: String, Sendable {
+        case pathEncoding = "path-encoding"
+        case rootIdentity = "root-identity"
+        case unsafePlacement = "unsafe-placement"
+        case identityChanged = "identity-changed"
+        case inspectionFailed = "inspection-failed"
+    }
+
     let mode: Mode
     let info: stat
+    let pathBoundReason: PathBoundReason?
+
+    init(mode: Mode, info: stat, pathBoundReason: PathBoundReason? = nil) {
+        self.mode = mode
+        self.info = info
+        self.pathBoundReason = pathBoundReason
+    }
 
     func accepts(_ current: Self) -> Bool {
         CommandFilesystemCapture.stable(info, current.info) &&
@@ -24,11 +39,18 @@ struct CommandChildLaunchSpecification {
     static let maximumEntries = 262_144
     let canonicalBytes: Data
 
-    init(capture: CommandCapture, resolvedExecutablePath: Data? = nil, launch: CommandExecutableLaunch? = nil,
+    init(capture: CommandCapture, resolvedExecutablePath: Data? = nil, launch: CommandExecutableLaunch,
          preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
         try self.init(capture: capture, executablePath: resolvedExecutablePath ?? capture.executable.path,
             preparationMilliseconds: preparationMilliseconds,
             fileCreationMask: fileCreationMask, directoryAccount: true, launch: launch)
+    }
+
+    /// Encodes format 3 for native compatibility fixtures.
+    init(historicalAccountCapture capture: CommandCapture, resolvedExecutablePath: Data? = nil,
+         preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
+        try self.init(capture: capture, executablePath: resolvedExecutablePath ?? capture.executable.path,
+            preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask, directoryAccount: true)
     }
 
     /// Encodes the historical static-group format for compatibility controls. The production child refuses it.

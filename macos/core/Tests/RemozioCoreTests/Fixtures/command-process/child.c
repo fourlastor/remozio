@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
         int error = 0;
         if (spec.format_version == 4) {
             if (strstr(argv[0], "stale-metadata-child")) spec.executable_inode ^= 1;
-            error = remozio_child_spec_check_executable(&spec);
+            error = remozio_child_executable_check_status(remozio_child_spec_check_executable(&spec));
         }
         if (!error) {
             execve(spec.executable,spec.arguments,spec.environment);

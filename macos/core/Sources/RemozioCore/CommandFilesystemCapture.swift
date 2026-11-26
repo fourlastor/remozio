@@ -169,17 +169,27 @@ public final class CommandFilesystemCapture {
             let observed = try CommandFilesystemCapture.recheck(executableFD: executableFD, directoryFD: directoryFD,
                 executable: executable, directory: directory, resolvedPath: resolvedPath, caller: caller, deadline: deadline,
                 checkProbe: checkProbe, checkCancellation: {})
-            let mode: CommandExecutableLaunch.Mode
-            if checkingLaunchPath, let path = String(data: resolvedPath, encoding: .utf8),
-               let placement = try? ProtectedExecutablePath.acquire(path: path),
-               let info = try? placement.commandExecutableInfo(),
-               CommandFilesystemCapture.stable(observed, info) {
-                mode = .protectedPath
-            } else {
-                mode = .pathBound
-            }
+            let reason = checkingLaunchPath ? pathBoundReason(observed) : nil
+            let mode: CommandExecutableLaunch.Mode = checkingLaunchPath && reason == nil ? .protectedPath : .pathBound
             try CommandFilesystemCapture.checkDeadline(deadline, checkProbe: checkProbe)
-            return MetadataProof(captureID: captureID, observed: observed, launchMode: mode)
+            return MetadataProof(captureID: captureID, observed: observed, launchMode: mode, pathBoundReason: reason)
+        }
+
+        private func pathBoundReason(_ observed: stat) -> CommandExecutableLaunch.PathBoundReason? {
+            guard let path = String(data: resolvedPath, encoding: .utf8) else { return .pathEncoding }
+            do {
+                let placement = try ProtectedExecutablePath.acquire(path: path)
+                let current = try placement.commandExecutableInfo()
+                return CommandFilesystemCapture.stable(observed, current) ? nil : .identityChanged
+            } catch JournalLeaseError.rootRequired {
+                return .rootIdentity
+            } catch JournalLeaseError.unsafeMetadata {
+                return .unsafePlacement
+            } catch JournalLeaseError.identityChanged {
+                return .identityChanged
+            } catch {
+                return .inspectionFailed
+            }
         }
 
         deinit {
@@ -192,6 +202,7 @@ public final class CommandFilesystemCapture {
         fileprivate let captureID: UUID
         fileprivate let observed: stat
         fileprivate let launchMode: CommandExecutableLaunch.Mode
+        fileprivate let pathBoundReason: CommandExecutableLaunch.PathBoundReason?
     }
 
     func executableLaunch(from proof: MetadataProof) throws -> CommandExecutableLaunch {
@@ -199,7 +210,7 @@ public final class CommandFilesystemCapture {
               Self.stable(proof.observed, try Self.executableInfo(executableFD)) else {
             throw CommandFilesystemCaptureError.changed
         }
-        return CommandExecutableLaunch(mode: proof.launchMode, info: proof.observed)
+        return CommandExecutableLaunch(mode: proof.launchMode, info: proof.observed, pathBoundReason: proof.pathBoundReason)
     }
 
     /// Compare the final metadata with the completed hash probe without reading the file again.

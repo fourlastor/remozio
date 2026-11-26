@@ -45,7 +45,7 @@ final class CommandProcessTests: XCTestCase {
             submission: .init(id: Data(count: 16), nonce: Data(count: 32), callerBinding: Data(count: 16)),
             limits: .init(maxBytes: 2_097_152, maxDepth: 16, maxItems: 1024))
         if let filesystem {
-            return try CommandChildLaunchSpecification(capture: capture, resolvedExecutablePath: filesystem.resolvedExecutablePath,
+            return try CommandChildLaunchSpecification(historicalAccountCapture: capture, resolvedExecutablePath: filesystem.resolvedExecutablePath,
                 preparationMilliseconds: budget, fileCreationMask: 0o022).canonicalBytes
         }
         return try CommandChildLaunchSpecification(legacyCapture: capture, preparationMilliseconds: budget, fileCreationMask: 0o022).canonicalBytes
