@@ -1,0 +1,1111 @@
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run-linux-single-owner-experiment.py"
+SPEC = importlib.util.spec_from_file_location("linux_single_owner_experiment", SCRIPT)
+EXPERIMENT = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(EXPERIMENT)
+DESIGN = SCRIPT.parents[1] / "docs/linux-single-owner-design.md"
+EXPERIMENT_DOC = SCRIPT.parents[1] / "docs/experiments/linux-single-owner.md"
+
+START = b'{"ownerCapabilitiesExact":"yes","generation":"yes","authorityAccepted":"yes"}'
+DISPATCH = (b'{"dispatch":"1","admitted":"yes","permit":"yes","finalCheck":"yes","result":"dispatched",'
+            b'"execErrno":"none","requesterLostBeforeCheck":"no","requesterLostAfterCheck":"no","goWritten":"yes",'
+            b'"killedAtDeadline":"no","reported":"yes","kSetup":"ok","kEnd":"exited","restartLogComplete":"yes"}')
+PROBE = (b'{"capPrm":"0000000000000000","capEff":"0000000000000000","capInh":"0000000000000000",'
+         b'"capAmb":"0000000000000000","capBnd":"000001ffffffffff","noNewPrivs":"0","uid":"1000 1000 1000 1000",'
+         b'"gid":"1000 1000 1000 1000","umask":"0027","nofileSoft":"777","sessionLeader":"yes","dumpable":"1",'
+         b'"groups":"1000 27","limits":"' + b",".join([b"inf/inf"] * 16) + b'"}\n')
+
+
+# A /proc/<pid>/limits file captured on Linux 6.17, rebuilt with the kernel's own format
+# ("%-25s %-20s %-20s %-10s\n" in proc_pid_limits(), fs/proc/base.c), so the trailing padding stays.
+LIMITS_ROWS = (
+    ("Max cpu time", "unlimited", "unlimited", "seconds"),
+    ("Max file size", "unlimited", "unlimited", "bytes"),
+    ("Max data size", "unlimited", "unlimited", "bytes"),
+    ("Max stack size", "8388608", "unlimited", "bytes"),
+    ("Max core file size", "0", "unlimited", "bytes"),
+    ("Max resident set", "unlimited", "unlimited", "bytes"),
+    ("Max processes", "247316", "247316", "processes"),
+    ("Max open files", "524288", "524288", "files"),
+    ("Max locked memory", "8388608", "8388608", "bytes"),
+    ("Max address space", "unlimited", "unlimited", "bytes"),
+    ("Max file locks", "unlimited", "unlimited", "locks"),
+    ("Max pending signals", "247316", "247316", "signals"),
+    ("Max msgqueue size", "819200", "819200", "bytes"),
+    ("Max nice priority", "0", "0", ""),
+    ("Max realtime priority", "0", "0", ""),
+    ("Max realtime timeout", "unlimited", "unlimited", "us"),
+)
+LIMITS_SAMPLE = "".join("%-25s %-20s %-20s %-10s\n" % row
+                        for row in (("Limit", "Soft Limit", "Hard Limit", "Units"), *LIMITS_ROWS))
+LIMITS_PARSED = ("inf/inf,inf/inf,inf/inf,8388608/inf,0/inf,inf/inf,247316/247316,524288/524288,"
+                 "8388608/8388608,inf/inf,inf/inf,247316/247316,819200/819200,0/0,0/0,inf/inf")
+LINUX = platform.system() == "Linux"
+
+
+def compiler():
+    return shutil.which("cc") or shutil.which("gcc")
+
+
+def full_observation(case, **changes):
+    observed = {key: EXPERIMENT.NA if EXPERIMENT.NA in allowed else sorted(allowed)[0]
+                for key, allowed in EXPERIMENT.OBSERVED.items()}
+    observed.update({key: sorted(allowed)[0] for key, allowed in EXPERIMENT.CASES[case]["expect"].items()})
+    observed.update(changes)
+    return observed
+
+
+@contextlib.contextmanager
+def linux_root():
+    with contextlib.ExitStack() as stack:
+        for owner, name, value in ((EXPERIMENT.platform, "system", "Linux"),
+                                   (EXPERIMENT.platform, "machine", "x86_64"),
+                                   (EXPERIMENT.os, "geteuid", 0), (EXPERIMENT.os, "getuid", 0)):
+            stack.enter_context(patch.object(owner, name, return_value=value))
+        stack.enter_context(patch.object(EXPERIMENT.shutil, "which", return_value="/usr/bin/setpriv"))
+        stack.enter_context(patch.object(EXPERIMENT.PL, "operator_account", return_value=object()))
+        stack.enter_context(patch.object(EXPERIMENT.PL, "root_owned_ancestry", return_value=True))
+        stack.enter_context(patch.object(EXPERIMENT.PL, "host_metadata", return_value={"os": "Linux"}))
+        stack.enter_context(patch.object(EXPERIMENT.PL, "subreaper", contextlib.nullcontext))
+        stack.enter_context(patch.object(EXPERIMENT, "last_capability", return_value=40))
+        yield
+
+
+class FakeRun:
+    """Records the calls measure() makes; run_case raises on demand."""
+
+    instances = []
+
+    def __init__(self, operator, timeout, allow_sysctl, fail_in=None):
+        self.allow_sysctl = allow_sysctl
+        self.fail_in = fail_in
+        self.calls = []
+        FakeRun.instances.append(self)
+
+    def setup(self):
+        self.calls.append("setup")
+        if self.fail_in == "setup":
+            raise RuntimeError("setup failed")
+        return {"serviceIdentityUnprivileged": True}
+
+    def run_case(self, case, last_cap):
+        self.calls.append(case)
+        if self.fail_in == "case":
+            raise RuntimeError("case runner failed")
+        if EXPERIMENT.CASES[case]["sysctl"] and not self.allow_sysctl:
+            return {"passed": True, "status": "not-run", "reason": "flag-not-given"}
+        return {"passed": True}
+
+    def cleanup(self):
+        self.calls.append("cleanup")
+        return {"filesRemoved": True, "serviceUserRemoved": True, "sysctlsRestored": True}
+
+
+class SourceBuildTests(unittest.TestCase):
+    @unittest.skipUnless(platform.system() == "Linux" and compiler(), "needs Linux and a C compiler")
+    def test_every_fixture_build_compiles_with_warnings_as_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name, (source, extra) in EXPERIMENT.BUILDS.items():
+                for flags in ((), EXPERIMENT.FIXTURE_FLAGS[name]):
+                    output = Path(directory) / name
+                    result = subprocess.run([compiler(), *EXPERIMENT.CC_FLAGS, *extra, *flags, "-o", str(output),
+                                             str(source)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, f"{name} {flags}: {result.stderr}")
+
+    def test_compiler_flags_match_the_issue(self):
+        self.assertEqual(EXPERIMENT.CC_FLAGS, ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"))
+
+    def test_owner_keeps_the_designed_sequence(self):
+        owner = EXPERIMENT.OWNER.read_text()
+        for needle in ("PTRACE_O_EXITKILL", "PTRACE_O_TRACECLONE", "PTRACE_O_TRACEFORK", "PTRACE_O_TRACEVFORK",
+                       "PTRACE_O_TRACEEXEC", "PTRACE_INTERRUPT", "SO_PEERPIDFD", "PR_CAP_AMBIENT_CLEAR_ALL",
+                       "signal(SIGPIPE, SIG_IGN)", "setresuid(p->uid, p->uid, plan->owner_uid)",
+                       "setresuid(p->uid, p->uid, p->uid)", "WEXITED | WNOHANG | WNOWAIT", "pidfd_send_signal",
+                       "\"LANG=C\"", "own_threads() != 1", "/proc/sys/kernel/random/boot_id"):
+            self.assertIn(needle, owner)
+        # PR_SET_PDEATHSIG is cleared by the credential change, so the design does not use it.
+        self.assertNotIn("PR_SET_PDEATHSIG", owner)
+        # K clears dumpable twice: before the first credential change and after each one.
+        self.assertGreaterEqual(owner.count("PR_SET_DUMPABLE, 0"), 3)
+        # Every barrier the runner can name exists in O, and O names no other barrier.
+        named = set(re.findall(r'barrier\("([a-z0-9-]+)"', owner))
+        self.assertEqual(named, EXPERIMENT.BARRIERS)
+
+    def test_reserved_exit_codes_match_the_runner(self):
+        owner = EXPERIMENT.OWNER.read_text()
+        codes = {int(value) for value in re.findall(r"#define K_[A-Z_]+ (12[0-9])", owner)}
+        self.assertEqual(codes, {120, 121, 122, 123})
+        self.assertIsNone(re.search(r"return 12[0-3]", EXPERIMENT.PROBE.read_text()))
+
+
+class CaseTableTests(unittest.TestCase):
+    def test_every_case_uses_the_closed_vocabulary(self):
+        for case, spec in EXPERIMENT.CASES.items():
+            self.assertIn(spec["mode"], EXPERIMENT.MODES, case)
+            self.assertIn(spec["owner"], {"owner", "owner-thread", "owner-nocaps", "owner-lowlimit"}, case)
+            for barrier, action in spec["actions"]:
+                self.assertIn(barrier, EXPERIMENT.BARRIERS, case)
+                self.assertIn(action, EXPERIMENT.ACTIONS, case)
+            for key, allowed in spec["expect"].items():
+                self.assertIn(key, EXPERIMENT.OBSERVED, case)
+                self.assertLessEqual(allowed, EXPERIMENT.OBSERVED[key], case)
+
+    def test_only_the_attach_case_needs_a_sysctl(self):
+        self.assertEqual({case for case, spec in EXPERIMENT.CASES.items() if spec["sysctl"]},
+                         {"caller-attaches-to-k"})
+        self.assertTrue(EXPERIMENT.CASES["caller-attaches-to-k"]["rootOnly"])
+
+    def test_sigcont_replaces_the_fork_row(self):
+        design = DESIGN.read_text()
+        self.assertFalse("C forks or execs during S2–S4" in design)
+        self.assertIn("`SIGCONT` from the caller's account to C during the stop", design)
+        spec = EXPERIMENT.CASES["caller-sigcont-c-during-stop"]
+        self.assertEqual({action for _barrier, action in spec["actions"]}, {"caller-cont-c"})
+        self.assertEqual(spec["expect"]["result"], {"dispatched"})
+
+    def test_every_case_is_documented(self):
+        text = EXPERIMENT_DOC.read_text()
+        for case in EXPERIMENT.CASES:
+            self.assertTrue(f"`{case}`" in text, case)
+
+
+class ReportTests(unittest.TestCase):
+    def test_owner_lines_accept_exact_reports_only(self):
+        start, dispatch = EXPERIMENT.owner_lines(START + b"\n" + DISPATCH + b"\n")
+        self.assertEqual(start["generation"], "yes")
+        self.assertEqual(dispatch["result"], "dispatched")
+        self.assertNotIn("dispatch", dispatch)
+        for raw in (b"", START + b"\n" + DISPATCH + b"\n" + DISPATCH,
+                    START.replace(b'"yes"}', b'"maybe"}'),
+                    START.replace(b"}", b',"pid":"1234"}'),
+                    START.replace(b'"generation":"yes"', b'"generation":1'),
+                    START.replace(b'"generation":"yes"', b'"generation":"yes","generation":"yes"'),
+                    START + b"\n" + DISPATCH.replace(b'"dispatched"', b'"/home/someone"'),
+                    b"x" * (EXPERIMENT.MAX_OUTPUT_BYTES + 1)):
+            with self.assertRaises(ValueError, msg=raw[:80]):
+                EXPERIMENT.owner_lines(raw)
+
+    def test_probe_checks_publish_booleans_only(self):
+        limits = ",".join(["inf/inf"] * 16)
+        checks = EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [27, 1000, 27], limits)
+        self.assertEqual(checks, {**EXPERIMENT.PROBE_OK, "boundingFull": "yes", "commandDumpable": "1"})
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [1000], limits)["groupsExact"], "no")
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [27, 1000], None)["limitsInherited"], "no")
+        lowered = ",".join(["inf/inf"] * 7 + ["777/1024"] + ["inf/inf"] * 8)
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1000, 1000, 40, [27, 1000], lowered)["limitsInherited"], "no")
+        changed = PROBE.replace(b'"capAmb":"0000000000000000"', b'"capAmb":"0000000000200000"')
+        self.assertEqual(EXPERIMENT.probe_checks(changed, 1000, 1000, 40)["capsEmpty"], "no")
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE, 1001, 1000, 40)["uidsExact"], "no")
+        self.assertEqual(EXPERIMENT.probe_checks(PROBE.replace(b'"0027"', b'"0022"'), 1000, 1000, 40)
+                         ["umaskInherited"], "no")
+        self.assertEqual(set(EXPERIMENT.probe_checks(b"", 1000, 1000, 40).values()), {"not-reported"})
+        for raw in (PROBE + PROBE, PROBE.replace(b'"capPrm":"0000000000000000"', b'"capPrm":"zz"'),
+                    PROBE.replace(b'"dumpable":"1"', b'"dumpable":"7"'),
+                    PROBE.replace(b'"groups":"1000 27"', b'"groups":"wheel"'),
+                    PROBE.replace(b'"limits":"inf/inf,', b'"limits":"')):
+            with self.assertRaises(ValueError):
+                EXPERIMENT.probe_checks(raw, 1000, 1000, 40)
+
+    def test_limits_parse_the_kernel_format(self):
+        self.assertEqual(EXPERIMENT.parse_limits(LIMITS_SAMPLE), LIMITS_PARSED)
+        self.assertTrue(EXPERIMENT.limits_cover(LIMITS_PARSED, LIMITS_PARSED))
+        lower = LIMITS_PARSED.replace("524288/524288", "512/512")
+        self.assertFalse(EXPERIMENT.limits_cover(lower, LIMITS_PARSED))
+        self.assertTrue(EXPERIMENT.limits_cover(LIMITS_PARSED, lower))
+        for broken in (LIMITS_SAMPLE.replace("8388608  ", "8388608x "), "\n".join(LIMITS_SAMPLE.splitlines()[:10]),
+                       LIMITS_SAMPLE.replace("Max open files            524288", "Max open files 524288")):
+            with self.assertRaises(ValueError):
+                EXPERIMENT.parse_limits(broken)
+
+    @unittest.skipUnless(LINUX and compiler(), "needs Linux and a C compiler")
+    def test_owner_parses_the_same_limits_as_the_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary, sample = Path(directory) / "owner", Path(directory) / "limits"
+            subprocess.run([compiler(), *EXPERIMENT.CC_FLAGS, "-DRMZSO_LIMITS_SELFTEST", "-o", str(binary),
+                            str(EXPERIMENT.OWNER)], check=True, capture_output=True)
+            sample.write_text(LIMITS_SAMPLE)
+            output = subprocess.run([str(binary), "--parse-limits", str(sample)], capture_output=True, text=True,
+                                    check=True).stdout
+            self.assertEqual(",".join(line.replace(" ", "/") for line in output.splitlines()), LIMITS_PARSED)
+            sample.write_text(LIMITS_SAMPLE.replace("Max open files            524288", "Max open files 524288"))
+            self.assertEqual(subprocess.run([str(binary), "--parse-limits", str(sample)]).returncode, 5)
+            live = subprocess.run([str(binary), "--parse-limits", "/proc/self/limits"], capture_output=True,
+                                  text=True, check=True).stdout
+            self.assertEqual(len(live.splitlines()), 16)
+
+    def test_restart_log_complete_needs_whole_lines(self):
+        complete = EXPERIMENT.restart_log_complete
+        self.assertEqual(complete(b"1 1 SEIZE\n2 1 INTERRUPT\n"), "yes")
+        for raw in (b"", b"1 1 SEIZE\n2 1 INTER", b"1 1 SEIZE\n\n", b"1 1 SEIZE\n2 1 inter\n"):
+            self.assertEqual(complete(raw), "no", raw)
+
+    def test_stop_comparison(self):
+        compare = EXPERIMENT.compare_stop
+        first = ((500, 3, 1), 77)
+        self.assertEqual(compare(first, ((500, 3, 1), 77), 77), ("yes", "yes"))
+        self.assertEqual(compare(first, ((501, 3, 1), 77), 77), ("no", "yes"))
+        self.assertEqual(compare(first, ((500, 4, 1), 77), 77), ("no", "yes"))
+        self.assertEqual(compare(first, ((500, 3, 1), 78), 77), ("yes", "no"))
+        self.assertEqual(compare(first, None, 77), ("gone", "gone"))
+        self.assertEqual(compare(None, None, 77), ("n/a", "n/a"))
+
+    @unittest.skipUnless(LINUX, "needs Linux procfs")
+    def test_stop_sample_of_a_stopped_process_does_not_move(self):
+        child = subprocess.Popen(["sh", "-c", "while :; do :; done"])
+        try:
+            time.sleep(0.05)
+            os.kill(child.pid, signal.SIGSTOP)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and EXPERIMENT.k_state_after_signal(child.pid, True, 0) != "stopped":
+                time.sleep(0.01)
+            first = EXPERIMENT.stop_sample(child.pid)
+            time.sleep(0.05)
+            self.assertEqual(EXPERIMENT.compare_stop(first, EXPERIMENT.stop_sample(child.pid), 0), ("yes", "yes"))
+            os.kill(child.pid, signal.SIGCONT)
+            time.sleep(0.05)
+            self.assertEqual(EXPERIMENT.compare_stop(first, EXPERIMENT.stop_sample(child.pid), 0)[0], "no")
+            child.kill()
+            child.wait()
+            self.assertIsNone(EXPERIMENT.stop_sample(child.pid))
+            self.assertEqual(EXPERIMENT.k_state_after_signal(child.pid, False, 0), "gone")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
+    @unittest.skipUnless(LINUX, "needs Linux")
+    def test_read_bounded_refuses_links_fifos_devices_and_large_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            regular = base / "marker"
+            regular.write_bytes(b"ran\n")
+            self.assertEqual(EXPERIMENT.read_bounded(regular), b"ran\n")
+            (base / "link").symlink_to("/dev/zero")
+            with self.assertRaises(OSError):
+                EXPERIMENT.read_bounded(base / "link")
+            os.mkfifo(base / "fifo")
+            started = time.monotonic()
+            with self.assertRaises(ValueError):
+                EXPERIMENT.read_bounded(base / "fifo")  # no writer: must not block
+            self.assertLess(time.monotonic() - started, 1)
+            with self.assertRaises(ValueError):
+                EXPERIMENT.read_bounded(Path("/dev/zero"))
+            (base / "big").write_bytes(b"x" * 11)
+            with self.assertRaisesRegex(ValueError, "too large"):
+                EXPERIMENT.read_bounded(base / "big", limit=10)
+            self.assertEqual(EXPERIMENT.read_bounded(base / "big", limit=11), b"x" * 11)
+            with self.assertRaises(FileNotFoundError):
+                EXPERIMENT.read_bounded(base / "absent")
+
+    def test_restart_log_allows_no_restart_before_the_go_byte(self):
+        clean = EXPERIMENT.restart_log_clean
+        self.assertEqual(clean(b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 GO\n4 1 DETACH\n"), "yes")
+        self.assertEqual(clean(b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 GO\n"), "yes")
+        self.assertEqual(clean(b"1 1 SEIZE\n2 1 INTERRUPT\n"), "yes")
+        self.assertEqual(clean(b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 DETACH\n"), "yes")
+        for raw in (b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 DETACH\n4 1 GO\n", b"1 1 SEIZE\n2 1 GO\n",
+                    b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 CONT\n4 1 GO\n", b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 GO\n4 1 GO\n",
+                    b"1 2 SEIZE\n2 2 INTERRUPT\n"):
+            self.assertEqual(clean(raw), "no", raw)
+
+    def test_evaluate_rejects_values_outside_the_vocabulary(self):
+        result = EXPERIMENT.evaluate("dispatch-normal", full_observation("dispatch-normal"))
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(EXPERIMENT.evaluate("dispatch-normal", full_observation("dispatch-normal", result="refused"))
+                         ["mismatches"], ["result"])
+        for changes in ({"markerLines": "2"}, {"result": "/tmp/x"}, {"extra": "yes"}):
+            observed = full_observation("dispatch-normal")
+            observed.update(changes)
+            self.assertEqual(EXPERIMENT.evaluate("dispatch-normal", observed),
+                             {"passed": False, "error_type": "InvalidObservation"})
+        observed = full_observation("dispatch-normal")
+        del observed["result"]
+        self.assertFalse(EXPERIMENT.evaluate("dispatch-normal", observed)["passed"])
+
+    def test_dumpable_and_bounding_set_are_observed_not_required(self):
+        result = EXPERIMENT.evaluate("dispatch-normal", full_observation("dispatch-normal", commandDumpable="0",
+                                                                        boundingFull="no"))
+        self.assertTrue(result["passed"])
+
+
+@unittest.skipUnless(platform.system() == "Linux" and hasattr(os, "pidfd_open"), "needs Linux pidfds")
+class AuthorityTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.record = Path(self.directory.name) / "authority"
+        self.authority = EXPERIMENT.Authority(self.record, (1000, 1000, [1000, 27]), "normal")
+        self.pidfd = os.pidfd_open(os.getpid())
+        self.addCleanup(os.close, self.pidfd)
+        start = EXPERIMENT._start_time(os.getpid())
+        self.hello = f"HELLO {EXPERIMENT._boot_id()} {os.getpid()} {start} {'a' * 32}".encode()
+
+    def test_one_use_permit_bound_to_the_generation(self):
+        self.assertEqual(self.authority.handle(1, self.hello, self.pidfd), b"OK")
+        permit = self.authority.handle(1, b"SUBMIT " + b"b" * 32 + b" 77", self.pidfd).decode().split()
+        self.assertEqual(permit[0], "PERMIT")
+        self.assertEqual(permit[2:], ["1000", "1000", "normal", "2", "1000", "27"])
+        token = permit[1].encode()
+        # A second permit is never issued in one case, and another connection cannot report.
+        self.assertEqual(self.authority.handle(1, b"SUBMIT " + b"c" * 32 + b" 77", self.pidfd), b"REFUSED")
+        self.assertEqual(self.authority.handle(2, b"OUTCOME " + token + b" dispatched no", self.pidfd), b"REFUSED")
+        self.assertEqual(self.authority.handle(1, b"OUTCOME " + token + b" dispatched no", self.pidfd), b"OK")
+        self.assertEqual(self.authority.handle(1, b"OUTCOME " + token + b" dispatched no", self.pidfd), b"REFUSED")
+        self.assertEqual(self.authority.outcome, "refused-replay")
+        lines = self.record.read_text().splitlines()
+        self.assertEqual([line.split()[0] for line in lines], ["beginDispatch", "outcome"])
+
+    def test_hello_refused_when_the_pidfd_does_not_match_the_generation(self):
+        wrong_pid = self.hello.replace(f" {os.getpid()} ".encode(), b" 1 ")
+        self.assertEqual(self.authority.handle(1, wrong_pid, self.pidfd), b"REFUSED")
+        parts = self.hello.split(b" ")
+        parts[3] = str(int(parts[3]) + 1).encode()
+        self.assertEqual(self.authority.handle(1, b" ".join(parts), self.pidfd), b"REFUSED")
+        self.assertEqual(self.authority.handle(1, self.hello.replace(b"a" * 32, b"z" * 32), self.pidfd), b"REFUSED")
+        self.assertEqual(self.authority.handle(1, self.hello, None), b"REFUSED")
+        self.assertEqual(self.authority.handle(1, b"SUBMIT " + b"b" * 32 + b" 77", self.pidfd), b"REFUSED")
+
+    def test_hello_refused_for_an_exited_process(self):
+        child = subprocess.Popen(["/bin/true"])
+        pidfd = os.pidfd_open(child.pid)
+        try:
+            child.wait()
+            start_line = f"HELLO {EXPERIMENT._boot_id()} {child.pid} 1 {'a' * 32}".encode()
+            self.assertEqual(self.authority.handle(1, start_line, pidfd), b"REFUSED")
+        finally:
+            os.close(pidfd)
+
+
+class MeasureTests(unittest.TestCase):
+    def setUp(self):
+        FakeRun.instances = []
+
+    def test_refuses_without_root(self):
+        with patch.object(EXPERIMENT.platform, "system", return_value="Linux"), \
+             patch.object(EXPERIMENT.platform, "machine", return_value="x86_64"), \
+             patch.object(EXPERIMENT.os, "geteuid", return_value=1000):
+            with self.assertRaisesRegex(RuntimeError, "requires root"):
+                EXPERIMENT.measure()
+
+    def test_report_keeps_admission_false_and_the_sysctl_case_off_by_default(self):
+        with linux_root():
+            report = EXPERIMENT.measure(run_factory=FakeRun)
+        self.assertFalse(report["strictAdmission"])
+        self.assertFalse(report["productionAdmission"])
+        self.assertEqual(report["sysctlCase"], "not-run")
+        self.assertFalse(FakeRun.instances[0].allow_sysctl)
+        self.assertEqual(FakeRun.instances[0].calls, ["setup", *EXPERIMENT.CASES, "cleanup"])
+        self.assertTrue(report["passed"])
+
+    def test_cleanup_runs_when_the_case_runner_raises(self):
+        factory = lambda *arguments: FakeRun(*arguments, fail_in="case")
+        with linux_root(), self.assertRaisesRegex(RuntimeError, "case runner failed"):
+            EXPERIMENT.measure(run_factory=factory)
+        self.assertEqual(FakeRun.instances[0].calls, ["setup", next(iter(EXPERIMENT.CASES)), "cleanup"])
+
+    def test_cleanup_runs_when_setup_raises(self):
+        factory = lambda *arguments: FakeRun(*arguments, fail_in="setup")
+        with linux_root(), self.assertRaisesRegex(RuntimeError, "setup failed"):
+            EXPERIMENT.measure(run_factory=factory)
+        self.assertEqual(FakeRun.instances[0].calls, ["setup", "cleanup"])
+
+    def test_attach_case_is_not_run_and_no_sysctl_is_written_without_the_flag(self):
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.allow_sysctl, run.saved_sysctls = False, {}
+        with patch.object(EXPERIMENT.Run, "enable_attach_sysctls", side_effect=AssertionError("sysctl written")):
+            self.assertEqual(run.run_case("caller-attaches-to-k", 40),
+                             {"passed": True, "status": "not-run", "reason": "flag-not-given"})
+
+    def test_sysctls_are_restored_when_the_attach_case_raises(self):
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.allow_sysctl, run.saved_sysctls, run.timeout = True, {}, 5
+        run.paths, run.operator, run.groups = {}, type("A", (), {"pw_uid": 1, "pw_gid": 1})(), []
+        restored = []
+        with patch.object(EXPERIMENT.Run, "enable_attach_sysctls"), \
+             patch.object(EXPERIMENT.Run, "restore_sysctls", side_effect=lambda: restored.append(1) or True), \
+             patch.object(EXPERIMENT, "drive_case", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                run.run_case("caller-attaches-to-k", 40)
+        self.assertEqual(restored, [1])
+
+    def sysctl_run(self, directory):
+        files = {}
+        for name, value in (("suidDumpable", "2"), ("ptraceScope", "1")):
+            files[name] = Path(directory) / name
+            files[name].write_text(value + "\n")
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.allow_sysctl, run.saved_sysctls, run.timeout, run.attach_enabled = True, {}, 5, False
+        run.paths, run.operator, run.groups = {}, SimpleNamespace(pw_uid=1, pw_gid=1), []
+        return run, files
+
+    def test_sysctls_are_saved_before_any_write_and_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            with patch.dict(EXPERIMENT.SYSCTLS, files):
+                run.enable_attach_sysctls()
+                self.assertEqual(run.saved_sysctls, {"suidDumpable": "2", "ptraceScope": "1"})
+                self.assertEqual({name: path.read_text() for name, path in files.items()},
+                                 {"suidDumpable": "1", "ptraceScope": "0"})
+                self.assertTrue(run.attach_enabled)
+                self.assertTrue(run.restore_sysctls())
+            self.assertEqual({name: path.read_text().strip() for name, path in files.items()},
+                             {"suidDumpable": "2", "ptraceScope": "1"})
+
+    def test_a_missing_sysctl_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            files["ptraceScope"].unlink()
+            with patch.dict(EXPERIMENT.SYSCTLS, files), self.assertRaisesRegex(RuntimeError, "unavailable"):
+                run.enable_attach_sysctls()
+            self.assertEqual(files["suidDumpable"].read_text(), "2\n")
+            self.assertFalse(run.attach_enabled)
+
+    def test_a_partial_write_is_still_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            real_write = Path.write_text
+            def write(path, value, *arguments, **options):
+                if path == files["ptraceScope"] and value == "0":
+                    raise OSError("refused")  # the first write landed, the second did not
+                return real_write(path, value, *arguments, **options)
+            with patch.dict(EXPERIMENT.SYSCTLS, files):
+                with patch.object(Path, "write_text", write), self.assertRaises(OSError):
+                    run.enable_attach_sysctls()
+                self.assertEqual(files["suidDumpable"].read_text(), "1")
+                self.assertTrue(run.restore_sysctls())
+            self.assertEqual({name: path.read_text().strip() for name, path in files.items()},
+                             {"suidDumpable": "2", "ptraceScope": "1"})
+
+    def test_a_failed_restore_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            with patch.dict(EXPERIMENT.SYSCTLS, files):
+                run.enable_attach_sysctls()
+                files["ptraceScope"].unlink()
+                files["ptraceScope"].mkdir()  # the restore cannot write it
+                self.assertFalse(run.restore_sysctls())
+
+    def test_a_sysctl_failure_records_the_attach_case_as_not_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            files["ptraceScope"].unlink()  # no Yama
+            with patch.dict(EXPERIMENT.SYSCTLS, files), \
+                 patch.object(EXPERIMENT, "drive_case", side_effect=AssertionError("must not run")):
+                self.assertEqual(run.run_case("caller-attaches-to-k", 40),
+                                 {"passed": True, "status": "not-run", "reason": "sysctl-unavailable"})
+            run, files = self.sysctl_run(directory)
+            real_write = Path.write_text
+            def write(path, value, *arguments, **options):
+                if path == files["ptraceScope"] and value == "0":
+                    raise OSError("EINVAL")  # ptrace_scope 3 cannot go down
+                return real_write(path, value, *arguments, **options)
+            with patch.dict(EXPERIMENT.SYSCTLS, files), \
+                 patch.object(EXPERIMENT, "drive_case", side_effect=AssertionError("must not run")):
+                with patch.object(Path, "write_text", write):
+                    result = run.run_case("caller-attaches-to-k", 40)
+            self.assertEqual(result, {"passed": True, "status": "not-run", "reason": "sysctl-write-refused"})
+            self.assertEqual(files["suidDumpable"].read_text().strip(), "2")  # the first write is undone
+            self.assertFalse(run.attach_enabled)
+
+    def test_measure_keeps_other_results_when_the_attach_case_cannot_run(self):
+        class SysctlFailRun(FakeRun):
+            def run_case(self, case, last_cap):
+                self.calls.append(case)
+                if EXPERIMENT.CASES[case]["sysctl"]:
+                    return {"passed": True, "status": "not-run", "reason": "sysctl-unavailable"}
+                return {"passed": True}
+        with linux_root():
+            report = EXPERIMENT.measure(allow_sysctl=True, run_factory=SysctlFailRun)
+        self.assertEqual(report["sysctlCase"], "not-run")
+        self.assertEqual(set(report["cases"]), set(EXPERIMENT.CASES))
+        self.assertTrue(report["passed"])
+
+    def test_allow_sysctl_runs_the_attach_case_and_restores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run, files = self.sysctl_run(directory)
+            seen = []
+            def drive(case, host, *_arguments):
+                seen.append((case, host.attach_enabled, files["ptraceScope"].read_text()))
+                return {"passed": True}
+            with patch.dict(EXPERIMENT.SYSCTLS, files), patch.object(EXPERIMENT, "drive_case", side_effect=drive):
+                self.assertEqual(run.run_case("caller-attaches-to-k", 40), {"passed": True})
+            self.assertEqual(seen, [("caller-attaches-to-k", True, "0")])
+            self.assertEqual(files["ptraceScope"].read_text().strip(), "1")
+        with linux_root():
+            report = EXPERIMENT.measure(allow_sysctl=True, run_factory=FakeRun)
+        self.assertEqual(report["sysctlCase"], "run")
+        self.assertTrue(FakeRun.instances[0].allow_sysctl)
+
+    def test_main_publishes_no_raw_error(self):
+        stderr = io.StringIO()
+        with patch.object(EXPERIMENT, "measure", side_effect=RuntimeError("/home/someone secret")), \
+             patch("sys.argv", ["runner"]), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                EXPERIMENT.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertNotIn("someone", stderr.getvalue())
+
+
+
+
+def wait_for_members(sid, count, timeout=3):
+    deadline = time.monotonic() + timeout
+    members = EXPERIMENT._session_members(sid)
+    while len(members) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+        members = EXPERIMENT._session_members(sid)
+    return members
+
+
+def stop_session(process):
+    if process.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+
+
+def gone(pid):
+    """True when pid no longer runs (absent, or a zombie that someone else must reap)."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    return text[text.rindex(")") + 2] in "ZX"
+
+
+def processes_mentioning(text):
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                if text.encode() in (entry / "cmdline").read_bytes():
+                    found.append(int(entry.name))
+            except OSError:
+                pass
+    return found
+
+
+@unittest.skipUnless(LINUX, "needs Linux procfs")
+class ProcessHelperTests(unittest.TestCase):
+    def test_reap_waits_for_a_child_that_exits_after_the_first_poll(self):
+        child = subprocess.Popen(["sh", "-c", "sleep 0.3"])
+        started = time.monotonic()
+        self.assertTrue(EXPERIMENT._reap(child.pid, started + 5))
+        self.assertGreaterEqual(time.monotonic() - started, 0.2)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
+        child.wait()  # already reaped: lets Popen record it
+
+    def test_reap_reports_a_child_that_outlives_the_deadline(self):
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            self.assertFalse(EXPERIMENT._reap(child.pid, time.monotonic() + 0.1))
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_retire_all_reaps_a_k_that_exits_late(self):
+        # Not a session leader, so _end_session leaves it alone and only the poll can reap it.
+        k = subprocess.Popen(["sh", "-c", "sleep 0.3"])
+        self.assertTrue(EXPERIMENT._retire_all(None, None, {"c": 0, "k": k.pid}, []))
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(k.pid, os.WNOHANG)
+        k.wait()
+
+    def test_retire_all_kills_live_processes_and_the_command_session(self):
+        owner = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True)
+        frontend = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, start_new_session=True)
+        k = subprocess.Popen(["sh", "-c", "sleep 30 & exec sleep 30"], start_new_session=True)
+        for process in (owner, frontend, k):
+            self.addCleanup(stop_session, process)
+        members = wait_for_members(k.pid, 2)
+        self.assertGreaterEqual(len(members), 2)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.assertTrue(EXPERIMENT._retire_all(owner, frontend, {"c": 0, "k": k.pid}, [listener]))
+        self.assertIsNotNone(owner.returncode)
+        self.assertIsNotNone(frontend.returncode)
+        self.assertEqual(listener.fileno(), -1)
+        deadline = time.monotonic() + 3
+        while not all(gone(pid) for pid in members) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(all(gone(pid) for pid in members))
+        k.wait()
+
+    def test_retire_all_kills_a_k_stopped_before_its_setsid(self):
+        # K still in O's session, stopped, and not this runner's child: ending O's session ends it.
+        with EXPERIMENT.PL.subreaper():
+            owner = subprocess.Popen(["sh", "-c", "sleep 30 & echo $!; wait"], stdout=subprocess.PIPE,
+                                     start_new_session=True)
+            self.addCleanup(stop_session, owner)
+            k_pid = int(owner.stdout.readline())
+            os.kill(k_pid, signal.SIGSTOP)
+            self.assertEqual(EXPERIMENT._session_members(k_pid), [])  # not a session leader
+            pids = {"c": 0, "k": k_pid, "kfd": os.pidfd_open(k_pid)}
+            self.assertTrue(EXPERIMENT._retire_all(owner, None, pids, []))
+            self.assertTrue(gone(k_pid))
+            self.assertEqual(pids["kfd"], -1)
+
+    def test_retire_all_kills_k_through_its_pidfd(self):
+        # In no session that cleanup ends (here: the test's own), stopped: only the pidfd reaches it.
+        k = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(k.wait)
+        self.addCleanup(lambda: k.poll() is None and k.kill())
+        os.kill(k.pid, signal.SIGSTOP)
+        pids = {"c": 0, "k": k.pid, "kfd": os.pidfd_open(k.pid)}
+        self.assertTrue(EXPERIMENT._retire_all(None, None, pids, []))
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(k.pid, os.WNOHANG)
+
+    def test_end_session_kills_every_member(self):
+        leader = subprocess.Popen(["sh", "-c", "sleep 30 & exec sleep 30"], start_new_session=True)
+        self.addCleanup(stop_session, leader)
+        members = wait_for_members(leader.pid, 2)
+        self.assertGreaterEqual(len(members), 2)
+        EXPERIMENT._end_session(leader.pid)
+        leader.wait(timeout=3)
+        deadline = time.monotonic() + 3
+        while not all(gone(pid) for pid in members) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(all(gone(pid) for pid in members))
+        EXPERIMENT._end_session(0)  # no K: nothing to do
+
+    def test_reap_k_categories(self):
+        deadline = lambda: time.monotonic() + 3
+        for command, expected in ((["sh", "-c", "exit 121"], "reserved"), (["sh", "-c", "exit 3"], "other")):
+            child = subprocess.Popen(command)
+            self.assertEqual(EXPERIMENT._reap_k(child.pid, deadline()), expected)
+            child.wait()
+        child = subprocess.Popen(["sleep", "30"])
+        child.kill()
+        self.assertEqual(EXPERIMENT._reap_k(child.pid, deadline()), "signaled")
+        child.wait()
+        self.assertEqual(EXPERIMENT._reap_k(os.getppid(), deadline()), "not-observed")
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            self.assertEqual(EXPERIMENT._reap_k(child.pid, time.monotonic() + 0.05), "running")
+        finally:
+            child.kill()
+            child.wait()
+
+
+class KillUserTests(unittest.TestCase):
+    def test_matches_real_effective_or_saved_uid_from_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            for pid, uids in (("101", "1000 1000 4242 1000"), ("102", "4242 0 0 0"), ("103", "1000 1000 1000 1000"),
+                              ("104", "1000 4242 1000 1000")):
+                (proc / pid).mkdir()
+                (proc / pid / "status").write_text(f"Name:\towner\nUid:\t{uids.replace(' ', chr(9))}\n")
+            (proc / "105").mkdir()  # exited: no status file
+            (proc / "self").mkdir()
+            (proc / "106").mkdir()  # a name that is not UTF-8
+            (proc / "106" / "status").write_bytes(b"Name:\t\xff\xfeowner\nUid:\t4242\t4242\t4242\t4242\n")
+            killed = []
+            def kill(pid, signo):
+                killed.append((pid, signo))
+                shutil.rmtree(proc / str(pid))  # the process goes away
+            with patch.object(EXPERIMENT.os, "kill", side_effect=kill):
+                self.assertTrue(EXPERIMENT._kill_user(4242, proc, reap=False))
+        self.assertEqual(sorted(killed), [(101, signal.SIGKILL), (102, signal.SIGKILL), (104, signal.SIGKILL),
+                                          (106, signal.SIGKILL)])
+
+    def test_kill_user_reports_a_process_that_does_not_go_away(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / "101").mkdir()
+            (proc / "101" / "status").write_text("Uid:\t4242\t4242\t4242\t4242\n")
+            with patch.object(EXPERIMENT.os, "kill") as kill:
+                self.assertFalse(EXPERIMENT._kill_user(4242, proc, timeout=0.05, reap=False))
+            self.assertGreaterEqual(kill.call_count, 2)  # it kept trying until the deadline
+
+    @unittest.skipUnless(LINUX, "needs Linux procfs")
+    def test_kill_user_waits_for_and_reaps_a_real_child(self):
+        child = subprocess.Popen(["sleep", "30"])
+        uid = os.getuid()
+        with patch.object(EXPERIMENT, "_user_processes", side_effect=lambda _uid, _proc: (
+                [child.pid] if not gone(child.pid) else [])):
+            self.assertTrue(EXPERIMENT._kill_user(uid))
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
+        child.returncode = -signal.SIGKILL
+
+    def test_cleanup_kills_the_service_user_then_removes_files_and_accounts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+            run.base = Path(directory) / "base"
+            run.base.mkdir()
+            run.base_created = run.service_created = True
+            run.uid_shared = False
+            run.service_name, run.saved_sysctls, run.timeout = "rmzsotest", {}, 5
+            removed = []
+            def getpwnam(name):
+                if "userdel" in removed:
+                    raise KeyError(name)
+                return SimpleNamespace(pw_uid=4242)
+            def run_owned(arguments, _timeout):
+                removed.append(arguments[0])
+                return 0, b""
+            with patch.object(EXPERIMENT.pwd, "getpwnam", side_effect=getpwnam), \
+                 patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("absent")), \
+                 patch.object(EXPERIMENT.PL, "run_owned", side_effect=run_owned), \
+                 patch.object(EXPERIMENT, "_kill_user", return_value=True) as kill_user:
+                result = run.cleanup()
+            kill_user.assert_called_once_with(4242)
+            self.assertEqual(removed, ["userdel"])
+            self.assertEqual(result, {"filesRemoved": True, "serviceUserRemoved": True, "serviceProcessesGone": True,
+                                      "sysctlsRestored": True})
+
+
+class SetupLimitTests(unittest.TestCase):
+    def test_group_bound_matches_the_owner(self):
+        owner = EXPERIMENT.OWNER.read_text()
+        self.assertEqual(int(re.search(r"#define MAX_GROUPS ([0-9]+)", owner)[1]), EXPERIMENT.MAX_GROUPS)
+
+    def test_setup_refuses_too_many_groups_before_it_changes_anything(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+            run.operator = SimpleNamespace(pw_name="operator", pw_gid=1000, pw_uid=1000)
+            run.base = Path(directory) / "base"
+            stderr = io.StringIO()
+            with patch.object(EXPERIMENT.os, "getgrouplist", return_value=list(range(1000, 1065))), \
+                 contextlib.redirect_stderr(stderr), self.assertRaisesRegex(RuntimeError, "too many"):
+                run.setup()
+            self.assertFalse(run.base.exists())
+            self.assertIn("65 groups", stderr.getvalue())
+
+    def setup_run(self, directory):
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.operator = SimpleNamespace(pw_name="operator", pw_gid=1000, pw_uid=1000)
+        run.base = Path(directory) / "base"
+        run.timeout, run.service_name = 5, "rmzsotest"
+        run.base_created = run.service_created = run.uid_shared = False
+        run.saved_sysctls = {}
+        return run
+
+    def test_setup_stops_when_the_new_uid_already_runs_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.setup_run(directory)
+            create = lambda self, flag, *_arguments: setattr(self, flag, True)
+            with patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000]), \
+                 patch.dict(EXPERIMENT.BUILDS, clear=True), \
+                 patch.object(EXPERIMENT.PL.Run, "_create", create), \
+                 patch.object(EXPERIMENT.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=999, pw_gid=999)), \
+                 patch.object(EXPERIMENT, "_user_processes", return_value=[4321]) as processes, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "already in use"):
+                run.setup()
+            processes.assert_called_once_with(999, Path("/proc"))
+            self.assertTrue(run.uid_shared)
+            with patch.object(EXPERIMENT, "_kill_user") as kill_user, \
+                 patch.object(EXPERIMENT.pwd, "getpwnam", side_effect=KeyError("gone")), \
+                 patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("gone")), \
+                 patch.object(EXPERIMENT.PL, "run_owned", return_value=(0, b"")):
+                result = run.cleanup()
+            kill_user.assert_not_called()  # nothing is killed by a UID that others use
+            self.assertFalse(result["serviceProcessesGone"])
+
+    @unittest.skipUnless(LINUX and compiler(), "needs Linux and a C compiler")
+    def test_setup_hashes_the_built_sources_and_binaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.setup_run(directory)
+            def write(path, data, mode, gid=0):
+                Path(path).write_bytes(data)
+                os.chmod(path, mode)
+            def create(self, flag, *_arguments):
+                raise RuntimeError("stop after the builds")
+            builds = {"probe": EXPERIMENT.BUILDS["probe"]}
+            with patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000]), \
+                 patch.dict(EXPERIMENT.BUILDS, builds, clear=True), \
+                 patch.object(EXPERIMENT.PL, "write_root_file", write), \
+                 patch.object(EXPERIMENT, "_run_tool", lambda arguments, _timeout: subprocess.run(
+                     [compiler(), *arguments[1:]], capture_output=True).returncode), \
+                 patch.object(EXPERIMENT.PL.Run, "_create", create), self.assertRaisesRegex(RuntimeError, "stop"):
+                run.setup()
+            digest = lambda data: hashlib.sha256(data).hexdigest()
+            self.assertEqual(run.build_hashes["sources"], {"probe": digest(EXPERIMENT.PROBE.read_bytes())})
+            self.assertEqual(run.build_hashes["binaries"], {"probe": digest((run.base / "run/probe").read_bytes())})
+
+    @unittest.skipUnless(LINUX, "needs Linux")
+    def test_run_listeners_bind_private_then_chown_then_open_to_the_group(self):
+        run = EXPERIMENT.Run.__new__(EXPERIMENT.Run)
+        run.operator, run.service_gid = SimpleNamespace(pw_gid=4100), 4200
+        for method, gid in ((run.listener, 4100), (run.authority_listener, 4200)):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "s.sock"
+                steps = []
+                real_chmod = os.chmod
+                chown = lambda target, uid, group: steps.append(("chown", Path(target).stat().st_mode & 0o777,
+                                                                 uid, group))
+                def chmod(target, mode):
+                    steps.append(("chmod", mode))
+                    real_chmod(target, mode)
+                with patch.object(EXPERIMENT.os, "chown", side_effect=chown), \
+                     patch.object(EXPERIMENT.os, "chmod", side_effect=chmod):
+                    listener = method(path)
+                try:
+                    self.assertEqual(steps, [("chown", 0o600, -1, gid), ("chmod", 0o660)])
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o660)
+                finally:
+                    listener.close()
+
+    @unittest.skipUnless(LINUX, "needs Linux")
+    def test_frontend_socket_is_group_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "s.sock"
+            listener = EXPERIMENT.Host().listener(path)
+            try:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o660)
+            finally:
+                listener.close()
+
+
+class ScriptedHost(EXPERIMENT.Host):
+    """An "owner" that is a small Python script: it never answers, prints garbage, or misbehaves."""
+
+    def __init__(self, script):
+        self.script = script
+        self.started = []
+
+    def start_owner(self, binary, arguments, pass_fds):
+        process = subprocess.Popen([sys.executable, "-I", "-c", self.script, *arguments], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds,
+                                   start_new_session=True)
+        self.started.append(process)
+        return process
+
+
+@unittest.skipUnless(LINUX, "needs Linux procfs")
+class DriveCaseFailureTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        for name in ("cases", "markers"):
+            (base / name).mkdir()
+        self.paths = {"cases": base / "cases", "markers": base / "markers", "probe": base / "probe"}
+
+    def drive(self, script, timeout=1):
+        host = ScriptedHost(script)
+        result = EXPERIMENT.drive_case("dispatch-normal", host, self.paths, (1000, 1000, []), timeout, 40)
+        self.assertTrue(result["cleanupReapedAllFixtureProcesses"], result)
+        self.assertTrue(all(process.returncode is not None for process in host.started))
+        return result
+
+    def test_an_owner_that_never_answers_times_out_and_is_killed(self):
+        result = self.drive("import time; time.sleep(30)")
+        self.assertEqual(result, {"passed": False, "error_type": "TimeoutError",
+                                  "cleanupReapedAllFixtureProcesses": True})
+
+    def test_an_owner_that_prints_garbage_is_an_invalid_report(self):
+        result = self.drive("print('garbage /home/someone 1234')")
+        self.assertEqual(result["error_type"], "InvalidReport")
+        self.assertNotIn("observed", result)
+
+    def test_an_owner_with_a_bad_barrier_is_a_case_failure(self):
+        script = ("import socket, sys, time\n"
+                  "control = socket.socket(fileno=int(sys.argv[3]))\n"
+                  "control.send(b'BARRIER bogus 0 0 0')\n"
+                  "time.sleep(30)\n")
+        self.assertEqual(self.drive(script)["error_type"], "CaseFailure")
+
+
+def fixture_ready():
+    if platform.system() != "Linux" or platform.machine() != "x86_64" or not compiler():
+        return False
+    try:
+        scope = int(Path("/proc/sys/kernel/yama/ptrace_scope").read_text())
+    except (OSError, ValueError):
+        scope = 0
+    if scope > 1 or not hasattr(os, "pidfd_open"):
+        return False
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        os.close(first.getsockopt(socket.SOL_SOCKET, 77))  # SO_PEERPIDFD, Linux 6.5 and later
+    except OSError:
+        return False
+    finally:
+        first.close()
+        second.close()
+    return True
+
+
+class FixtureHost(EXPERIMENT.Host):
+    """Unprivileged builds: O and C run as the test's own account."""
+
+    def __init__(self, binaries):
+        self.binaries = binaries
+
+    def start_owner(self, binary, arguments, pass_fds):
+        # owner-nocaps: the measurement build, which wants the three capabilities this account
+        # lacks. owner-lowlimit: the fixture build with RLIMIT_NOFILE below the frontend's.
+        image = {"owner-nocaps": "owner-measure", "owner-lowlimit": "owner"}.get(binary, binary)
+        limits = EXPERIMENT.owner_limits_low if binary == "owner-lowlimit" else None
+        return subprocess.Popen([str(self.binaries[image]), *arguments], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds,
+                                start_new_session=True, preexec_fn=limits)
+
+    def start_frontend(self, socket_path):
+        return subprocess.Popen([str(self.binaries["frontend"]), str(socket_path)], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def caller_signal(self, name, pid):
+        os.kill(pid, getattr(signal, f"SIG{name}"))
+        return True
+
+
+@unittest.skipUnless(fixture_ready(), "needs Linux x86_64, a C compiler and Yama ptrace_scope at most 1")
+class FixtureCaseTests(unittest.TestCase):
+    """Every case that needs no root, end to end, with the unprivileged fixture builds.
+
+    This proves the protocol, the barriers and the evaluation. It does not measure the design:
+    the root run does, with the service identity and the three capabilities."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        base = Path(cls.directory.name)
+        cls.binaries = {}
+        for name, (source, extra) in EXPERIMENT.BUILDS.items():
+            output = base / name
+            subprocess.run([compiler(), *EXPERIMENT.CC_FLAGS, *extra, *EXPERIMENT.FIXTURE_FLAGS[name], "-o",
+                            str(output), str(source)], check=True, capture_output=True)
+            cls.binaries[name] = output
+        cls.binaries["owner-measure"] = base / "owner-measure"
+        subprocess.run([compiler(), *EXPERIMENT.CC_FLAGS, "-o", str(cls.binaries["owner-measure"]),
+                        str(EXPERIMENT.OWNER)], check=True, capture_output=True)
+        for name in ("cases", "markers"):
+            (base / name).mkdir()
+        cls.paths = {"cases": base / "cases", "markers": base / "markers", "probe": cls.binaries["probe"]}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def test_cases_without_root(self):
+        identity = (os.getuid(), os.getgid(), os.getgroups())
+        last_cap = int(Path("/proc/sys/kernel/cap_last_cap").read_text())
+        with EXPERIMENT.PL.subreaper():
+            for case, spec in EXPERIMENT.CASES.items():
+                if spec["rootOnly"] and case != "owner-without-capabilities":
+                    continue
+                with self.subTest(case=case):
+                    result = EXPERIMENT.drive_case(case, FixtureHost(self.binaries), self.paths, identity, 15,
+                                                   last_cap)
+                    self.assertTrue(result["passed"], json.dumps(result, sort_keys=True))
+                    self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+
+    def test_cancel_during_a_running_command_leaves_no_process(self):
+        """A KeyboardInterrupt while the command sleeps still kills O, C, K and the command."""
+
+        class CancellingHost(FixtureHost):
+            def caller_signal(self, name, pid):
+                raise KeyboardInterrupt()
+
+        case = "cancel-during-command"
+        spec = EXPERIMENT._case("sleep", [("after-s6", "caller-cont-c")])
+        identity = (os.getuid(), os.getgid(), os.getgroups())
+        with patch.dict(EXPERIMENT.CASES, {case: spec}), EXPERIMENT.PL.subreaper():
+            with self.assertRaises(KeyboardInterrupt):
+                EXPERIMENT.drive_case(case, CancellingHost(self.binaries), self.paths, identity, 15, 40)
+        self.assertEqual((self.paths["markers"] / case).read_text(), "ran\n")  # the command did run
+        self.assertEqual(processes_mentioning(str(self.paths["markers"] / case)), [])
+        self.assertEqual(processes_mentioning(str(self.paths["cases"] / case)), [])
+
+    def drive(self, case, host):
+        """One case in its own directories, so a test may drive a case that another one also drives."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        paths = {"cases": base / "cases", "markers": base / "markers", "probe": self.binaries["probe"]}
+        for name in ("cases", "markers"):
+            paths[name].mkdir()
+        identity = (os.getuid(), os.getgid(), os.getgroups())
+        with EXPERIMENT.PL.subreaper():
+            return EXPERIMENT.drive_case(case, host, paths, identity, 15, 40)
+
+    def test_runner_loss_cases(self):
+        """Both runner-loss cases: O starts no command once its barrier fails, and exits."""
+        cases = sorted(case for case, spec in EXPERIMENT.CASES.items()
+                       if any(action == "drop-runner" for _barrier, action in spec["actions"]))
+        self.assertEqual(cases, ["runner-lost-after-go", "runner-lost-before-go"])
+        for case in cases:
+            with self.subTest(case=case):
+                result = self.drive(case, FixtureHost(self.binaries))
+                self.assertTrue(result["passed"], json.dumps(result, sort_keys=True))
+                # Before the go byte no command starts; after it, the command that started finishes.
+                self.assertEqual(result["observed"]["markerLines"], "0" if case.endswith("before-go") else "1")
+
+    def test_a_restart_log_write_error_fails_the_case(self):
+        """O cannot write its restart log (a read-only descriptor, then a full device): the report
+        says the log is incomplete, and the case fails even though the command ran."""
+        for device, flags in (("/dev/null", os.O_RDONLY), ("/dev/full", os.O_WRONLY)):
+            class BrokenLogHost(FixtureHost):
+                def start_owner(self, binary, arguments, pass_fds):
+                    broken = os.open(device, flags | os.O_CLOEXEC)
+                    try:
+                        os.dup2(broken, int(arguments[3]), inheritable=False)
+                    finally:
+                        os.close(broken)
+                    return super().start_owner(binary, arguments, pass_fds)
+            with self.subTest(device=device):
+                result = self.drive("dispatch-normal", BrokenLogHost(self.binaries))
+                self.assertFalse(result["passed"])
+                self.assertIn("restartLogComplete", result["mismatches"])
+                self.assertEqual(result["observed"]["restartLogComplete"], "no")
+                self.assertEqual(result["observed"]["restartLogClean"], "n/a")  # an empty log
+                self.assertEqual(result["observed"]["markerLines"], "1")
+                self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+
+    def test_after_go_signal_cases_fail_when_the_signal_does_nothing(self):
+        """K pauses after the go byte: a signal that never arrives must fail the case."""
+
+        class SilentHost(FixtureHost):
+            def caller_signal(self, name, pid):
+                return True  # claims to send, sends nothing
+
+        for case in ("caller-sigstop-k-after-go", "caller-sigterm-k-after-go", "caller-sigusr1-k-after-go"):
+            with self.subTest(case=case):
+                result = self.drive(case, SilentHost(self.binaries))
+                self.assertFalse(result["passed"], case)
+                self.assertIn("kStateAfterSignal", result["mismatches"])
+                self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+
+    def test_kill_k_after_go_fails_when_k_survives(self):
+        real_act = EXPERIMENT._act
+        def act(action, host, owner, pids, observed, *rest):
+            if action == "kill-k":  # the kill is lost: K keeps pausing
+                observed["kStateAfterSignal"] = EXPERIMENT.k_state_after_signal(pids["k"], False, 0.05)
+                return True
+            return real_act(action, host, owner, pids, observed, *rest)
+        with patch.object(EXPERIMENT, "_act", act):
+            result = self.drive("kill-k-after-go", FixtureHost(self.binaries))
+        self.assertFalse(result["passed"])
+        self.assertIn("kEnd", result["mismatches"])
+
+    def test_a_limit_above_the_owner_is_a_reported_setup_failure(self):
+        result = self.drive("caller-limit-above-owner", FixtureHost(self.binaries))
+        self.assertTrue(result["passed"], json.dumps(result, sort_keys=True))
+        self.assertEqual((result["observed"]["kSetup"], result["observed"]["result"]), ("limits", "notStarted"))
+
+
+if __name__ == "__main__":
+    unittest.main()

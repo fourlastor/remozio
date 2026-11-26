@@ -109,6 +109,10 @@ LINUX_ONLY_INPUT_MODES = {
     'experiments/linux-protected-launch/attacker.c': 0o644,
     'experiments/linux-protected-launch/frontend.c': 0o644,
     'experiments/linux-protected-launch/monitor.c': 0o644,
+    'experiments/linux-single-owner/README.md': 0o644,
+    'experiments/linux-single-owner/frontend.c': 0o644,
+    'experiments/linux-single-owner/owner.c': 0o644,
+    'experiments/linux-single-owner/probe.c': 0o644,
     'experiments/linux-storage-lease/README.md': 0o644,
     'experiments/linux-storage-lease/controls.c': 0o644,
     'experiments/linux-storage-lease/descriptor-walk.c': 0o644,
@@ -129,6 +133,7 @@ LINUX_ONLY_INPUT_MODES = {
     'scripts/run-linux-os-capture-experiment.py': 0o755,
     'scripts/run-linux-placement-validator-experiment.py': 0o644,
     'scripts/run-linux-protected-launch-experiment.py': 0o755,
+    'scripts/run-linux-single-owner-experiment.py': 0o755,
     'scripts/run-linux-storage-lease-experiment.py': 0o644,
     'scripts/run-linux-tpm-tls-experiment.py': 0o755,
 }
