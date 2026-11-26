@@ -21,7 +21,8 @@ The [release artifact procedure](releases.md) builds and verifies upload candida
 The launcher reads saved Mac records and shows an update status card. A fresh installation has an empty Mac list.
 The app uses native Compose, Material 3 Expressive, system light/dark colors, and a scrollable layout for large text.
 
-Pairing and request delivery are not connected yet.
+The app pairs through [Mac setup](#native-mac-pairing) and activates enrollment after it verifies the Root receipt.
+The [combined inbox](#combined-inbox-registry) receives signed requests and status through authenticated connections for active enrollments.
 The update card can check GitHub releases and download a candidate after the user selects it.
 The app tracks update status through app-private storage and installer callbacks.
 
@@ -64,7 +65,7 @@ The inspector keeps state in composition memory. Process death clears that state
 Closing details neither denies nor cancels a request. The authenticated session adapter supplies status and timing.
 
 Optional enrollment-bound controls connect the inspector to biometric approval and decline without biometrics.
-Live enrollment and transport still need launcher integration. The inspector alone cannot establish trust in a capture.
+The live inbox verifies enrolled scope and signatures before it shows requests in the inspector.
 
 Five Android-module JVM tests cover empty values, escaped syntax, controls, bidirectional text, malformed UTF-8, Unicode spelling, full-byte round trips, and long values.
 Continuous integration (CI) and the local pull request gate run Android unit tests.
@@ -127,7 +128,7 @@ The caller still owns the session in memory. Session identity keeps the sheet st
 
 The epoch and session exist only within the process. Neither survives process death.
 The future enrollment owner must discard sessions when keys or enrollment change.
-The adapter has no launcher or transport connection yet. Debug scenes remain static.
+The live inbox supplies authenticated sessions to the adapter. Debug scenes remain static.
 
 Seven phone-core JVM tests cover signed input, enrollment binding, capability checks, capture cleanup, and replay behavior.
 Device lifecycle, sleep, and layout checks remain pending.
@@ -146,14 +147,14 @@ The launcher checks releases, downloads and verifies a candidate, then offers a 
 Update settings control foreground checks and prerelease discovery.
 
 The [transport identity loader](transport-identity.md) validates an existing hardware-backed enrollment key. It supplies the key handle to the TLS client.
-Pairing, key creation, and native Pixel validation remain pending.
+Pairing creates the key and stores its reference in the enrollment. Native Pixel key custody still needs validation.
 
 The [phone enrollment store](../phone/enrollment/ENROLLMENTS.md) has an Android adapter with a dedicated hardware encryption key and a no-backup atomic file.
-The future enrollment host can use this adapter. App startup does not initialize it.
+The pairing flow uses this adapter to store the enrollment.
 
 The [decision identity](decision-identity.md) creates and loads a separate hardware key for choices that need no biometrics.
 Its first signing adapter verifies an issued command and signs only an explicit permitted decline.
-App lifecycle and delivery integration remain pending.
+The live inspector signs a decline for the displayed session and sends it through the active connection.
 
 The debug-only [Android Debug Bridge (ADB) endpoint experiment](../docs/experiments/android-adb-endpoint.md) supports system-picker discovery and explicit loopback reachability checks.
 It sends no ADB commands and implements no bridge.
@@ -261,10 +262,10 @@ The permission flow follows [Android's Compose guidance](https://developer.andro
 
 The [biometric key component](../docs/android-biometric-keys.md) creates and inspects hardware-backed keys that require authorization for each use.
 The [command signer](../docs/android-command-biometrics.md) opens a native biometric prompt bound to the request.
-Enrollment registration, launcher integration, and recovery remain pending. The debug probe uses a separate alias.
+Pairing registers the biometric key. The live inspector uses this key when the user approves a command. The debug probe uses a separate alias.
 
 The [command connection owner](../docs/android-command-connection.md) connects the enrolled Android identity, relay, pinned TLS, request inbox, and outgoing decision checks.
-Launcher and wake scheduling integration remain pending.
+The application runs these connections for its foreground inbox. Installed Mac and Pixel testing is pending.
 
 ## Native Mac pairing
 

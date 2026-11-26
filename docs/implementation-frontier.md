@@ -1,6 +1,6 @@
 # Implementation frontier
 
-This source checkpoint follows the approved [plan](../IMPLEMENTATION-PLAN.md) and [later decisions](design-decisions.md).
+See the [project overview](../README.md) for the Remozio specification and [accepted implementation limits](design-decisions.md) for the decisions that govern this checkpoint.
 It is not a completion audit or a claim of product acceptance. The complete approved scope remains open.
 The default Android inbox observes all active Mac/account scopes. Notification taps resolve against the exact authenticated session.
 
