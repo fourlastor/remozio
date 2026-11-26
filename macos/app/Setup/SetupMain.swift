@@ -47,26 +47,23 @@ struct SetupMain {
                 return
             } catch { fail("Machine bootstrap refused or failed. Retained installation state was not reset.", code: EX_CONFIG) }
         }
-        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
         let path = CommandLine.arguments[2]
-        let worker = Task { try await run(path: path) }
-        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        termination.setEventHandler { worker.cancel() }; interruption.setEventHandler { worker.cancel() }
-        termination.resume(); interruption.resume()
-        defer { termination.cancel(); interruption.cancel() }
-        do { try await worker.value }
+        let termination: DaemonTermination
+        do { termination = try DaemonTermination() }
+        catch { fail("Setup could not install its termination handler.", code: EX_OSERR) }
+        do { try await termination.run { try await run(path: path, termination: termination) } }
         catch is CancellationError { exit(EX_OK) }
         catch { fail("Setup service could not start or remain available. Check protected installation and configuration.", code: EX_CONFIG) }
     }
-    private static func run(path: String) async throws {
+    private static func run(path: String, termination: DaemonTermination) async throws {
         let service = try AdministrativeSetupService.open(configurationPath: path)
         do {
-            try Task.checkCancellation()
+            try termination.checkCancellation()
             try service.start(terminate: { code in
                 // Exit 75 is a recovery-deadline crash. It does not prove closure or release the durable drain.
                 fail("Setup recovery did not join before its retirement deadline.", code: code)
             })
+            try termination.checkCancellation()
             FileHandle.standardError.write(Data("Local setup status is available. Recovery can still keep normal requests pending.\n".utf8))
             await withTaskCancellationHandler {
                 await service.waitUntilStopped()

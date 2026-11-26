@@ -11,18 +11,16 @@ struct AuthorityMain {
             fail("Usage: RemozioAuthority --configuration|--presence-configuration|--command-configuration /absolute/protected/configuration.cbor", code: EX_USAGE)
         }
         guard getuid() == 0, geteuid() == 0 else { fail("Authority startup requires the Root account.", code: EX_NOPERM) }
-        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
         let requestMode = CommandLine.arguments[1] != "--configuration", commandMode = CommandLine.arguments[1] == "--command-configuration", path = CommandLine.arguments[2]
-        let worker = Task {
-            if requestMode { try await runRequests(path: path, command: commandMode) }
-            else { try await runLegacy(path: path) }
+        let termination: DaemonTermination
+        do { termination = try DaemonTermination() }
+        catch { fail("Authority could not install its termination handler.", code: EX_OSERR) }
+        do {
+            try await termination.run {
+                if requestMode { try await runRequests(path: path, command: commandMode, termination: termination) }
+                else { try await runLegacy(path: path, termination: termination) }
+            }
         }
-        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        termination.setEventHandler { worker.cancel() }; interruption.setEventHandler { worker.cancel() }
-        termination.resume(); interruption.resume()
-        defer { termination.cancel(); interruption.cancel() }
-        do { try await worker.value }
         catch is CancellationError { exit(EX_OK) }
         catch RunFailure.retired { fail("Authority service stopped after a runtime failure.", code: EX_SOFTWARE) }
         catch RunFailure.shutdown { fail("Authority shutdown failed.", code: EX_SOFTWARE) }
@@ -35,11 +33,12 @@ struct AuthorityMain {
             }
         } catch { fail("Authority startup failed. Check protected provisioning and configuration.", code: EX_CONFIG) }
     }
-    private static func runRequests(path: String, command: Bool) async throws {
+    private static func runRequests(path: String, command: Bool, termination: DaemonTermination) async throws {
         let runner = try command
             ? AuthorityRuntimeRunner(installedCommandConfigurationPath: path, report: reportRuntime)
             : AuthorityRuntimeRunner(presenceConfigurationPath: path, report: reportRuntime)
         do {
+            try termination.checkCancellation()
             switch try await runner.runUntilExit() {
             case .failed(let failure): throw RunFailure.startup(failure)
             case .retired: throw RunFailure.retired
@@ -55,11 +54,12 @@ struct AuthorityMain {
             throw failure
         }
     }
-    private static func runLegacy(path: String) async throws {
+    private static func runLegacy(path: String, termination: DaemonTermination) async throws {
         let runner = try AuthorityServiceRunner(configurationPath: path, report: report)
         do {
+            try termination.checkCancellation()
             try runner.start()
-            while true { try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(250)) }
+            while true { try termination.checkCancellation(); try await Task.sleep(for: .milliseconds(250)) }
         } catch {
             let failure = error
             do { try runner.close() } catch { throw RunFailure.shutdown }

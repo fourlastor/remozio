@@ -121,6 +121,7 @@ public actor AuthorityRuntimeRunner {
     }
     /// The installed main loop uses this path. Cancellation remains a thrown CancellationError.
     public func runUntilExit() async throws -> Status {
+        try Task.checkCancellation()
         try start()
         while true {
             try Task.checkCancellation()

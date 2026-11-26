@@ -15,6 +15,7 @@
 #include "RemozioCommandPTY.h"
 #include "RemozioFrontendTerminal.h"
 #include "RemozioFrontendRuntime.h"
+#include "RemozioDaemonTermination.h"
 #include "RemozioCommandStreamSource.h"
 #include "RemozioCommandTerminalContext.h"
 typedef struct {
