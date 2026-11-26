@@ -378,13 +378,19 @@ public actor AuthorityPairingChannel {
     }
     /// Call only after human transcript confirmation. A lost reply is ambiguous; use the phone's durable receipt recovery.
     public func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data) async throws -> Data {
+        try await commit(confirmedDigest: confirmedDigest, biometricProof: biometricProof, authorization: authorization, onSend: {})
+    }
+
+    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data {
         guard state == .open, let staged, let context else { throw AuthorityPairingChannelError.closed }
         guard confirmedDigest.count == 32, try confirmedDigest == staged.digest(), biometricProof.count == 64,
               authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingChannelError.invalidMessage }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }
         self.staged = nil
         do {
-            let receipt = try bytes(await perform(.commit(staged.setupID, confirmedDigest, biometricProof, authorization)))
+            let receipt = try bytes(await perform(.commit(staged.setupID, confirmedDigest, biometricProof, authorization),
+                onSend: onSend))
             guard receipt.count == 64, try staged.verify(signature: receipt, publicKey: context.authorityPublicKey, purpose: .macCommit) else {
                 throw AuthorityPairingChannelError.invalidMessage
             }
