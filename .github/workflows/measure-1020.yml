@@ -1,0 +1,33 @@
+name: Measure PTY backpressure payload (#1020)
+on:
+  push:
+    branches: [measure/pty-backpressure-1020]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Measure raw PTY buffer capacity
+        run: |
+          clang -Wall -Wextra -Werror scripts/measure-1020/pty-capacity.c -o /tmp/pty-capacity
+          for i in 1 2 3; do /tmp/pty-capacity; done
+      - name: Build the Core tests as CI does
+        run: swift build --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O --build-tests
+      - name: Run the test at each payload size
+        run: |
+          test=RemozioCoreTests.MachCommandCallerReceiverTests/testNativePTYFullDuplexPreservesBinaryBytesThroughKernelBackpressure
+          for config in 131072:262144 65536:65536 65536:32768 49152:16384 40960:16384 32768:16384 32768:8192 16384:8192; do
+            for i in 1 2 3; do
+              start=$(date +%s)
+              if REMOZIO_PTY_IN=${config%:*} REMOZIO_PTY_OUT=${config#*:} swift test --skip-build --package-path macos/core \
+                  --triple arm64-apple-macosx26.0 -Xswiftc -O --filter "$test" > /tmp/run.log 2>&1; then r=pass; else r=FAIL; fi
+              echo "config=$config run=$i result=$r wall_s=$(( $(date +%s) - start ))"
+              grep -h "PTY-MEASURE" /tmp/run.log || true
+              grep -E "error:|XCTAssert" /tmp/run.log | head -5 | cut -c1-300 || true
+            done
+          done

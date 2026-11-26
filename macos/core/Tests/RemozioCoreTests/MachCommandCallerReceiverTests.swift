@@ -6709,6 +6709,10 @@ extension MachCommandCallerReceiverTests {
 
 extension MachCommandCallerReceiverTests {
     func testNativePTYFullDuplexPreservesBinaryBytesThroughKernelBackpressure() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let inputTotal = Int(environment["REMOZIO_PTY_IN"] ?? "") ?? 131072
+        let outputTotal = Int(environment["REMOZIO_PTY_OUT"] ?? "") ?? 262144
+        let measured = Date()
         let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
         let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
         var queue = mach_port_limits_t(mpl_qlimit: 1)
@@ -6722,6 +6726,7 @@ extension MachCommandCallerReceiverTests {
         let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
         compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror", source.path, "-o", program.path]
         try compiler.run(); compiler.waitUntilExit(); XCTAssertEqual(compiler.terminationStatus, 0)
+        let statsPath = fixture.root.appendingPathComponent("pty-stats.txt").path
         let input = try RetainedCommandPTY(); defer { input.close() }
         try input.withBorrowedSlave { descriptor in
             var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
@@ -6729,7 +6734,7 @@ extension MachCommandCallerReceiverTests {
         }
         let (_, command, submission, profile) = try input.withBorrowedSlave {
             try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
-                executablePath: program.path, arguments: [Data("program".utf8)], wire: 4, ioMode: .pty)
+                executablePath: program.path, arguments: [Data("program".utf8), Data(String(inputTotal).utf8), Data(String(outputTotal).utf8), Data(statsPath.utf8)], wire: 4, ioMode: .pty)
         }
         let request = try admitOwnedCommand(command, fixture: fixture)
         let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
@@ -6738,10 +6743,10 @@ extension MachCommandCallerReceiverTests {
             submissionDigest: admission.submissionDigest, request: admitted)
         _ = try ownerDecision(request, fixture: fixture, decline: false)
         try beginDispatch(fixture, request: request, launcher: launcher)
-        let receive = try receiver(terminal, maximum: 8192), bytes = Data((0..<131072).map { UInt8($0 % 251) })
+        let receive = try receiver(terminal, maximum: 8192), bytes = Data((0..<inputTotal).map { UInt8($0 % 251) })
         var control: MachCommandAuthorityPort?, available = 0, sent = 0, outgoing: UInt64 = 0
         var incoming = CommandStreamReceiveSequence(direction: .toFrontend)
-        var output = Data(), ended = false, inputEndSent = false, queueTimeouts = 0
+        var output = Data(), ended = false, inputEndSent = false, queueTimeouts = 0, outputFrames = 0, creditFrames = 0
         defer { control?.close() }
         // Shared CI runners still make steady progress through the deliberately slow one-slot output queue.
         let deadline = Date().addingTimeInterval(180)
@@ -6795,8 +6800,8 @@ extension MachCommandCallerReceiverTests {
                 try incoming.accept(frame)
                 switch frame.body {
                 case .opened: control = try XCTUnwrap(carried).takeControlRight(); available = 32768
-                case .inputCredit(let count): available += Int(count); XCTAssertLessThanOrEqual(available, 32768)
-                case .output(let bytes): output.append(bytes); usleep(3000)
+                case .inputCredit(let count): creditFrames += 1; available += Int(count); XCTAssertLessThanOrEqual(available, 32768)
+                case .output(let bytes): outputFrames += 1; output.append(bytes); usleep(3000)
                 case .outputEnd: ended = true
                 default: XCTFail("The stream must preserve its direction")
                 }
@@ -6806,8 +6811,10 @@ extension MachCommandCallerReceiverTests {
             throw error
         }
         XCTAssertEqual(sent, bytes.count); XCTAssertTrue(inputEndSent); XCTAssertGreaterThan(queueTimeouts, 0)
-        let expected = bytes + Data((0..<262144).map { UInt8(($0 * 17 + 3) % 251) })
+        let expected = bytes + Data((0..<outputTotal).map { UInt8(($0 * 17 + 3) % 251) })
         XCTAssertEqual(output, expected)
+        let stats = (try? String(contentsOfFile: statsPath, encoding: .utf8)) ?? "missing\n"
+        print("PTY-MEASURE in=\(inputTotal) out=\(outputTotal) transfer_s=\(String(format: "%.2f", Date().timeIntervalSince(measured))) queueTimeouts=\(queueTimeouts) outputFrames=\(outputFrames) creditFrames=\(creditFrames) \(stats)", terminator: "")
         let acknowledgment = try CommandStreamFrame(sequence: outgoing, body: .outputDrained).encode(binding: binding)
         try Self.waitQueued { try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true) }
         XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .exited(7))
