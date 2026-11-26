@@ -153,8 +153,8 @@ The [phone enrollment store](../phone/enrollment/ENROLLMENTS.md) has an Android 
 The pairing flow uses this adapter to store the enrollment.
 
 The [decision identity](decision-identity.md) creates and loads a separate hardware key for choices that need no biometrics.
-Its first signing adapter verifies an issued command and signs only an explicit permitted decline.
-The live inspector signs a decline for the displayed session and sends it through the active connection.
+The live inspector calls `declineSession` after the user selects Decline. The signer checks the enrollment and the pending request before signing.
+The inspector sends the signed decline through the active connection.
 
 The debug-only [Android Debug Bridge (ADB) endpoint experiment](../docs/experiments/android-adb-endpoint.md) supports system-picker discovery and explicit loopback reachability checks.
 It sends no ADB commands and implements no bridge.
