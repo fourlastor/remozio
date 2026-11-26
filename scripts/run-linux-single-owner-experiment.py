@@ -395,6 +395,23 @@ def stop_sample(pid):
     return (run_time, fields["voluntary_ctxt_switches"], fields["nonvoluntary_ctxt_switches"]), fields["TracerPid"]
 
 
+def wait_for_c_after_kill(pid, first, timeout=2.0):
+    """After the caller's SIGKILL to C: waits until C has run or ended, at most `timeout` seconds.
+
+    The kernel delivers the signal asynchronously. On a busy host the scheduler may not run C
+    before the next barrier, so a sample taken there would still match s1. The wait removes that
+    race and changes no expectation: at the deadline it returns, and the comparison records what
+    it saw."""
+    if first is None:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        second = stop_sample(pid)
+        if second is None or second[0] != first[0]:
+            return
+        time.sleep(0.005)
+
+
 def compare_stop(first, second, owner_pid):
     """(cRunUnchanged, cTracerOwner) from the samples at s1 and after-go."""
     if first is None:
@@ -753,6 +770,8 @@ def drive_case(case, host, paths, identity, timeout, last_cap):
                                 if barrier != name:
                                     continue
                                 resume = _act(action, host, owner, pids, observed, selector, sockets) and resume
+                                if action == "caller-kill-c" and pids["c"]:
+                                    wait_for_c_after_kill(pids["c"], stop_first)
                             if resume:
                                 control.send(b"C")
                 owner.wait(timeout=max(0.1, deadline - time.monotonic()))

@@ -269,6 +269,22 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(compare(first, None, 77), ("gone", "gone"))
         self.assertEqual(compare(None, None, 77), ("n/a", "n/a"))
 
+    def test_wait_after_kill_ends_when_c_runs_or_ends_and_at_the_deadline(self):
+        wait = EXPERIMENT.wait_for_c_after_kill
+        first = ((500, 3, 1), 77)
+        for later in (((501, 3, 1), 77), None):
+            samples = iter([first, first, later])
+            with patch.object(EXPERIMENT, "stop_sample", side_effect=lambda _pid: next(samples)) as sample:
+                wait(42, first, timeout=5)
+            self.assertEqual(sample.call_count, 3, later)
+        with patch.object(EXPERIMENT, "stop_sample", return_value=first):
+            started = time.monotonic()
+            wait(42, first, timeout=0.05)
+            self.assertLess(time.monotonic() - started, 1)
+        with patch.object(EXPERIMENT, "stop_sample") as sample:
+            wait(42, None)
+        sample.assert_not_called()
+
     @unittest.skipUnless(LINUX, "needs Linux procfs")
     def test_stop_sample_of_a_stopped_process_does_not_move(self):
         child = subprocess.Popen(["sh", "-c", "while :; do :; done"])
