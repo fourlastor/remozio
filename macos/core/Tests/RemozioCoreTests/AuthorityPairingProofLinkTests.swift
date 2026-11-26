@@ -496,6 +496,15 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
         let ingress = PairingSetupV2Ingress(windowID: full.windowID, lifetimeMilliseconds: full.lifetimeMilliseconds, authority: client)
         let ready = AsyncStream<UInt16>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let served = Mutex(0)
+        let receiptSendCompleted = XCTestExpectation(description: "Server finished sending the receipt")
+        receiptSendCompleted.assertForOverFulfill = true
+        let receiptSendResult = Mutex<Result<Void, any Error>?>(nil)
+        let awaitReceiptSend: @Sendable () async throws -> Void = {
+            // The phone must keep the channel open through the server's post-write check.
+            await self.fulfillment(of: [receiptSendCompleted], timeout: 3)
+            let result = receiptSendResult.withLock { $0 }
+            try XCTUnwrap(result, "The server did not finish sending the receipt").get()
+        }
         let sourceIndex = Mutex<UInt32>(0)
         let sourceKey: @Sendable (NWEndpoint) -> PairingSetupV2Source? = { endpoint in
             guard let key = PairingSetupV2Source(endpoint) else { return nil }
@@ -520,8 +529,15 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
                 try await session.stage(transcript)
                 _ = try await session.receiveProof()
                 let receipt = try authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation
-                try await session.sendReceipt(receipt)
-                served.withLock { $0 += 1 }
+                defer { receiptSendCompleted.fulfill() }
+                do {
+                    try await session.sendReceipt(receipt)
+                    served.withLock { $0 += 1 }
+                    receiptSendResult.withLock { $0 = .success(()) }
+                } catch {
+                    receiptSendResult.withLock { $0 = .failure(error) }
+                    throw error
+                }
             })
         do {
             try listener.start()
@@ -552,9 +568,11 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
             }
             if multipleSources {
                 let reservations = try XCTUnwrap(bound.withLock { $0 })
-                try await pairOnlyOneOfSixteenNativePeers(port: port, invitation: full, reservations: reservations)
+                try await pairOnlyOneOfSixteenNativePeers(port: port, invitation: full, reservations: reservations,
+                    afterVerifiedReceipt: awaitReceiptSend)
             } else {
-                try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full)
+                try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: full,
+                    afterVerifiedReceipt: awaitReceiptSend)
             }
         } catch {
             await listener.closeAndWait()
@@ -571,7 +589,8 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
     }
 
     private func pairOnlyOneOfSixteenNativePeers(port: UInt16, invitation: PairingInvitationV2,
-                                                 reservations: AuthorityPairingProofReservations) async throws {
+                                                 reservations: AuthorityPairingProofReservations,
+                                                 afterVerifiedReceipt: @escaping @Sendable () async throws -> Void) async throws {
         let capacity = PairingSetupV2Admissions.maximumPending
         let burst = Int(PairingRegistrationBudget.ingressBurst)
         let rate = PairingRegistrationBudget.registrationsPerSecond
@@ -583,7 +602,8 @@ final class AuthorityPairingProofLinkTests: XCTestCase, @unchecked Sendable {
             indexes.map { index in
                 Task { @Sendable in
                     do {
-                        try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation) {
+                        try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation,
+                            afterVerifiedReceipt: afterVerifiedReceipt) {
                             reached[index].fulfill()
                             for await _ in release[index].stream {}
                         }

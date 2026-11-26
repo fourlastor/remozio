@@ -175,6 +175,7 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
     }
 
     static func pairNativeClient(port: UInt16, invitation: PairingInvitationV2,
+                                 afterVerifiedReceipt: @Sendable () async throws -> Void = {},
                                  afterChallenge: @Sendable () async -> Void = {}) async throws {
         let transport = P256.Signing.PrivateKey()
         let biometric = P256.Signing.PrivateKey()
@@ -215,6 +216,7 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(setup, transcript.setupID)
         XCTAssertEqual(receivedDigest, digest)
         XCTAssertTrue(try transcript.verify(signature: signature, publicKey: invitation.invitation.authorityPublicKey, purpose: .macCommit))
+        try await afterVerifiedReceipt()
         await channel.close()
     }
 }
