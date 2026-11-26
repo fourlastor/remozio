@@ -1,8 +1,9 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import RemozioCore
 
-final class GatewaySetupFormTests: XCTestCase {
+final class GatewaySetupFormTests: XCTestCase, @unchecked Sendable {
     func testDefaultsAndCustomValuesReachEveryServiceSetting() throws {
         var form = GatewaySetupForm()
         _ = try form.serviceSettings(); _ = try form.activationSettings()
@@ -45,7 +46,7 @@ final class GatewaySetupFormTests: XCTestCase {
         XCTAssertEqual(try form.activationSettings().wakeTimeoutMilliseconds, 2345)
         XCTAssertEqual(form.senderID, "123"); XCTAssertEqual(form[.operations], "3")
     }
-    func testImportedFirebaseCredentialAndConsentReachValidatedChoices() throws {
+    func testImportedFirebaseCredentialAndConsentReachValidatedChoices() async throws {
         let process = Process(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
         process.arguments = ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"]
@@ -55,7 +56,13 @@ final class GatewaySetupFormTests: XCTestCase {
         let fields = ["type": "service_account", "token_uri": FCMServiceAccount.tokenEndpoint, "project_id": "fixture-project",
             "client_email": "fixture@fixture.iam.gserviceaccount.com", "private_key_id": "fixture", "private_key": String(decoding: key, as: UTF8.self),
             "client_id": "extra-provider-metadata"]
-        let provider = try SetupFCMConfiguration(serviceAccountJSON: JSONSerialization.data(withJSONObject: fields))
+        let directory = try importDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("account.json")
+        var bytes = try JSONSerialization.data(withJSONObject: fields)
+        bytes.append(Data(repeating: 32, count: 65_536 - bytes.count))
+        try bytes.write(to: file)
+        let provider = try await SetupFCMConfiguration.importServiceAccount(from: file)
         XCTAssertEqual(provider.project, "fixture-project"); XCTAssertEqual(String(describing: provider), "SetupFCMConfiguration(redacted)")
         var form = GatewaySetupForm(); form.senderID = "123"
         XCTAssertThrowsError(try form.choices(provider: provider))
@@ -73,6 +80,61 @@ final class GatewaySetupFormTests: XCTestCase {
         let fields = ["type": "service_account", "token_uri": "https://example.invalid/token", "project_id": "fixture",
             "client_email": "fixture@example.invalid", "private_key_id": "fixture", "private_key": "not-a-key"]
         XCTAssertThrowsError(try SetupFCMConfiguration(serviceAccountJSON: JSONSerialization.data(withJSONObject: fields)))
+    }
+    func testCredentialFileImportRejectsUnsupportedSourcesBeforeParsing() async throws {
+        let directory = try importDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let empty = directory.appendingPathComponent("empty.json")
+        let large = directory.appendingPathComponent("large.json")
+        let malformed = directory.appendingPathComponent("malformed.json")
+        let link = directory.appendingPathComponent("link.json")
+        try Data().write(to: empty)
+        try Data(repeating: 0, count: 65_537).write(to: large)
+        try Data("{}".utf8).write(to: malformed)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: malformed)
+        for file in [directory, empty, large, link, directory.appendingPathComponent("missing.json")] {
+            do {
+                _ = try await SetupFCMConfiguration.importServiceAccount(from: file)
+                XCTFail("Accepted an unreadable or unsupported file")
+            } catch SetupPreviewReadError.unreadable { }
+        }
+        do {
+            _ = try await SetupFCMConfiguration.importServiceAccount(from: malformed)
+            XCTFail("Accepted an invalid credential")
+        } catch PortableSetupError.rejected { }
+    }
+    func testCredentialFileImportRejectsNamedPipeWithoutWriter() async throws {
+        let directory = try importDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("account.json")
+        guard Darwin.mkfifo(file.path, 0o600) == 0 else {
+            return XCTFail("Could not create the temporary FIFO")
+        }
+        let finished = expectation(description: "The import finishes while the FIFO has no writer")
+        let task = Task {
+            defer { finished.fulfill() }
+            do {
+                _ = try await SetupFCMConfiguration.importServiceAccount(from: file)
+                XCTFail("Accepted a FIFO as a credential file")
+            } catch SetupPreviewReadError.unreadable { }
+            catch { XCTFail("Expected an unreadable file error") }
+        }
+        defer { task.cancel() }
+        await fulfillment(of: [finished], timeout: 5)
+    }
+    func testCancelledCredentialFileImportStopsBeforeReading() async {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await SetupFCMConfiguration.importServiceAccount(from: URL(fileURLWithPath: "/"))
+        }
+        do { _ = try await task.value; XCTFail("Accepted cancelled import") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+    private func importDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        return directory
     }
     func testRetainedSelectionRestoresEveryKnobWithoutChangingProviderInputs() throws {
         let ready = try GatewayRuntimeSettingsStoreTests.Ready()

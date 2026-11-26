@@ -27,15 +27,16 @@ public actor SetupFilePreviewReader {
         return ReviewedSetupFile(proposal: proposal)
     }
 
-    static func read(_ file: URL) throws -> Data {
+    static func read(_ file: URL, limit: Int = SetupFileEncryption.maximumFileBytes,
+                     followSymbolicLinks: Bool = true) throws -> Data {
         guard file.isFileURL else { throw SetupPreviewReadError.unreadable }
+        let flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK | (followSymbolicLinks ? 0 : O_NOFOLLOW)
         let fd = file.withUnsafeFileSystemRepresentation { path in
-            path.map { Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NONBLOCK) } ?? -1
+            path.map { Darwin.open($0, flags) } ?? -1
         }
         guard fd >= 0 else { throw SetupPreviewReadError.unreadable }
         defer { Darwin.close(fd) }
         var info = stat()
-        let limit = SetupFileEncryption.maximumFileBytes
         guard fstat(fd, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
               info.st_size > 0, info.st_size <= limit else { throw SetupPreviewReadError.unreadable }
         var output = Data()
