@@ -59,51 +59,114 @@ final class RemozioApplicationDelegate: NSObject, NSApplicationDelegate {
 }
 
 private struct CommandCallerSettingsForm: View {
-    @AppStorage(CommandFrontendCallerSettings.modeKey) private var mode = "pty"
-    @AppStorage(CommandFrontendCallerSettings.disconnectKey) private var disconnect = "terminate"
-    @AppStorage(CommandFrontendCallerSettings.timeoutKey) private var timeout = "30000"
-    @AppStorage(CommandFrontendCallerSettings.initialBackoffKey) private var initial = "250"
-    @AppStorage(CommandFrontendCallerSettings.maximumBackoffKey) private var maximum = "2000"
-    @AppStorage(CommandFrontendCallerSettings.controlTimeoutKey) private var control = "5000"
-    @AppStorage(CommandFrontendCallerSettings.controlRetryKey) private var retry = "50"
-    @AppStorage(CommandFrontendCallerSettings.foregroundRetryKey) private var foreground = "250"
+    private typealias Field = CommandFrontendCallerSettings.Field
 
-    private var valid: Bool {
-        do {
-            _ = try CommandFrontendCallerSettings(preferences: [
-                CommandFrontendCallerSettings.modeKey: mode, CommandFrontendCallerSettings.disconnectKey: disconnect,
-                CommandFrontendCallerSettings.timeoutKey: timeout, CommandFrontendCallerSettings.initialBackoffKey: initial,
-                CommandFrontendCallerSettings.maximumBackoffKey: maximum, CommandFrontendCallerSettings.controlTimeoutKey: control,
-                CommandFrontendCallerSettings.controlRetryKey: retry, CommandFrontendCallerSettings.foregroundRetryKey: foreground],
-                defaultIOMode: .pty, defaultDisconnectBehavior: .terminate,
-                defaultReadiness: .init(timeoutMilliseconds: 30000))
-            return true
-        } catch { return false }
-    }
+    @State private var installationDefaults: CommandFrontendCallerSettings?
+    @State private var saved: [String: Any] = [:]
+    @State private var edits: [Field: String] = [:]
+    @State private var problem: CommandFrontendCallerSettingsError?
+    @FocusState private var focused: Field?
+
     var body: some View {
         Section("Command caller") {
-            Picker("Default command I/O", selection: $mode) {
-                Text("Terminal (PTY)").tag("pty")
-                Text("Pipes").tag("pipes")
+            Group {
+                let mode = binding(.ioMode)
+                Picker(LocalizedStringKey(Field.ioMode.title), selection: mode) {
+                    if !["pty", "pipes"].contains(mode.wrappedValue) {
+                        Text("Choose a value").tag(mode.wrappedValue)
+                    }
+                    Text("Terminal (PTY)").tag("pty")
+                    Text("Pipes").tag("pipes")
+                }
+                .focused($focused, equals: .ioMode)
+                let disconnect = binding(.disconnectBehavior)
+                Picker(LocalizedStringKey(Field.disconnectBehavior.title), selection: disconnect) {
+                    if !["terminate", "continue"].contains(disconnect.wrappedValue) {
+                        Text("Choose a value").tag(disconnect.wrappedValue)
+                    }
+                    Text("Terminate the command").tag("terminate")
+                    Text("Let the command continue").tag("continue")
+                }
+                .focused($focused, equals: .disconnectBehavior)
+                ForEach(Array(Field.allCases.dropFirst(2)), id: \.self) { field in
+                    TextField(LocalizedStringKey(field.title), text: binding(field))
+                        .focused($focused, equals: field)
+                }
             }
-            Picker("If the caller disconnects", selection: $disconnect) {
-                Text("Terminate the command").tag("terminate")
-                Text("Let the command continue").tag("continue")
-            }
-            TextField("Readiness wait (ms)", text: $timeout)
-            TextField("Initial connection backoff (ms)", text: $initial)
-            TextField("Maximum connection backoff (ms)", text: $maximum)
-            TextField("Control validation timeout (ms)", text: $control)
-            TextField("Control retry interval (ms)", text: $retry)
-            TextField("Foreground retry interval (ms)", text: $foreground)
+            .disabled(installationDefaults == nil)
             Text("These settings apply to new CLI invocations. They do not limit command runtime or change approval expiry.")
                 .foregroundStyle(.secondary)
-            if !valid {
-                Label("Use positive whole milliseconds. Intervals must not exceed 60000, and maximum backoff must be at least initial backoff.",
-                      systemImage: "exclamationmark.triangle")
+            if installationDefaults == nil {
+                Text("Command caller defaults are unavailable. Set up Remozio to apply changes.")
+                    .foregroundStyle(.secondary)
+            } else if let problem {
+                Label(problem.message, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
             }
+            HStack {
+                Button("Apply", action: apply)
+                    .disabled(installationDefaults == nil || edits.isEmpty)
+                Button("Cancel", action: reload)
+                    .disabled(edits.isEmpty)
+                Spacer()
+                Button("Reset Command Caller Settings", action: reset)
+                    .disabled(!Field.allCases.contains { saved[$0.rawValue] != nil })
+            }
         }
+        .onAppear(perform: reload)
+        .onDisappear { edits.removeAll() }
+    }
+
+    private func binding(_ field: Field) -> Binding<String> {
+        Binding {
+            if let edit = edits[field] { return edit }
+            if let raw = saved[field.rawValue] { return raw as? String ?? "" }
+            return installationDefaults?.text(for: field) ?? ""
+        } set: { value in
+            edits[field] = value
+            problem = nil
+        }
+    }
+
+    private func reload() {
+        edits.removeAll()
+        focused = nil
+        problem = nil
+        if let domain = Bundle.main.bundleIdentifier {
+            saved = UserDefaults.standard.persistentDomain(forName: domain) ?? [:]
+        }
+        installationDefaults = try? CommandFrontendCallerSettings.loadInstallationDefaults()
+        guard let installationDefaults else { return }
+        do {
+            _ = try installationDefaults.applying([:], to: saved)
+        } catch {
+            problem = error as? CommandFrontendCallerSettingsError ?? .invalidPreferences
+        }
+    }
+
+    private func apply() {
+        guard let domain = Bundle.main.bundleIdentifier else { return }
+        let defaults = UserDefaults.standard
+        installationDefaults = try? CommandFrontendCallerSettings.loadInstallationDefaults()
+        guard let installationDefaults else { return }
+        do {
+            let current = defaults.persistentDomain(forName: domain) ?? [:]
+            let validated = try installationDefaults.applying(edits, to: current)
+            defaults.setPersistentDomain(validated, forName: domain)
+            reload()
+        } catch {
+            let failure = error as? CommandFrontendCallerSettingsError ?? .invalidPreferences
+            problem = failure
+            focused = failure.field
+        }
+    }
+
+    private func reset() {
+        guard let domain = Bundle.main.bundleIdentifier else { return }
+        let defaults = UserDefaults.standard
+        let current = defaults.persistentDomain(forName: domain) ?? [:]
+        defaults.setPersistentDomain(CommandFrontendCallerSettings.resettingOverrides(in: current), forName: domain)
+        reload()
     }
 }
 

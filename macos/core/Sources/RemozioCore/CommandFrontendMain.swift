@@ -59,8 +59,8 @@ public enum CommandFrontendMain {
             log(usage); return .status(EX_USAGE)
         } catch CommandFrontendLocalError.noCallingTerminal {
             log("PTY mode requires a calling terminal. Headless PTY output routing is not configured."); return .status(EX_CONFIG)
-        } catch is CommandFrontendCallerSettingsError {
-            log("Invalid command settings. Check Remozio Settings."); return .status(EX_CONFIG)
+        } catch let error as CommandFrontendCallerSettingsError {
+            return settingsExit(error, report: log)
         } catch let error as CommandCallerReadinessError {
             return readinessExit(error, report: log)
         } catch is CommandFrontendConfigurationError {
@@ -298,6 +298,11 @@ public enum CommandFrontendMain {
             }
             return busy.label + ". Waiting before a fresh submission."
         }
+    }
+
+    static func settingsExit(_ error: CommandFrontendCallerSettingsError, report: (String) -> Void) -> CommandFrontendExit {
+        report("\(error.message) Review Command Caller in Remozio Settings.")
+        return .status(EX_CONFIG)
     }
 
     static func readinessExit(_ error: CommandCallerReadinessError,
