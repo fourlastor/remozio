@@ -49,7 +49,8 @@ final class AuthorityServiceRunnerTests: XCTestCase {
     func testPermanentAndHistoryFailuresDoNotScheduleRetries() throws {
         let failures: [any Error] = [JournalDatabaseError.wrongScope, ContinuityStoreError.incompatibleStore,
             JournalLeaseError.unsafeMetadata, AuthorityStorageStartupError.historyRecoveryRequired,
-            AuthorityStorageStartupError.repairRequired]
+            AuthorityStorageStartupError.repairRequired, JournalDatabaseError.databaseIntegrity(SQLITE_CORRUPT),
+            JournalDatabaseError.databaseIntegrity(SQLITE_NOTADB)]
         for failure in failures {
             let probe = Probe(), failed = expectation(description: "terminal failure")
             let repeated = expectation(description: "no repeated attempt")
@@ -66,6 +67,12 @@ final class AuthorityServiceRunnerTests: XCTestCase {
             try runner.close()
             XCTAssertEqual(probe.counts.opens, 1)
         }
+    }
+
+    func testSQLiteIntegrityAndIOFailuresHaveDifferentStartupDiagnostics() {
+        XCTAssertEqual(AuthorityStartupFailure(error: JournalDatabaseError.databaseIntegrity(SQLITE_CORRUPT)), .repairRequired)
+        XCTAssertEqual(AuthorityStartupFailure(error: JournalDatabaseError.databaseIntegrity(SQLITE_NOTADB)), .repairRequired)
+        XCTAssertEqual(AuthorityStartupFailure(error: JournalDatabaseError.storage(SQLITE_IOERR | (1 << 8))), .temporaryStorageFailure)
     }
 
     func testCloseCancelsScheduledRetry() throws {

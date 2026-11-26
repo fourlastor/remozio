@@ -37,13 +37,15 @@ public struct RoutingJournalPolicy: Sendable {
 /// Private storage owner. Calls run within the root journal transaction and never expose a raw connection.
 final class RoutingJournal {
     private let db: OpaquePointer
+    private let step: (OpaquePointer) -> Int32
     private let mac: Data
     private let account: Data
     private let policy: RoutingJournalPolicy
     private let run = UUID()
     private var lastMoment: UInt64?
-    init(connection: OpaquePointer, macID: Data, accountID: Data, policy: RoutingJournalPolicy) {
-        db = connection; mac = macID; account = accountID; self.policy = policy
+    init(connection: OpaquePointer, macID: Data, accountID: Data, policy: RoutingJournalPolicy,
+         step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) {
+        db = connection; mac = macID; account = accountID; self.policy = policy; self.step = step
     }
     static func createSchema(_ db: OpaquePointer) throws {
         let rc = sqlite3_exec(db, """
@@ -60,7 +62,7 @@ final class RoutingJournal {
 
     func state() throws -> RoutingState {
         try statement("SELECT mode,revision FROM main.routing_state_v1 WHERE id=1", []) {
-            guard sqlite3_step($0) == SQLITE_ROW else { throw RoutingJournalError.corruptData }
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: RoutingJournalError.corruptData)
             let mode: RoutingMode
             switch sqlite3_column_int64($0, 0) { case 0: mode = .automatic; case 1: mode = .present; case 2: mode = .away
             default: throw RoutingJournalError.corruptData }
@@ -114,7 +116,7 @@ final class RoutingJournal {
     }
     private func operationCount() throws -> Int64 {
         try statement("SELECT count(*) FROM main.routing_operations_v1", []) {
-            guard sqlite3_step($0) == SQLITE_ROW else { throw RoutingJournalError.corruptData }
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: RoutingJournalError.corruptData)
             return sqlite3_column_int64($0, 0)
         }
     }
@@ -131,9 +133,9 @@ final class RoutingJournal {
             canonicalPayload: payload, payloadLimits: policy.payloadLimits, inputLimits: policy.signingLimits) else { throw RoutingJournalError.invalidSignature }
         let current = try state()
         return try statement("SELECT payload,run,started,deadline,consumed FROM main.routing_operations_v1 WHERE operation=?", [control.operationID]) { stmt in
-            let rc = sqlite3_step(stmt)
+            let rc = step(stmt)
             if rc == SQLITE_DONE { throw RoutingJournalError.unavailableChallenge }
-            guard rc == SQLITE_ROW else { throw JournalDatabaseError.storage(rc) }
+            guard rc == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(rc, on: db) }
             let retained = try blob(stmt, 0)
             guard retained == payload else { throw RoutingJournalError.wrongBinding }
             let storedRun = try blob(stmt, 1), started = try uint(blob(stmt, 2)), deadline = try uint(blob(stmt, 3))
@@ -174,15 +176,18 @@ final class RoutingJournal {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
         var stmt: OpaquePointer?
         let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
-        guard rc == SQLITE_OK, let stmt else { throw JournalDatabaseError.storage(rc) }
+        guard rc == SQLITE_OK, let stmt else { throw JournalDatabaseError.sqliteFailure(rc, on: db) }
         defer { sqlite3_finalize(stmt) }
         for (i, value) in values.enumerated() {
             let bound = value.withUnsafeBytes { sqlite3_bind_blob(stmt, Int32(i + 1), $0.baseAddress, Int32(value.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
-            guard bound == SQLITE_OK else { throw JournalDatabaseError.storage(bound) }
+            guard bound == SQLITE_OK else { throw JournalDatabaseError.sqliteFailure(bound, on: db) }
         }
         return try body(stmt)
     }
-    private func done(_ stmt: OpaquePointer) throws { guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) } }
+    private func done(_ stmt: OpaquePointer) throws {
+        let result = step(stmt)
+        guard result == SQLITE_DONE else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
+    }
     private func blob(_ stmt: OpaquePointer, _ column: Int32) throws -> Data {
         let count = Int(sqlite3_column_bytes(stmt, column))
         guard sqlite3_column_type(stmt, column) == SQLITE_BLOB, count > 0, count <= max(policy.payloadLimits.maxBytes, 16),

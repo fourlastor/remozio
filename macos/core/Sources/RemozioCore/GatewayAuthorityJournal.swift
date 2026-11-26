@@ -117,14 +117,16 @@ struct GatewayCurrentTokenState: Sendable, CustomStringConvertible, CustomDebugS
 /// Private table owner. Every call runs within the journal owner's transaction and protected writer lease.
 final class GatewayAuthorityJournal {
     private let db: OpaquePointer
+    private let step: (OpaquePointer) -> Int32
     private let mac: Data
     private let account: Data
     private let policy: GatewayAuthorityPolicy
     private let run = UUID()
     private var lastMoment: UInt64?
 
-    init(connection: OpaquePointer, macID: Data, accountID: Data, policy: GatewayAuthorityPolicy) {
-        db = connection; mac = macID; account = accountID; self.policy = policy
+    init(connection: OpaquePointer, macID: Data, accountID: Data, policy: GatewayAuthorityPolicy,
+         step: @escaping (OpaquePointer) -> Int32 = sqlite3_step) {
+        db = connection; mac = macID; account = accountID; self.policy = policy; self.step = step
     }
 
     static func createSchema(_ db: OpaquePointer) throws {
@@ -314,7 +316,7 @@ final class GatewayAuthorityJournal {
                 signature BLOB NOT NULL CHECK(length(signature)=64)
             ) STRICT, WITHOUT ROWID;
             """, nil, nil, nil)
-        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+        guard result == SQLITE_OK else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
     }
 
     private func trustEvidence(kind: GatewayTrustEvidenceKind, payload: Data, signature: Data,
@@ -339,7 +341,7 @@ final class GatewayAuthorityJournal {
 
     func trustRestricted(phone: Data, identity: GatewayRegistrationIdentity) throws -> Bool {
         try statement("SELECT kind,operation,payload,signature FROM main.gateway_trust_restrictions_v1 WHERE phone=?", [phone]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return false }
             guard result == SQLITE_ROW, let raw = UInt64(exactly: sqlite3_column_int64($0, 0)),
                   let kind = GatewayTrustEvidenceKind(rawValue: raw) else { throw GatewayAuthorityError.corruptData }
@@ -376,7 +378,7 @@ final class GatewayAuthorityJournal {
                 signature BLOB NOT NULL CHECK(length(signature)=64), PRIMARY KEY(phone,enrollment)
             ) STRICT, WITHOUT ROWID;
             """, nil, nil, nil)
-        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+        guard result == SQLITE_OK else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
     }
 
     /// Restrictive evidence is permanent. Its delivery expiry cannot restore a revoked enrollment.
@@ -411,7 +413,7 @@ final class GatewayAuthorityJournal {
 
     private func recoveredRevocation(operation: Data, identity: GatewayRegistrationIdentity) throws -> GatewayPhoneRevocation? {
         try statement("SELECT phone,enrollment FROM main.gateway_recovered_revocations_v1 WHERE operation=?", [operation]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
             guard result == SQLITE_ROW,
                   let value = try recoveredRevocation(phone: blob($0, 0, maximum: 16), epoch: blob($0, 1, maximum: 16), identity: identity),
@@ -422,9 +424,9 @@ final class GatewayAuthorityJournal {
 
     private func recoveredRevocation(phone: Data, epoch: Data, identity: GatewayRegistrationIdentity) throws -> GatewayPhoneRevocation? {
         try statement("SELECT operation,payload,signature FROM main.gateway_recovered_revocations_v1 WHERE phone=? AND enrollment=?", [phone, epoch]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let payload = try blob($0, 1, maximum: policy.payloadLimits.maxBytes), signature = try blob($0, 2, maximum: 64)
             guard let value = try? GatewayPhoneRevocation.decode(payload, limits: policy.payloadLimits),
                   try GatewayRecipientSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: 1,
@@ -438,9 +440,9 @@ final class GatewayAuthorityJournal {
     func acknowledgment(_ identity: GatewayRegistrationIdentity) throws -> GatewayAcknowledgment? {
         let local = try head(identity)
         return try statement("SELECT revision,operation FROM main.gateway_acknowledgment_v1 WHERE id=1", []) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let revision = try unsigned(blob($0, 0, maximum: 8))
             let operation = sqlite3_column_type($0, 1) == SQLITE_NULL ? nil : try blob($0, 1, maximum: 16)
             guard revision <= local, (revision == 0) == (operation == nil) else { throw GatewayAuthorityError.corruptData }
@@ -526,9 +528,9 @@ final class GatewayAuthorityJournal {
         try scope(identity)
         let encoded = try identity.encode()
         if let previous = try statement("SELECT identity FROM main.gateway_authority_v1 WHERE id=1", [], { stmt -> Data? in
-            let result = sqlite3_step(stmt)
+            let result = step(stmt)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             return try blob(stmt, 0, maximum: 512)
         }) {
             guard previous == encoded else { throw GatewayAuthorityError.wrongScope }
@@ -536,7 +538,8 @@ final class GatewayAuthorityJournal {
         }
         let extra = try submissionCountSQL()
         try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)" + extra, []) {
-            guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw GatewayAuthorityError.corruptData }
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: GatewayAuthorityError.corruptData)
+            guard sqlite3_column_int64($0, 0) == 0 else { throw GatewayAuthorityError.corruptData }
         }
         try statement("INSERT INTO main.gateway_authority_v1 VALUES(1,?,?)", [encoded, uint(0)]) { try done($0) }
     }
@@ -544,19 +547,21 @@ final class GatewayAuthorityJournal {
     func head(_ identity: GatewayRegistrationIdentity) throws -> UInt64 {
         try scope(identity)
         return try statement("SELECT identity,head FROM main.gateway_authority_v1 WHERE id=1", []) {
-            guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayAuthorityError.unconfigured }
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: GatewayAuthorityError.unconfigured)
             guard try blob($0, 0, maximum: 512) == identity.encode() else { throw GatewayAuthorityError.wrongScope }
             let value = try unsigned(blob($0, 1, maximum: 8))
             let extra = try submissionCountSQL()
             let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)" + extra, []) { stmt -> UInt64 in
-                guard sqlite3_step(stmt) == SQLITE_ROW, let count = UInt64(exactly: sqlite3_column_int64(stmt, 0)) else { throw GatewayAuthorityError.corruptData }
+                try JournalDatabaseError.requireRow(step(stmt), on: db, missing: GatewayAuthorityError.corruptData)
+                guard let count = UInt64(exactly: sqlite3_column_int64(stmt, 0)) else { throw GatewayAuthorityError.corruptData }
                 return count
             }
             guard value == count else { throw GatewayAuthorityError.corruptData }
             if value > 0 {
                 let submission = try AuthorityJournalSchema.featureTier(on: db) >= 16 ? " UNION ALL SELECT operation,revision FROM main.gateway_submission_outbox_v1" : ""
                 try statement("SELECT operation,revision FROM main.gateway_outbox_v1 UNION ALL SELECT operation,revision FROM main.gateway_revocations_v1 UNION ALL SELECT operation,revision FROM main.gateway_reconciled_controls_v1" + submission + " ORDER BY revision DESC LIMIT 1", []) { stmt in
-                    guard sqlite3_step(stmt) == SQLITE_ROW, let latest = try envelope(blob(stmt, 0, maximum: 16), identity: identity),
+                    try JournalDatabaseError.requireRow(step(stmt), on: db, missing: GatewayAuthorityError.corruptData)
+                    guard let latest = try envelope(blob(stmt, 0, maximum: 16), identity: identity),
                           latest.revision == value else { throw GatewayAuthorityError.corruptData }
                 }
             }
@@ -582,7 +587,7 @@ final class GatewayAuthorityJournal {
     private func abandonedGrant(_ operation: Data, registration: GatewayRegistrationIdentity) throws -> AbandonedGrant? {
         guard try abandonmentHistoryInstalled() else { return nil }
         return try statement("SELECT revision,kind,digest,signature,resolution FROM main.gateway_abandoned_grants_v1 WHERE operation=?", [operation]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
             guard result == SQLITE_ROW, let kind = GatewayControlTombstone.GrantKind(rawValue: try unsigned(blob($0, 1, maximum: 8))) else {
                 throw GatewayAuthorityError.corruptData
@@ -602,9 +607,9 @@ final class GatewayAuthorityJournal {
 
     private func grant(at revision: UInt64, registration: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
         let operation = try statement("SELECT operation FROM main.gateway_outbox_v1 WHERE revision=?", [uint(revision)]) { row -> Data? in
-            let result = sqlite3_step(row)
+            let result = step(row)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             return try blob(row, 0, maximum: 16)
         }
         guard let operation else { return nil }
@@ -661,7 +666,7 @@ final class GatewayAuthorityJournal {
                         (length(first_unconfirmed_ms)=8 AND signature IS NOT NULL))
                 ) STRICT, WITHOUT ROWID;
                 """, nil, nil, nil)
-            guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_OK else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             try AuthorityJournalSchema.setFeatureTier(18, on: db)
         }
         try statement("INSERT INTO main.gateway_abandoned_grants_v1 VALUES(?,?,?,?,NULL,0,NULL)",
@@ -705,9 +710,9 @@ final class GatewayAuthorityJournal {
         var arguments = [uint(revision)]
         if !submission.isEmpty { arguments.append(uint(revision)) }
         return try statement("SELECT operation,revision FROM main.gateway_revocations_v1 WHERE revision>?" + submission + " ORDER BY revision LIMIT 1", arguments) { row in
-            let result = sqlite3_step(row)
+            let result = step(row)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let next = try unsigned(blob(row, 1, maximum: 8))
             guard let retained = try envelope(blob(row, 0, maximum: 16), identity: identity), retained.revision == next,
                   retained.kind == 3 || GatewaySubmissionKind(rawValue: retained.kind) != nil else { throw GatewayAuthorityError.corruptData }
@@ -758,8 +763,8 @@ final class GatewayAuthorityJournal {
             SELECT c.operation FROM main.gateway_desired_tokens_v1 d
             JOIN main.gateway_root_candidates_v1 c ON d.candidate=c.candidate WHERE d.phone=?
             """, [trust.enrollment.phoneID]) {
-            guard sqlite3_step($0) == SQLITE_ROW,
-                  let entry = try envelope(blob($0, 0, maximum: 16), identity: trust.registration), entry.kind == 1,
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: GatewayAuthorityError.unconfigured)
+            guard let entry = try envelope(blob($0, 0, maximum: 16), identity: trust.registration), entry.kind == 1,
                   let token = entry.registrationToken else { throw GatewayAuthorityError.unconfigured }
             let candidate = try storedCandidate(entry.canonicalPayload)
             guard candidate.binding.phoneID == trust.enrollment.phoneID, candidate.binding.enrollmentEpoch == trust.enrollment.epoch,
@@ -803,7 +808,7 @@ final class GatewayAuthorityJournal {
         try clock(now); _ = try head(trust.registration)
         guard let envelope = try envelope(operationID, identity: trust.registration) else { return nil }
         let recovered = try statement("SELECT count(*) FROM main.gateway_reconciled_controls_v1 WHERE operation=?", [operationID]) {
-            guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: GatewayAuthorityError.corruptData)
             return sqlite3_column_int64($0, 0) != 0
         }
         if try recovered || abandonedGrant(operationID, registration: trust.registration)?.isRetired == true { return nil }
@@ -873,9 +878,9 @@ final class GatewayAuthorityJournal {
     func localRevocation(at revision: UInt64, registration: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
         guard revision <= (try head(registration)) else { throw GatewayAuthorityError.headMismatch }
         let operation = try statement("SELECT operation FROM main.gateway_revocations_v1 WHERE revision=?", [uint(revision)]) { row -> Data? in
-            let result = sqlite3_step(row)
+            let result = step(row)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             return try blob(row, 0, maximum: 16)
         }
         guard let operation else { return nil }
@@ -899,7 +904,7 @@ final class GatewayAuthorityJournal {
     private func latestRevocation(phone: Data, epoch: Data, identity: GatewayRegistrationIdentity) throws -> Revocation? {
         try statement("SELECT operation FROM main.gateway_revocations_v1 WHERE phone=? AND enrollment=? ORDER BY revision DESC LIMIT 1",
             [phone, epoch]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
             guard result == SQLITE_ROW, let entry = try revocation(blob($0, 0, maximum: 16), identity: identity),
                   entry.value.binding.phoneID == phone,
@@ -910,9 +915,9 @@ final class GatewayAuthorityJournal {
     private func revocation(_ operation: Data, identity: GatewayRegistrationIdentity) throws -> Revocation? {
         guard operation.count == 16 else { throw GatewayAuthorityError.wrongScope }
         return try statement("SELECT revision,phone,enrollment,payload,signature,run,started,deadline FROM main.gateway_revocations_v1 WHERE operation=?", [operation]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let payload = try blob($0, 3, maximum: policy.payloadLimits.maxBytes), signature = try blob($0, 4, maximum: 64)
             let value: GatewayPhoneRevocation
             do { value = try GatewayPhoneRevocation.decode(payload, limits: policy.payloadLimits) }
@@ -937,7 +942,7 @@ final class GatewayAuthorityJournal {
             SELECT c.phone,c.enrollment,c.operation,c.run,c.started,c.deadline,c.consumed,d.candidate
             FROM main.gateway_root_candidates_v1 c LEFT JOIN main.gateway_desired_tokens_v1 d ON c.phone=d.phone WHERE c.candidate=?
             """, [id]) {
-            guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayAuthorityError.wrongScope }
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: GatewayAuthorityError.wrongScope)
             guard try blob($0, 0, maximum: 16) == trust.enrollment.phoneID,
                   try blob($0, 1, maximum: 16) == trust.enrollment.epoch else { throw GatewayAuthorityError.wrongScope }
             guard try blob($0, 7, maximum: 16) == id else { throw GatewayAuthorityError.superseded }
@@ -960,10 +965,15 @@ final class GatewayAuthorityJournal {
             if !allowExpired && !liveWall { throw GatewayAuthorityError.expired }
             let consumed = sqlite3_column_type($0, 6) == SQLITE_NULL ? nil : try blob($0, 6, maximum: 16)
             let activation = try statement("SELECT operation FROM main.gateway_outbox_v1 WHERE candidate=? AND kind=2", [id]) { stmt -> GatewayAuthorityEnvelope? in
-                let result = sqlite3_step(stmt)
+                let result = step(stmt)
                 if result == SQLITE_DONE { return nil }
-                guard result == SQLITE_ROW, let entry = try envelope(blob(stmt, 0, maximum: 16), identity: trust.registration),
-                      sqlite3_step(stmt) == SQLITE_DONE else { throw GatewayAuthorityError.corruptData }
+                guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
+                guard let entry = try envelope(blob(stmt, 0, maximum: 16), identity: trust.registration) else {
+                    throw GatewayAuthorityError.corruptData
+                }
+                let trailing = step(stmt)
+                if trailing == SQLITE_ROW { throw GatewayAuthorityError.corruptData }
+                guard trailing == SQLITE_DONE else { throw JournalDatabaseError.sqliteFailure(trailing, on: db) }
                 let activation = try storedActivation(entry.canonicalPayload)
                 guard activation.binding == value.binding, activation.revision > value.revision,
                       activation.expiresAtUnixMillis == value.expiresAtUnixMillis else { throw GatewayAuthorityError.corruptData }
@@ -993,9 +1003,9 @@ final class GatewayAuthorityJournal {
             JOIN main.gateway_outbox_v1 o ON o.operation=c.operation
             WHERE d.phone=? ORDER BY o.revision DESC LIMIT 1
             """, [phone]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let desired = try blob($0, 0, maximum: 16)
             guard desired.count == 16, try blob($0, 1, maximum: 16) == desired else { throw GatewayAuthorityError.corruptData }
             return desired
@@ -1007,9 +1017,9 @@ final class GatewayAuthorityJournal {
         if let submission = try submissionEntry(operation, identity: identity) { return submission.envelope }
         if let revoked = try revocation(operation, identity: identity) { return revoked.envelope }
         return try statement("SELECT revision,kind,candidate,payload,signature,token,0 FROM main.gateway_outbox_v1 WHERE operation=? UNION ALL SELECT revision,kind,candidate,payload,signature,NULL,1 FROM main.gateway_reconciled_controls_v1 WHERE operation=?", [operation, operation]) {
-            let result = sqlite3_step($0)
+            let result = step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
             let revision = try unsigned(blob($0, 0, maximum: 8))
             guard sqlite3_column_type($0, 1) == SQLITE_INTEGER, let kind = UInt64(exactly: sqlite3_column_int64($0, 1)) else { throw GatewayAuthorityError.corruptData }
             let payload = try blob($0, 3, maximum: policy.payloadLimits.maxBytes), signature = try blob($0, 4, maximum: 64)
@@ -1072,10 +1082,11 @@ final class GatewayAuthorityJournal {
 
     private func hasRetainedEnrollment(phone: Data, epoch: Data) throws -> Bool {
         try statement("SELECT 1 FROM main.approval_enrollments_v1 WHERE phone=? AND epoch=?", [phone, epoch]) {
-            switch sqlite3_step($0) {
+            let result = step($0)
+            switch result {
             case SQLITE_ROW: return true
             case SQLITE_DONE: return false
-            default: throw GatewayAuthorityError.corruptData
+            default: throw JournalDatabaseError.sqliteFailure(result, on: db)
             }
         }
     }
@@ -1105,8 +1116,8 @@ final class GatewayAuthorityJournal {
             maximum = 1024
         }
         let count = try statement(query, []) {
-            guard sqlite3_step($0) == SQLITE_ROW,
-                  let count = Int(exactly: sqlite3_column_int64($0, 0)), count >= 0 else {
+            try JournalDatabaseError.requireRow(step($0), on: db, missing: GatewayAuthorityError.corruptData)
+            guard let count = Int(exactly: sqlite3_column_int64($0, 0)), count >= 0 else {
                 throw GatewayAuthorityError.corruptData
             }
             return count
@@ -1134,7 +1145,7 @@ final class GatewayAuthorityJournal {
                     deadline BLOB NOT NULL CHECK(length(deadline)=8)
                 ) STRICT, WITHOUT ROWID;
                 """, nil, nil, nil)
-        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+        guard result == SQLITE_OK else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
     }
 
     /// Protected setup only. The host must commit the new authority digest to its continuity boundary before activation.
@@ -1149,7 +1160,9 @@ final class GatewayAuthorityJournal {
             try AuthorityJournalSchema.setFeatureTier(16, on: db)
         }
         try statement("SELECT operation,revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 LIMIT 0", []) {
-            guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayAuthorityError.corruptData }
+            let result = step($0)
+            if result == SQLITE_ROW { throw GatewayAuthorityError.corruptData }
+            guard result == SQLITE_DONE else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
         }
     }
 
@@ -1261,9 +1274,9 @@ final class GatewayAuthorityJournal {
     private func submissionEntry(_ operation: Data, identity: GatewayRegistrationIdentity) throws -> SubmissionEntry? {
         guard try AuthorityJournalSchema.featureTier(on: db) >= 16 else { return nil }
         return try statement("SELECT revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 WHERE operation=?", [operation]) { row in
-            let rc = sqlite3_step(row)
+            let rc = step(row)
             if rc == SQLITE_DONE { return nil }
-            guard rc == SQLITE_ROW else { throw JournalDatabaseError.storage(rc) }
+            guard rc == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(rc, on: db) }
             let payload = try blob(row, 3, maximum: policy.payloadLimits.maxBytes), signature = try blob(row, 4, maximum: 64)
             let value: GatewaySubmissionControl
             do {
@@ -1287,9 +1300,9 @@ final class GatewayAuthorityJournal {
         let operations: [Data] = try statement("SELECT operation FROM main.gateway_submission_outbox_v1 ORDER BY revision", []) { row in
             var result: [Data] = []
             while true {
-                let rc = sqlite3_step(row)
+                let rc = step(row)
                 if rc == SQLITE_DONE { return result }
-                guard rc == SQLITE_ROW else { throw JournalDatabaseError.storage(rc) }
+                guard rc == SQLITE_ROW else { throw JournalDatabaseError.sqliteFailure(rc, on: db) }
                 guard result.count < policy.maximumControls else { throw GatewayAuthorityError.capacityExceeded }
                 result.append(try blob(row, 0, maximum: 16))
             }
@@ -1331,17 +1344,20 @@ final class GatewayAuthorityJournal {
     private func statement<T>(_ sql: String, _ values: [Data?], _ body: (OpaquePointer) throws -> T) throws -> T {
         var stmt: OpaquePointer?
         let result = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
-        guard result == SQLITE_OK, let stmt else { throw JournalDatabaseError.storage(result) }
+        guard result == SQLITE_OK, let stmt else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
         defer { sqlite3_finalize(stmt) }
         for (index, value) in values.enumerated() {
             let result: Int32
             if let value { result = value.withUnsafeBytes { sqlite3_bind_blob(stmt, Int32(index + 1), $0.baseAddress, Int32($0.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) } }
             else { result = sqlite3_bind_null(stmt, Int32(index + 1)) }
-            guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+            guard result == SQLITE_OK else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
         }
         return try body(stmt)
     }
-    private func done(_ stmt: OpaquePointer) throws { guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) } }
+    private func done(_ stmt: OpaquePointer) throws {
+        let result = step(stmt)
+        guard result == SQLITE_DONE else { throw JournalDatabaseError.sqliteFailure(result, on: db) }
+    }
     private func blob(_ stmt: OpaquePointer, _ index: Int32, maximum: Int) throws -> Data {
         let count = Int(sqlite3_column_bytes(stmt, index))
         guard sqlite3_column_type(stmt, index) == SQLITE_BLOB, count > 0, count <= maximum,
